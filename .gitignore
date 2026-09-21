@@ -1,0 +1,29 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+demo/out/
+
+# Dashboard runtime data: API token (settings.json), SQLite DB + WAL/SHM files,
+# audit log and review reports. Ignore everything in the folder except the
+# placeholder that keeps the directory in a fresh clone.
+dashboard/data/*
+!dashboard/data/.gitkeep
+dashboard/data/reports/
+
+# Local databases and logs, wherever they appear
+*.db
+*.db-shm
+*.db-wal
+*.jsonl
+
+# Default CLI/Action report output. `--output` defaults to review-report.json
+# at the repo root, so ignore it there and any review-report-*.json variant.
+# For local test runs, prefer `--output demo/out/report.json` (already
+# ignored above) so ad-hoc reports never land at the repo root at all.
+/review-report.json
+/review-report-*.json
+
+# Secrets / environment
+.env
+.env.*
+!.env.example

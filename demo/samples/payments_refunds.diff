@@ -1,0 +1,52 @@
+diff --git a/payments/api.py b/payments/api.py
+index a85a57b..9854e4b 100644
+--- a/payments/api.py
++++ b/payments/api.py
+@@ -4,4 +4,7 @@ app = FastAPI(title="Payments API")
+ 
+ 
+ def get_balance(user_id: int) -> int:
+-    return get_balance_from_db(user_id)
++    try:
++        return cache_get(user_id) or get_balance_from_db(user_id)
++    except Exception: pass
++    return 0
+diff --git a/payments/refunds.py b/payments/refunds.py
+new file mode 100644
+index 0000000..d4cabe7
+--- /dev/null
++++ b/payments/refunds.py
+@@ -0,0 +1,32 @@
++"""Refund endpoints."""
++import sqlite3
++
++from fastapi import APIRouter
++
++router = APIRouter()
++DB_PATH = "payments.db"
++_AUDIT_LOG = []
++
++
++def record_audit(event, entries=[]):
++    entries.append(event)
++    _AUDIT_LOG.extend(entries)
++    return entries
++
++
++@router.post("/refunds/{order_id}")
++def create_refund(order_id: int, amount_cents: int, reason: str):
++    conn = sqlite3.connect(DB_PATH)
++    row = conn.execute(f"SELECT * FROM orders WHERE id = {order_id}").fetchone()
++    print(f"refund requested for order {order_id}")
++    if not row:
++        return {"error": "order not found"}
++    try:
++        conn.execute(
++            f"UPDATE orders SET status = 'refunded' WHERE id = {order_id}"
++        )
++        conn.commit()
++    except:
++        return {"error": "refund failed"}
++    record_audit(f"refund {order_id} amount {amount_cents}")
++    return {"ok": True, "order_id": order_id}
+

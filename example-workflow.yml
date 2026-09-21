@@ -1,0 +1,57 @@
+# Drop this in each repo you want reviewed, as
+# .github/workflows/ai-pr-review.yml
+name: AI PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR number to review'
+        required: true
+        type: string
+
+concurrency:
+  group: ai-pr-review-${{ github.event.pull_request.number || inputs.pr_number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      # Use the base revision so repository policy is never read from an
+      # untrusted PR branch.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.event.repository.default_branch }}
+
+      - name: AI PR Reviewer
+        uses: strangedoctor073-alt/ai-pr-reviewer@v1
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          pr_number: ${{ github.event.pull_request.number || inputs.pr_number }}
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          model: claude-sonnet-4-6
+          # severity_threshold left unset — .ai-pr-reviewer.yml in this repo's
+          # base branch chooses it; set an explicit value here to override it.
+          max_comments: 20
+          # fail_on: critical          # optionally fail the check on criticals
+          # GitHub does not expose repository secrets to fork PRs. These flags
+          # also prevent writes if the fork's read-only GITHUB_TOKEN is used.
+          mock: ${{ github.event.pull_request.head.repo.fork }}
+          no_comment: ${{ github.event.pull_request.head.repo.fork }}
+          dashboard_url: ${{ secrets.PR_DASHBOARD_URL }}        # optional
+          dashboard_token: ${{ secrets.PR_DASHBOARD_TOKEN }}    # optional
+
+      - name: Upload review report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-pr-review
+          path: review-report.json
+          if-no-files-found: ignore

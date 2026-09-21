@@ -1,0 +1,16 @@
+diff --git a/deploy.sh b/deploy.sh
+index fec44d8..7737245 100644
+--- a/deploy.sh
++++ b/deploy.sh
+@@ -2,6 +2,11 @@
+ set -euo pipefail
+ 
+ APP_DIR=/srv/app
++API_KEY=sk-live-4Kd93jsl2mZz8QpwLx1T
+ 
+ echo "Deploying to $APP_DIR"
++curl -s -H "Authorization: Bearer $API_KEY" https://ci.internal/api/deploy
++
++rm -rf $BUILD_DIR/tmp
++chmod -R 777 "$APP_DIR"
+ mkdir -p "$APP_DIR"

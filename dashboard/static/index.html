@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI PR Reviewer — Dashboard</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%23100e17'/%3E%3Cpath d='M6 5v14M6 9h4a3 3 0 0 1 0 6H6' stroke='%237be0c9' stroke-width='2' fill='none' stroke-linecap='round'/%3E%3Ccircle cx='17' cy='7' r='2' fill='%237be0c9'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="shell">
+  <aside class="rail">
+    <div class="rail-brand">
+      <span class="mark">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
+          <rect x="0.5" y="0.5" width="23" height="23" rx="5.5" stroke="currentColor" stroke-opacity="0.35"/>
+          <path d="M7 5v14M7 9h4a3 3 0 0 1 0 6H7" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/>
+          <circle cx="17.2" cy="7" r="1.8" fill="currentColor"/>
+        </svg>
+      </span>
+      <span>
+        <span class="name">AI PR Reviewer</span>
+        <span class="sub">dashboard</span>
+      </span>
+    </div>
+
+    <nav id="nav">
+      <a href="#/" data-nav="reviews">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
+        Reviews
+      </a>
+      <a href="#/findings" data-nav="findings">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+        Findings
+      </a>
+      <a href="#/metrics" data-nav="metrics">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 20V10M12 20V4M20 20v-7"/></svg>
+        Metrics
+      </a>
+      <a href="#/settings" data-nav="settings">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.55V21a2 2 0 1 1-4 0v-.09A1.7 1.7 0 0 0 9 19.4a1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.55-1H3a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.6 9a1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.55V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.55 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.4 9a1.7 1.7 0 0 0 1.55 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.55 1z"/></svg>
+        Rules &amp; Settings
+      </a>
+    </nav>
+
+    <div class="rail-foot" id="dataModeFoot">
+      <span class="dot dot-live"></span>live&nbsp;&nbsp;<span class="dot dot-mock"></span>v2 preview
+    </div>
+  </aside>
+
+  <div class="content-area">
+    <header class="topbar">
+      <div>
+        <h1 id="pageTitle">Reviews</h1>
+        <div class="lede" id="pageLede">Every PR your Action has reviewed, newest first.</div>
+      </div>
+      <div class="topbar-actions" id="pageActions"></div>
+    </header>
+    <main id="app" aria-live="polite">
+      <div class="loading"><div class="spinner"></div><p>Loading…</p></div>
+    </main>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,87 @@
+name: 'AI PR Reviewer'
+description: >-
+  Automatically review pull requests with Claude and flag potential bugs as
+  inline review comments. Pushes a structured report to your dashboard.
+author: 'strangedoctor073-alt'
+branding:
+  icon: 'eye'
+  color: 'purple'
+
+inputs:
+  github_token:
+    description: 'GitHub token with pull-requests:write for the target repo.'
+    required: true
+  pr_number:
+    description: 'Pull request number. Defaults to the pull_request event number.'
+    required: false
+    default: ''
+  anthropic_api_key:
+    description: 'Anthropic API key. Omit (and set mock:true) to use the free rule engine.'
+    required: false
+  model:
+    description: 'Claude model id used for review.'
+    required: false
+    default: 'claude-sonnet-4-6'
+  severity_threshold:
+    description: 'Minimum severity to annotate inline: info | low | medium | high | critical. Defaults to medium unless .ai-pr-reviewer.yml sets it.'
+    required: false
+    default: ''
+  max_comments:
+    description: 'Maximum inline comments per PR. Extra findings go in the summary.'
+    required: false
+    default: '20'
+  batch_chars:
+    description: 'Maximum diff characters per Claude batch.'
+    required: false
+    default: '80000'
+  review_mode:
+    description: 'Response budget: economy | balanced | maximum | automatic. Project policy applies when automatic.'
+    required: false
+    default: 'automatic'
+  exclude:
+    description: 'Newline-separated glob patterns to skip (e.g. **/*.lock).'
+    required: false
+    default: ''
+  focus:
+    description: 'Newline-separated focus hints for the reviewer prompt.'
+    required: false
+    default: ''
+  fail_on:
+    description: 'Fail the check when findings at/above this severity exist: never | info | low | medium | high | critical.'
+    required: false
+    default: 'never'
+  mock:
+    description: 'Use the deterministic static-analysis fallback (rule engine, NOT AI) instead of Claude. No API key needed.'
+    required: false
+    default: 'false'
+  no_comment:
+    description: 'Do not post to GitHub — only produce the report artifact / dashboard push.'
+    required: false
+    default: 'false'
+  dashboard_url:
+    description: 'Base URL of your AI PR Reviewer dashboard (optional).'
+    required: false
+    default: ''
+  dashboard_token:
+    description: 'Dashboard API token (X-Dashboard-Token).'
+    required: false
+    default: ''
+  output:
+    description: 'Path where review-report.json is written.'
+    required: false
+    default: 'review-report.json'
+
+outputs:
+  findings_count:
+    description: 'Number of findings at/above the severity threshold.'
+  critical_count:
+    description: 'Number of critical findings.'
+  report_path:
+    description: 'Path of the written review-report.json.'
+
+runs:
+  using: 'docker'
+  image: 'Dockerfile'
+  env:
+    ANTHROPIC_API_KEY: ${{ inputs.anthropic_api_key }}
+    DASHBOARD_TOKEN: ${{ inputs.dashboard_token }}

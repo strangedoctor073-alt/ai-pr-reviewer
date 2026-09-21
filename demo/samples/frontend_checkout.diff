@@ -1,0 +1,30 @@
+diff --git a/src/checkout.js b/src/checkout.js
+index 98eae01..289bc22 100644
+--- a/src/checkout.js
++++ b/src/checkout.js
+@@ -2,5 +2,25 @@ import { api } from './api';
+ 
+ export async function payNow(order) {
+   const res = await api.post('/pay', { orderId: order.id });
++  if (res.status == 'paid') {
++    renderReceipt(order);
++  }
+   return res.ok;
+ }
++
++export function renderReceipt(order) {
++  const el = document.getElementById('receipt');
++  el.innerHTML = `<h2>Thanks, ${order.customerName}!</h2>`;
++}
++
++export async function savePaymentMethod(token) {
++  var retries = 3;
++  localStorage.setItem('authToken', token);
++  console.log('saving payment method', token);
++  while (retries > 0) {
++    const res = await api.post('/payment-methods', { token });
++    if (res.ok) return true;
++    retries--;
++  }
++  return false;
++}
