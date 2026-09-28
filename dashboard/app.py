@@ -26,13 +26,14 @@ from __future__ import annotations
 import datetime as _dt
 import hmac
 import json
+import logging
 import os
 import re
 import secrets
 import threading
 import time
 import uuid
-from collections import Counter, defaultdict, deque
+from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -137,6 +138,10 @@ def save_settings(new: dict) -> dict:
 def _atomic_write_json(path: Path, obj: dict) -> None:
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(obj, indent=2), encoding="utf-8")
+    try:
+        os.chmod(tmp, 0o600)   # settings.json holds the API token
+    except OSError:
+        pass                   # e.g. Windows: best effort
     os.replace(tmp, path)
 
 
@@ -537,4 +542,146 @@ async def post_repo_memory_endpoint(repo_owner: str, repo_name: str, request: Re
     get_storage().add_repo_memory(repo, pat, note)
     _audit(request, "add_repo_memory", f"{repo}:{pat}", 200)
     return {"ok": True}
+
+
+@app.get("/api/findings")
+async def get_findings(
+    request: Request,
+    state: str = "",
+    severity: str = "",
+    repo: str = "",
+    limit: int = 100,
+    offset: int = 0,
+):
+    _check_reads(request)
+    findings = get_storage().list_findings(
+        state=state, severity=severity, repo=repo,
+        limit=min(limit, 500), offset=offset
+    )
+    return JSONResponse(findings)
+
+
+@app.get("/api/metrics")
+async def get_metrics(request: Request):
+    _check_reads(request)
+    return JSONResponse(get_storage().metrics())
+
+
+@app.post("/api/findings/{fingerprint}/feedback")
+async def post_feedback(request: Request, fingerprint: str):
+    _check_token(request)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "body must be JSON")
+    
+    kind = str(body.get("kind", "")).lower()
+    if kind not in ("up", "down", "mute"):
+        raise HTTPException(400, "kind must be 'up', 'down', or 'mute'")
+    repo = str(body.get("repo", ""))
+    note = str(body.get("note", ""))
+    result = get_storage().record_feedback(fingerprint, kind, repo, note)
+    _audit(request, "feedback", f"{fingerprint}:{kind}", 200)
+    return JSONResponse({"ok": True, **result})
+
+
+@app.get("/api/badge/{repo_owner}/{repo_name}")
+async def get_badge(repo_owner: str, repo_name: str):
+    """Public endpoint: returns a dynamic SVG badge for README embedding."""
+    repo = f"{repo_owner}/{repo_name}"
+    stats = get_storage().get_repo_badge_stats(repo)
+    score = stats["avg_health_score"]
+    grade = stats["grade"]
+    reviews = stats["reviews"]
+    
+    if score >= 90:
+        color = "4CAF50"  # green
+        label_color = "2E7D32"
+    elif score >= 70:
+        color = "FF9800"  # amber
+        label_color = "E65100"
+    else:
+        color = "F44336"  # red
+        label_color = "B71C1C"
+    
+    if reviews == 0:
+        right_text = "not reviewed"
+        color = "9E9E9E"
+    else:
+        right_text = f"{score}% health ({grade})"
+    
+    right_w = max(len(right_text) * 6 + 20, 100)
+    total_w = 98 + right_w
+    
+    svg = f'''<svg xmlns="http://www.w3.org/2000/svg" width="{total_w}" height="20">
+  <linearGradient id="s" x2="0" y2="100%">
+    <stop offset="0" stop-color="#bbb" stop-opacity=".1"/>
+    <stop offset="1" stop-opacity=".1"/>
+  </linearGradient>
+  <clipPath id="r"><rect width="{total_w}" height="20" rx="3" fill="#fff"/></clipPath>
+  <g clip-path="url(#r)">
+    <rect width="98" height="20" fill="#555"/>
+    <rect x="98" width="{right_w}" height="20" fill="#{color}"/>
+    <rect width="{total_w}" height="20" fill="url(#s)"/>
+  </g>
+  <g fill="#fff" text-anchor="middle" font-family="DejaVu Sans,Verdana,Geneva,sans-serif" font-size="11">
+    <text x="49" y="15" fill="#010101" fill-opacity=".3">AI PR Reviewer</text>
+    <text x="49" y="14">AI PR Reviewer</text>
+    <text x="{98 + right_w // 2}" y="15" fill="#010101" fill-opacity=".3">{right_text}</text>
+    <text x="{98 + right_w // 2}" y="14">{right_text}</text>
+  </g>
+</svg>'''
+    
+    from fastapi.responses import Response
+    return Response(
+        content=svg,
+        media_type="image/svg+xml",
+        headers={
+            "Cache-Control": "no-cache, max-age=0",
+            "ETag": '"' + __import__("hashlib").sha1(svg.encode()).hexdigest()[:16] + '"',
+        }
+    )
+
+
+@app.post("/api/sandbox/simulate")
+async def sandbox_simulate(request: Request):
+    """Run the static analyzer on a raw diff for instant live demo."""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "body must be JSON")
+    
+    diff_text = str(body.get("diff", "")).strip()
+    if not diff_text:
+        raise HTTPException(400, "diff is required")
+    if len(diff_text) > 50_000:
+        raise HTTPException(413, "diff too large (max 50,000 chars)")
+    
+    import sys
+    import os
+    parent = str(Path(__file__).resolve().parent.parent)
+    if parent not in sys.path:
+        sys.path.insert(0, parent)
+    
+    from ai_pr_reviewer.diff_parser import parse_unified_diff
+    from ai_pr_reviewer.analyzer import StaticAnalyzer
+    from ai_pr_reviewer.models import calculate_health_score
+    
+    try:
+        files = parse_unified_diff(diff_text)
+        analyzer = StaticAnalyzer()
+        outcome = analyzer.analyze(files)
+        score, grade = calculate_health_score(outcome.findings)
+        findings_dicts = [f.to_dict() for f in outcome.findings[:50]]
+        return JSONResponse({
+            "health_score": score,
+            "health_grade": grade,
+            "summary": outcome.summary or "Static analysis complete.",
+            "findings": findings_dicts,
+            "engine": "static-rules-v1",
+            "files_reviewed": len(files),
+        })
+    except Exception as exc:
+        logging.getLogger("dashboard").exception("sandbox simulation failed")
+        raise HTTPException(500, "Simulation failed (see server log)")
 

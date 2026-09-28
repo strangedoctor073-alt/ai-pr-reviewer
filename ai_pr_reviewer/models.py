@@ -14,6 +14,33 @@ SEVERITY_EMOJI = {
     "info": "\u26aa",          # white circle
 }
 
+def calculate_health_score(findings: list) -> tuple[int, str]:
+    """Compute a deterministic PR Health Score (0-100) and letter grade.
+    
+    Deductions per finding (not cumulative past 0):
+      critical: 35, high: 20, medium: 8, low: 2, info: 0
+    Only open findings (not resolved/dismissed/muted) count.
+    """
+    CLOSED = {"resolved", "dismissed", "muted"}
+    deductions = {"critical": 35, "high": 20, "medium": 8, "low": 2, "info": 0}
+    score = 100
+    for f in findings:
+        state = str(getattr(f, "state", "new") or "new").lower()
+        if state not in CLOSED:
+            score -= deductions.get(getattr(f, "severity", "medium"), 0)
+    score = max(0, min(100, score))
+    if score >= 90:
+        grade = "A+"
+    elif score >= 80:
+        grade = "A"
+    elif score >= 70:
+        grade = "B"
+    elif score >= 55:
+        grade = "C"
+    else:
+        grade = "D"
+    return score, grade
+
 VALID_CATEGORIES = {
     "bug", "security", "logic", "error-handling", "performance",
     "race-condition", "resource-leak", "style", "maintainability", "testing",
@@ -203,6 +230,8 @@ class ReviewResult:
     posted_inline: int = 0
     suppressed: int = 0               # findings below threshold / over comment cap
     warnings: list[str] = field(default_factory=list)
+    health_score: int = 100
+    health_grade: str = "A+"
 
     def count_by_severity(self) -> dict[str, int]:
         out = {s: 0 for s in SEVERITY_ORDER}
@@ -232,6 +261,8 @@ class ReviewResult:
             "posted_inline": self.posted_inline,
             "suppressed": self.suppressed,
             "warnings": self.warnings,
+            "health_score": self.health_score,
+            "health_grade": self.health_grade,
         }
 
 

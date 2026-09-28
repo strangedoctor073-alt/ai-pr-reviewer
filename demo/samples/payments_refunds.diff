@@ -49,4 +49,3 @@ index 0000000..d4cabe7
 +        return {"error": "refund failed"}
 +    record_audit(f"refund {order_id} amount {amount_cents}")
 +    return {"ok": True, "order_id": order_id}
-

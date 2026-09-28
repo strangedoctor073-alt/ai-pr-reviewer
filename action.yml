@@ -1,7 +1,8 @@
 name: 'AI PR Reviewer'
 description: >-
-  Automatically review pull requests with Claude and flag potential bugs as
-  inline review comments. Pushes a structured report to your dashboard.
+  Automatically review pull requests with Claude, OpenAI, Gemini, or a free
+  static-analysis fallback. Flags real bugs as inline review comments and
+  pushes a structured report to your dashboard.
 author: 'strangedoctor073-alt'
 branding:
   icon: 'eye'
@@ -16,14 +17,27 @@ inputs:
     required: false
     default: ''
   anthropic_api_key:
-    description: 'Anthropic API key. Omit (and set mock:true) to use the free rule engine.'
+    description: 'Anthropic API key for Claude models. Omit to use OpenAI, Gemini, or the free static engine.'
     required: false
+    default: ''
+  openai_api_key:
+    description: 'OpenAI API key. Requires the `model` input.'
+    required: false
+    default: ''
+  gemini_api_key:
+    description: 'Google Gemini API key. Requires the `model` input.'
+    required: false
+    default: ''
+  openai_base_url:
+    description: 'Custom OpenAI-compatible base URL (e.g. Ollama, Groq, DeepSeek). Requires the `model` input; the API key may be omitted for local endpoints.'
+    required: false
+    default: ''
   model:
-    description: 'Claude model id used for review.'
+    description: 'Model ID. Optional for Claude (defaults to claude-sonnet-4-6). REQUIRED for OpenAI, Gemini and custom endpoints: use a model your account can currently call (providers retire model IDs regularly).'
     required: false
-    default: 'claude-sonnet-4-6'
+    default: ''
   severity_threshold:
-    description: 'Minimum severity to annotate inline: info | low | medium | high | critical. Defaults to medium unless .ai-pr-reviewer.yml sets it.'
+    description: 'Minimum severity to annotate inline: info | low | medium | high | critical.'
     required: false
     default: ''
   max_comments:
@@ -31,11 +45,11 @@ inputs:
     required: false
     default: '20'
   batch_chars:
-    description: 'Maximum diff characters per Claude batch.'
+    description: 'Maximum diff characters per review batch.'
     required: false
     default: '80000'
   review_mode:
-    description: 'Response budget: economy | balanced | maximum | automatic. Project policy applies when automatic.'
+    description: 'Response budget: economy | balanced | maximum | automatic.'
     required: false
     default: 'automatic'
   exclude:
@@ -51,7 +65,7 @@ inputs:
     required: false
     default: 'never'
   mock:
-    description: 'Use the deterministic static-analysis fallback (rule engine, NOT AI) instead of Claude. No API key needed.'
+    description: 'Use the deterministic static-analysis fallback (NOT AI) instead of any LLM. No API key needed.'
     required: false
     default: 'false'
   no_comment:
@@ -74,14 +88,54 @@ inputs:
 outputs:
   findings_count:
     description: 'Number of findings at/above the severity threshold.'
+    value: ${{ steps.review.outputs.findings_count }}
   critical_count:
     description: 'Number of critical findings.'
+    value: ${{ steps.review.outputs.critical_count }}
   report_path:
     description: 'Path of the written review-report.json.'
+    value: ${{ steps.review.outputs.report_path }}
+  health_score:
+    description: 'PR Health Score (0-100).'
+    value: ${{ steps.review.outputs.health_score }}
+  health_grade:
+    description: 'PR Health Grade (A+, A, B, C, D).'
+    value: ${{ steps.review.outputs.health_grade }}
 
 runs:
-  using: 'docker'
-  image: 'Dockerfile'
-  env:
-    ANTHROPIC_API_KEY: ${{ inputs.anthropic_api_key }}
-    DASHBOARD_TOKEN: ${{ inputs.dashboard_token }}
+  using: 'composite'
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+
+    - name: Install dependencies
+      shell: bash
+      run: pip install -r "${{ github.action_path }}/requirements-action.txt"
+
+    - name: Run AI PR Reviewer
+      id: review
+      shell: bash
+      env:
+        PYTHONPATH: ${{ github.action_path }}
+        INPUT_GITHUB_TOKEN: ${{ inputs.github_token }}
+        INPUT_PR_NUMBER: ${{ inputs.pr_number }}
+        INPUT_ANTHROPIC_API_KEY: ${{ inputs.anthropic_api_key }}
+        INPUT_OPENAI_API_KEY: ${{ inputs.openai_api_key }}
+        INPUT_GEMINI_API_KEY: ${{ inputs.gemini_api_key }}
+        INPUT_OPENAI_BASE_URL: ${{ inputs.openai_base_url }}
+        INPUT_MODEL: ${{ inputs.model }}
+        INPUT_SEVERITY_THRESHOLD: ${{ inputs.severity_threshold }}
+        INPUT_MAX_COMMENTS: ${{ inputs.max_comments }}
+        INPUT_BATCH_CHARS: ${{ inputs.batch_chars }}
+        INPUT_REVIEW_MODE: ${{ inputs.review_mode }}
+        INPUT_EXCLUDE: ${{ inputs.exclude }}
+        INPUT_FOCUS: ${{ inputs.focus }}
+        INPUT_FAIL_ON: ${{ inputs.fail_on }}
+        INPUT_MOCK: ${{ inputs.mock }}
+        INPUT_NO_COMMENT: ${{ inputs.no_comment }}
+        INPUT_DASHBOARD_URL: ${{ inputs.dashboard_url }}
+        INPUT_DASHBOARD_TOKEN: ${{ inputs.dashboard_token }}
+        INPUT_OUTPUT: ${{ inputs.output }}
+      run: python -m ai_pr_reviewer

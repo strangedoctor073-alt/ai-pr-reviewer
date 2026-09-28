@@ -68,13 +68,10 @@ def validate_findings(findings, files: list[FileDiff], cfg: Config,
             dropped.append(f)
             continue
         if f.line is not None and f.line not in line_maps[f.file]:
-            # Model guessed a line outside the diff — snap to nearest known line.
-            known = sorted(line_maps[f.file])
-            if known:
-                f.line = min(known, key=lambda n: abs(n - (f.line or 0)))
-            else:
-                dropped.append(f)
-                continue
+            # Finding references a line outside the diff — keep it out of inline
+            # comments so it never points at innocent code.
+            dropped.append(f)
+            continue
         if sev_rank(f.severity) < sev_rank(severity_threshold or cfg.severity_threshold):
             continue
         valid.append(f)
@@ -82,6 +79,21 @@ def validate_findings(findings, files: list[FileDiff], cfg: Config,
     inline = valid[:cfg.max_comments]
     suppressed = len(valid) - len(inline)
     return inline, suppressed, dropped
+
+
+def _scrub(text: str, cfg: Config) -> str:
+    """Remove pattern-matched secrets AND the exact credentials this run was
+    configured with, so no provider/HTTP error can echo them into a report,
+    step summary, console line or PR comment."""
+    from .security import redact_secrets
+
+    text = redact_secrets(text)
+    for name in ("github_token", "anthropic_api_key", "openai_api_key",
+                 "gemini_api_key", "dashboard_token"):
+        secret = getattr(cfg, name, "") or ""
+        if len(secret) >= 6:
+            text = text.replace(secret, "[REDACTED]")
+    return text
 
 
 def _project_policy(cfg: Config):
@@ -132,7 +144,14 @@ class ReviewOrchestrator:
 
         # b. files
         policy = _project_policy(cfg)
-        files = filter_files(parse_unified_diff(diff_text), cfg, policy.exclude)
+        parsed = parse_unified_diff(diff_text)
+        rules_file = getattr(cfg, "rules_file", None) or ".ai-pr-reviewer.yml"
+        if any(f.path == rules_file for f in parsed):
+            warnings.append(
+                f"This PR modifies {rules_file}. Repository policy must come "
+                f"from the trusted base revision (check out the PR base, not "
+                f"the merge commit) — treat this PR's policy change as untrusted.")
+        files = filter_files(parsed, cfg, policy.exclude)
         if not files:
             warnings.append("No reviewable code changes found after filtering.")
 
@@ -140,7 +159,7 @@ class ReviewOrchestrator:
         context = build_context(pr, files, cfg, self.storage)
         provider = get_provider(cfg, context)
         outcome = provider.analyze(context)
-        warnings.extend(outcome.warnings)
+        warnings.extend(_scrub(w, cfg) for w in outcome.warnings)
 
         # f. dedupe (before the cap, so duplicates can't eat the comment
         #    budget), then anchor / threshold / cap
@@ -155,6 +174,9 @@ class ReviewOrchestrator:
         previous = self._previous_findings(repo, pr, context)
         lifecycle_findings = self._apply_lifecycle(previous, inline, files,
                                                    incremental, pr.head_sha)
+
+        from .models import calculate_health_score
+        score, grade = calculate_health_score(lifecycle_findings)
 
         # h. result — same shape as v1, plus what the provider told us
         engine = reporter.resolve_engine(outcome)
@@ -173,6 +195,8 @@ class ReviewOrchestrator:
                 batches=getattr(outcome, "batch_count", 0) or 1,
             ),
         )
+        result.health_score = score
+        result.health_grade = grade
         # ReviewResult does not declare these (yet); reporter reads them with
         # getattr, so they work as plain attributes and as real fields alike.
         result.engine = engine

@@ -199,6 +199,129 @@ class DbStorage:
             "files_analyzed": files,
         }
 
+    def list_findings(self, state: str = "", severity: str = "",
+                      repo: str = "", limit: int = 100, offset: int = 0) -> list[dict]:
+        """Return stored findings across all reports, with optional filtering."""
+        from sqlalchemy import select
+        from .models_db import ReportRow
+        
+        results = []
+        with self.Session() as session:
+            query = select(ReportRow).order_by(ReportRow.reviewed_at.desc())
+            rows = session.execute(query).scalars().all()
+            for row in rows:
+                if repo and row.repo != repo:
+                    continue
+                payload = row.payload or {}
+                for f in payload.get("findings", [])[:MAX_FINDINGS_STORED]:
+                    f_state = f.get("state", "new")
+                    f_sev = f.get("severity", "medium")
+                    if state and f_state != state:
+                        continue
+                    if severity and f_sev != severity:
+                        continue
+                    results.append({
+                        **f,
+                        "repo": row.repo,
+                        "pr_number": row.pr_number,
+                        "pr_title": row.pr_title,
+                        "reviewed_at": row.reviewed_at,
+                        "report_id": row.id,
+                    })
+        return results[offset:offset + limit]
+
+    def metrics(self) -> dict:
+        """Return live computed metrics from all stored reviews."""
+        from sqlalchemy import select
+        from .models_db import ReportRow
+        
+        total = 0
+        fallback_count = 0
+        duration_sum = 0
+        health_sum = 0
+        engine_counts: Counter = Counter()
+        sev_counts: Counter = Counter()
+        
+        with self.Session() as session:
+            for row in session.execute(select(ReportRow)).scalars():
+                total += 1
+                payload = row.payload or {}
+                if payload.get("fallback_used"):
+                    fallback_count += 1
+                duration_sum += row.duration_ms or 0
+                health_sum += payload.get("health_score", 100)
+                engine = payload.get("engine", "static")
+                engine_counts[engine] += 1
+                for sev, cnt in (row.severity_counts or {}).items():
+                    sev_counts[sev] += cnt
+        
+        return {
+            "reviews_total": total,
+            "fallback_rate": round(fallback_count / total * 100, 1) if total else 0.0,
+            "avg_duration_s": round(duration_sum / total / 1000, 2) if total else 0.0,
+            "avg_health_score": round(health_sum / total, 1) if total else 100.0,
+            "severity_distribution": {s: sev_counts.get(s, 0) for s in ("critical", "high", "medium", "low", "info")},
+            "engine_distribution": dict(engine_counts.most_common()),
+        }
+
+    def record_feedback(self, fingerprint: str, kind: str, repo: str = "", note: str = "") -> dict:
+        """Persist feedback. 'down' or 'mute' writes to repo memory for future reviews."""
+        from .models_db import RepoMemoryRow
+        
+        entry = {
+            "fingerprint": fingerprint,
+            "kind": kind,
+            "repo": repo,
+            "note": note,
+            "recorded_at": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
+        }
+        
+        if kind in ("down", "mute") and repo:
+            with self.Session() as session:
+                mem_row = session.get(RepoMemoryRow, repo)
+                if mem_row is None:
+                    mem_row = RepoMemoryRow(id=f"{repo}#{uuid.uuid4().hex[:8]}", repo=repo)
+                # Ensure memory property is handled (it's not natively on RepoMemoryRow in models_db,
+                # actually it is note and path_pattern)
+                # Instead of adding muted_fingerprints, let's just add it as a new memory entry for that fingerprint
+                mem_row.path_pattern = f"fingerprint:{fingerprint}"
+                mem_row.note = note or f"Muted finding {fingerprint}"
+                session.add(mem_row)
+                session.commit()
+        return entry
+
+    def get_repo_badge_stats(self, repo: str) -> dict:
+        """Return latest health score and review count for badge generation."""
+        from sqlalchemy import select
+        from .models_db import ReportRow
+        
+        with self.Session() as session:
+            rows = session.execute(
+                select(ReportRow)
+                .where(ReportRow.repo == repo)
+                .order_by(ReportRow.reviewed_at.desc())
+                .limit(10)
+            ).scalars().all()
+        
+        if not rows:
+            return {"repo": repo, "reviews": 0, "avg_health_score": 100, "grade": "A+"}
+        
+        scores = [r.payload.get("health_score", 100) if r.payload else 100 for r in rows]
+        avg = round(sum(scores) / len(scores)) if scores else 100
+        
+        if avg >= 90:
+            grade = "A+"
+        elif avg >= 80:
+            grade = "A"
+        elif avg >= 70:
+            grade = "B"
+        elif avg >= 55:
+            grade = "C"
+        else:
+            grade = "D"
+        
+        return {"repo": repo, "reviews": len(rows), "avg_health_score": avg, "grade": grade}
+
     # ------------------------------------------------------------- review state
     def get_last_reviewed_sha(self, repo: str, pr_number: int) -> str | None:
         from .models_db import ReviewStateRow
@@ -425,6 +548,113 @@ class JsonStorage:
             "top_repos": dict(repos.most_common(5)),
             "files_analyzed": files,
         }
+
+    def list_findings(self, state: str = "", severity: str = "",
+                      repo: str = "", limit: int = 100, offset: int = 0) -> list[dict]:
+        results = []
+        for path in sorted(self.reports_dir.glob("*.json"), key=os.path.getmtime, reverse=True):
+            try:
+                report = json.loads(path.read_text("utf-8"))
+            except Exception:
+                continue
+            
+            r_repo = (report.get("pr") or {}).get("repo", "")
+            if repo and r_repo != repo:
+                continue
+                
+            for f in report.get("findings", [])[:MAX_FINDINGS_STORED]:
+                f_state = f.get("state", "new")
+                f_sev = f.get("severity", "medium")
+                if state and f_state != state:
+                    continue
+                if severity and f_sev != severity:
+                    continue
+                results.append({
+                    **f,
+                    "repo": r_repo,
+                    "pr_number": (report.get("pr") or {}).get("number", 0),
+                    "pr_title": (report.get("pr") or {}).get("title", ""),
+                    "reviewed_at": report.get("reviewed_at", ""),
+                    "report_id": report.get("id"),
+                })
+        return results[offset:offset + limit]
+
+    def metrics(self) -> dict:
+        total = 0
+        fallback_count = 0
+        duration_sum = 0
+        health_sum = 0
+        engine_counts: Counter = Counter()
+        sev_counts: Counter = Counter()
+        
+        for path in self.reports_dir.glob("*.json"):
+            try:
+                report = json.loads(path.read_text("utf-8"))
+            except Exception:
+                continue
+            total += 1
+            if report.get("fallback_used"):
+                fallback_count += 1
+            duration_sum += report.get("duration_ms", 0)
+            health_sum += report.get("health_score", 100)
+            engine = report.get("engine", "static")
+            engine_counts[engine] += 1
+            for f in report.get("findings", []):
+                sev_counts[f.get("severity", "medium")] += 1
+        
+        return {
+            "reviews_total": total,
+            "fallback_rate": round(fallback_count / total * 100, 1) if total else 0.0,
+            "avg_duration_s": round(duration_sum / total / 1000, 2) if total else 0.0,
+            "avg_health_score": round(health_sum / total, 1) if total else 100.0,
+            "severity_distribution": {s: sev_counts.get(s, 0) for s in ("critical", "high", "medium", "low", "info")},
+            "engine_distribution": dict(engine_counts.most_common()),
+        }
+
+    def record_feedback(self, fingerprint: str, kind: str, repo: str = "", note: str = "") -> dict:
+        entry = {
+            "fingerprint": fingerprint,
+            "kind": kind,
+            "repo": repo,
+            "note": note,
+            "recorded_at": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
+        }
+        
+        if kind in ("down", "mute") and repo:
+            self.add_repo_memory(repo, f"fingerprint:{fingerprint}", note or f"Muted finding {fingerprint}")
+            
+        return entry
+
+    def get_repo_badge_stats(self, repo: str) -> dict:
+        reports = []
+        for path in sorted(self.reports_dir.glob("*.json"), key=os.path.getmtime, reverse=True):
+            try:
+                report = json.loads(path.read_text("utf-8"))
+                if (report.get("pr") or {}).get("repo") == repo:
+                    reports.append(report)
+                    if len(reports) >= 10:
+                        break
+            except Exception:
+                continue
+                
+        if not reports:
+            return {"repo": repo, "reviews": 0, "avg_health_score": 100, "grade": "A+"}
+            
+        scores = [r.get("health_score", 100) for r in reports]
+        avg = round(sum(scores) / len(scores)) if scores else 100
+        
+        if avg >= 90:
+            grade = "A+"
+        elif avg >= 80:
+            grade = "A"
+        elif avg >= 70:
+            grade = "B"
+        elif avg >= 55:
+            grade = "C"
+        else:
+            grade = "D"
+        
+        return {"repo": repo, "reviews": len(reports), "avg_health_score": avg, "grade": grade}
 
     # ------------------------------------------------------------- review state
     def get_last_reviewed_sha(self, repo: str, pr_number: int) -> str | None:

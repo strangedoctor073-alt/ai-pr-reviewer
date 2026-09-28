@@ -1,20 +1,11 @@
-# Drop this in each repo you want reviewed, as
-# .github/workflows/ai-pr-review.yml
-name: AI PR Review
+# Copy to .github/workflows/ai-pr-review.yml in the repository you want reviewed.
+name: "AI PR Reviewer"
 
 on:
+  # Keep `pull_request`. Do NOT switch to `pull_request_target`: it runs with
+  # repository secrets against code from untrusted forks.
   pull_request:
     types: [opened, synchronize, reopened]
-  workflow_dispatch:
-    inputs:
-      pr_number:
-        description: 'PR number to review'
-        required: true
-        type: string
-
-concurrency:
-  group: ai-pr-review-${{ github.event.pull_request.number || inputs.pr_number }}
-  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -24,34 +15,46 @@ jobs:
   review:
     runs-on: ubuntu-latest
     steps:
-      # Use the base revision so repository policy is never read from an
-      # untrusted PR branch.
-      - uses: actions/checkout@v4
+      # Check out the PR BASE, not the merge commit, so .ai-pr-reviewer.yml is
+      # trusted repository-owner policy and a PR cannot rewrite its own rules.
+      # (The diff itself is fetched through the GitHub API, not from disk.)
+      - name: Checkout base revision
+        uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.base.sha || github.event.repository.default_branch }}
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
 
-      - name: AI PR Reviewer
-        uses: strangedoctor073-alt/ai-pr-reviewer@v1
+      - name: Run AI PR Reviewer
+        uses: strangedoctor073-alt/ai-pr-reviewer@v2
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          pr_number: ${{ github.event.pull_request.number || inputs.pr_number }}
+          # Claude (default model: claude-sonnet-4-6). Leave the secret unset to
+          # use the free static-rules fallback (deterministic, NOT AI).
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          model: claude-sonnet-4-6
-          # severity_threshold left unset — .ai-pr-reviewer.yml in this repo's
-          # base branch chooses it; set an explicit value here to override it.
-          max_comments: 20
-          # fail_on: critical          # optionally fail the check on criticals
-          # GitHub does not expose repository secrets to fork PRs. These flags
-          # also prevent writes if the fork's read-only GITHUB_TOKEN is used.
-          mock: ${{ github.event.pull_request.head.repo.fork }}
+          # Fork PRs get no secrets and a read-only token: run static rules and
+          # skip posting instead of failing.
           no_comment: ${{ github.event.pull_request.head.repo.fork }}
-          dashboard_url: ${{ secrets.PR_DASHBOARD_URL }}        # optional
-          dashboard_token: ${{ secrets.PR_DASHBOARD_TOKEN }}    # optional
+          # Optional dashboard (see README):
+          # dashboard_url: ${{ secrets.PR_DASHBOARD_URL }}
+          # dashboard_token: ${{ secrets.PR_DASHBOARD_TOKEN }}
 
       - name: Upload review report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ai-pr-review
+          name: review-report
           path: review-report.json
           if-no-files-found: ignore
+
+      # ---- Other providers: `model` is REQUIRED (there is no default) --------
+      # - uses: strangedoctor073-alt/ai-pr-reviewer@v2
+      #   with:
+      #     github_token: ${{ secrets.GITHUB_TOKEN }}
+      #     openai_api_key: ${{ secrets.OPENAI_API_KEY }}
+      #     model: "<an OpenAI model id your account can call>"
+      #
+      # - uses: strangedoctor073-alt/ai-pr-reviewer@v2
+      #   with:
+      #     github_token: ${{ secrets.GITHUB_TOKEN }}
+      #     gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
+      #     model: "<a Gemini model id your account can call>"

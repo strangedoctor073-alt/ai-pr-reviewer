@@ -42,13 +42,16 @@ class Config:
     # Sources
     github_token: str = ""
     anthropic_api_key: str = ""
+    openai_api_key: str = ""
+    gemini_api_key: str = ""
+    openai_base_url: str = ""
     repo: str = ""                     # owner/name
     pr_number: int = 0
     diff_file: str = ""                # local mode: read diff from file
     mock: bool = False
 
     # Review knobs
-    model: str = "claude-sonnet-4-6"
+    model: str = ""                    # empty = provider default (Claude only)
     severity_threshold: str = "medium"
     severity_threshold_explicit: bool = False
     max_comments: int = 20
@@ -82,11 +85,14 @@ def load_config(args) -> Config:
                                                "GH_TOKEN"),
         anthropic_api_key=args.anthropic_api_key or _env(
             "INPUT_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"),
+        openai_api_key=getattr(args, "openai_api_key", None) or _env("INPUT_OPENAI_API_KEY", "OPENAI_API_KEY"),
+        gemini_api_key=getattr(args, "gemini_api_key", None) or _env("INPUT_GEMINI_API_KEY", "GEMINI_API_KEY"),
+        openai_base_url=getattr(args, "openai_base_url", None) or _env("INPUT_OPENAI_BASE_URL", "OPENAI_BASE_URL"),
         repo=args.repo or _env("INPUT_REPOSITORY", "GITHUB_REPOSITORY"),
         pr_number=int(args.pr or _env("INPUT_PR_NUMBER", default="0")),
         diff_file=args.diff_file or "",
         mock=args.mock or _env("INPUT_MOCK", "MOCK").lower() in ("1", "true", "yes"),
-        model=args.model or _env("INPUT_MODEL", default="claude-sonnet-4-6"),
+        model=args.model or _env("INPUT_MODEL", default=""),
         severity_threshold=(severity_input or "medium").lower(),
         severity_threshold_explicit=bool(severity_input),
         max_comments=int(args.max_comments or _env("INPUT_MAX_COMMENTS", default="20")),

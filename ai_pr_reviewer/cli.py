@@ -35,10 +35,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--diff-file", help="review a local unified diff instead of GitHub")
     p.add_argument("--github-token")
     p.add_argument("--anthropic-api-key")
+    p.add_argument("--openai-api-key", default=None)
+    p.add_argument("--gemini-api-key", default=None)
+    p.add_argument("--openai-base-url", default=None)
     p.add_argument("--mock", "--static", dest="mock", action="store_true",
                    help="use the deterministic static-analysis fallback (rule "
                         "engine — NOT AI) instead of Claude; no API key needed")
-    p.add_argument("--model", help="Claude model id (default: claude-sonnet-4-6)")
+    p.add_argument("--model", help="model id (Claude default: claude-sonnet-4-6; required for OpenAI/Gemini/custom endpoints)")
     p.add_argument("--severity-threshold",
                    choices=SEVERITY_ORDER, help="minimum severity to comment inline")
     p.add_argument("--max-comments", type=int)
@@ -68,8 +71,11 @@ def run(cfg: Config, pr_overrides: dict | None = None) -> ReviewResult:
     pr: PRContext | None = None
     diff_text: str | None = None
     if cfg.diff_file:                       # local mode: no GitHub involved
-        with open(cfg.diff_file, encoding="utf-8") as fh:
-            diff_text = fh.read()
+        try:
+            with open(cfg.diff_file, encoding="utf-8") as fh:
+                diff_text = fh.read()
+        except OSError as exc:
+            raise SystemExit(f"error: cannot read --diff-file {cfg.diff_file!r}: {exc}")
         pr = PRContext(repo=cfg.repo or "local/project",
                        pr_number=cfg.pr_number or 0,
                        pr_title=pr_overrides.get("pr_title") or cfg.diff_file,
@@ -114,6 +120,8 @@ def run(cfg: Config, pr_overrides: dict | None = None) -> ReviewResult:
     _set_github_output("findings_count", str(len(open_)))
     _set_github_output("critical_count",
                        str(reporter.severity_counts(open_).get("critical", 0)))
+    _set_github_output("health_score", str(getattr(result, "health_score", 100)))
+    _set_github_output("health_grade", str(getattr(result, "health_grade", "A+")))
     if cfg.output:
         _set_github_output("report_path", cfg.output)
 
@@ -186,10 +194,16 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     cfg = load_config(args)
     merge_dashboard_rules(cfg)
-    if not cfg.mock and not cfg.anthropic_api_key:
-        print("[ai-pr-reviewer] no ANTHROPIC_API_KEY set — falling back to the "
+    if not cfg.mock and not (cfg.anthropic_api_key or cfg.openai_api_key or cfg.gemini_api_key or cfg.openai_base_url):
+        print("[ai-pr-reviewer] no AI API key set — falling back to the "
               "heuristic rule engine (mock mode).")
         cfg.mock = True
+
+    from .model_router import provider_config_error
+    config_error = provider_config_error(cfg)
+    if config_error:
+        print(f"error: {config_error}", file=sys.stderr)
+        return 1
 
     result = run(cfg, pr_overrides={
         "pr_title": args.pr_title or "",

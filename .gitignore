@@ -27,3 +27,13 @@ dashboard/data/reports/
 .env
 .env.*
 !.env.example
+
+# Python / editor / OS
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.idea/
+.vscode/
+.DS_Store

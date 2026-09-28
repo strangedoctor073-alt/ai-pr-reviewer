@@ -16,13 +16,23 @@ CLOSED_STATES = frozenset({"resolved", "dismissed", "muted"})
 # (README promise): the rule engine is deterministic static analysis.
 _ENGINE_TITLE = {
     "claude": "Claude",
+    "openai": "OpenAI",
+    "gemini": "Gemini",
     "static": "Static Fallback",
     "claude+static": "Claude + Static Fallback",
+    "openai+static": "OpenAI + Static Fallback",
+    "gemini+static": "Gemini + Static Fallback",
 }
 _ENGINE_FOOTER = {
     "claude": "review by Claude (AI)",
-    "static": "rule-based static analysis \u2014 not an AI review",
+    "openai": "review by OpenAI (AI)",
+    "gemini": "review by Google Gemini (AI)",
+    "static": "rule-based static analysis — not an AI review",
     "claude+static": ("review by Claude (AI); batches Claude could not review "
+                      "were covered by rule-based static analysis (not AI)"),
+    "openai+static": ("review by OpenAI (AI); batches OpenAI could not review "
+                      "were covered by rule-based static analysis (not AI)"),
+    "gemini+static": ("review by Google Gemini (AI); batches Gemini could not review "
                       "were covered by rule-based static analysis (not AI)"),
 }
 
@@ -50,13 +60,13 @@ def new_report_id(repo: str, pr_number: int) -> str:
 # ------------------------------------------------------- engine / state helpers
 
 def resolve_engine(obj) -> str:
-    """Return "claude" | "static" | "claude+static" for a ReviewResult or an
-    AnalysisOutcome. Falls back to the legacy ``mode`` field, and treats
-    anything that is not positively Claude (including "mock") as static."""
     engine = str(getattr(obj, "engine", "") or "").lower()
     if engine in _ENGINE_TITLE:
         return engine
-    return "claude" if str(getattr(obj, "mode", "") or "").lower() == "claude" else "static"
+    mode = str(getattr(obj, "mode", "") or "").lower()
+    if mode in ("claude", "openai", "gemini"):
+        return mode
+    return "static"
 
 
 def finding_state(f) -> str:
@@ -174,47 +184,55 @@ def _finding_line_md(result: ReviewResult, f) -> str:
 
 
 def build_summary_markdown(result: ReviewResult, top_n: int = 8) -> str:
-    # Resolved/dismissed/muted findings live in result.findings for history
-    # but are not "findings" from the reader's point of view.
     open_ = open_findings(result.findings)
     resolved = count_by_state(result.findings).get("resolved", 0)
     counts = severity_counts(open_)
     bits = [f"{counts[s]} {s}" for s in ("critical", "high", "medium", "low", "info")
             if counts.get(s)]
-    title = report_title(result)
-    header = (f"## {title} \u00b7 {len(open_)} finding(s)"
-              if open_ else f"## {title} \u00b7 no issues found")
+    engine = resolve_engine(result)
+    score = getattr(result, "health_score", 100)
+    grade = getattr(result, "health_grade", "A+")
+    if score >= 90:
+        gauge = "🟢"
+    elif score >= 70:
+        gauge = "🟡"
+    else:
+        gauge = "🔴"
+    
+    score_label = f"{gauge} **{score}/100** ({grade})"
+    
     lines = [
-        header,
+        f"## 🤖 AI PR Review · Health Score: {score_label}",
         "",
-        f"**{result.pr.repo}#{result.pr.pr_number}** · {result.stats.files} file(s) "
-        f"(+{result.stats.additions}/\u2212{result.stats.deletions}) · "
-        f"engine: `{result.model}` ({result.mode}) · {result.duration_ms} ms",
+        f"> {result.summary or 'No summary available.'}",
+        "",
+        "| 📊 Metric | Value |",
+        "|---|---|",
+        f"| **Health Grade** | `{grade} ({score}/100)` |",
+        f"| **Issues Flagged** | {len(open_)} ({' · '.join(bits) if bits else 'none'}) |",
+        f"| **Files Reviewed** | {result.stats.files} (+{result.stats.additions} / −{result.stats.deletions} lines) |",
+        f"| **Review Engine** | `{result.model or engine}` ({result.duration_ms} ms) |",
     ]
-    if bits:
-        lines.append(f"**Findings:** {' · '.join(bits)}")
-    lines += ["", result.summary or "", ""]
-
+    
     shown = open_[:top_n]
     if shown:
+        lines.append("")
         lines.append("<details>")
-        lines.append(f"<summary><strong>Top findings "
-                     f"({len(shown)} of {len(open_)})</strong></summary>")
+        lines.append(f"<summary><strong>Top findings ({len(shown)} of {len(open_)})</strong></summary>")
         lines.append("")
         for f in shown:
             lines.append(_finding_line_md(result, f))
             lines.append("")
         lines.append("</details>")
+    
     if resolved:
-        lines.append(f"\n> \u2705 {resolved} previously reported finding(s) resolved.")
+        lines.append(f"\n> ✅ {resolved} previously reported finding(s) resolved.")
     if result.suppressed:
-        lines.append(f"\n> \u2139\uFE0F {result.suppressed} finding(s) below the "
-                     f"comment threshold or over the inline-comment cap were "
-                     f"summarized here instead of annotated inline.")
+        lines.append(f"\n> ℹ️ {result.suppressed} finding(s) below the comment threshold or "
+                     f"over the inline-comment cap were summarized here instead of annotated inline.")
     if result.warnings:
-        lines.append("\n> \u26a0\ufe0f Warnings: " + "; ".join(result.warnings))
-    lines.append(f"\n<sub>Posted by AI PR Reviewer \u2014 "
-                 f"{_ENGINE_FOOTER[resolve_engine(result)]}</sub>")
+        lines.append("\n> ⚠️ Warnings: " + "; ".join(result.warnings))
+    lines.append(f"\n<sub>Posted by AI PR Reviewer — {_ENGINE_FOOTER.get(engine, engine)}</sub>")
     return "\n".join(lines)
 
 
