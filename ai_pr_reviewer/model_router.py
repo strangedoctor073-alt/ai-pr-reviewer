@@ -97,27 +97,94 @@ def _review_mode(cfg: Config, context: ReviewContext) -> str:
     return mode if mode in _REVIEW_MODE_MAX_TOKENS else "automatic"
 
 
-def get_provider(cfg: Config, context: ReviewContext) -> AIProvider:
-    """Pick the provider for this review.
+def select_backend(cfg: Config) -> str:
+    """Return "static" | "openai" | "gemini" | "claude" for this config."""
+    if getattr(cfg, "mock", False):
+        return "static"
 
-    No API key configured, or ``cfg.mock`` forces it -> the deterministic
-    static-analysis fallback. Otherwise -> Claude, wrapped with retry.
+    model = getattr(cfg, "model", "") or ""
+    anthropic_key = getattr(cfg, "anthropic_api_key", "")
+    openai_key = getattr(cfg, "openai_api_key", "")
+    gemini_key = getattr(cfg, "gemini_api_key", "")
+    openai_base_url = getattr(cfg, "openai_base_url", "")
+
+    use_openai = (model.startswith(("gpt-", "o1", "o3", "o4")) or
+                  bool(openai_base_url) or
+                  (openai_key and not anthropic_key and not gemini_key))
+    use_gemini = (model.startswith("gemini-") or
+                  (gemini_key and not anthropic_key and not openai_key and not use_openai))
+    use_claude = (model.startswith("claude-") or
+                  (anthropic_key and not use_openai and not use_gemini))
+
+    # A custom OpenAI-compatible endpoint (Ollama, vLLM, …) may need no key.
+    if use_openai and (openai_key or openai_base_url):
+        return "openai"
+    if use_gemini and gemini_key:
+        return "gemini"
+    if use_claude and anthropic_key:
+        return "claude"
+    return "static"
+
+
+def provider_config_error(cfg: Config) -> str | None:
+    """Return a human-readable config error, or None if the config is usable.
+
+    Model IDs for OpenAI/Gemini turn over quickly and old ones get shut down,
+    so there is deliberately no built-in default for them: a stale default
+    would silently fail every review.
     """
-    if getattr(cfg, "mock", False) or not getattr(cfg, "anthropic_api_key", ""):
+    backend = select_backend(cfg)
+    if backend in ("openai", "gemini") and not (getattr(cfg, "model", "") or "").strip():
+        return (f"the {backend} provider needs an explicit model id — set the "
+                f"`model` input (or --model) to a model your account can call.")
+    return None
+
+
+def get_provider(cfg: Config, context: ReviewContext) -> AIProvider:
+    backend = select_backend(cfg)
+    if backend == "static":
         return StaticProvider()
 
-    risk = classify_risk(context)
+    model = getattr(cfg, "model", "") or ""
+    config_error = provider_config_error(cfg)
+    if config_error:
+        raise ValueError(config_error)
     review_mode = _review_mode(cfg, context)
-    provider = ClaudeProvider(
-        api_key=cfg.anthropic_api_key,
-        model=cfg.model,
-        max_tokens=_REVIEW_MODE_MAX_TOKENS[review_mode],
-        batch_chars=getattr(cfg, "batch_chars", 80_000),
-        focus_areas=getattr(cfg, "focus_areas", None),
-        retry=RetryPolicy(),
-    )
+    max_tokens = _REVIEW_MODE_MAX_TOKENS[review_mode]
+    batch_chars = getattr(cfg, "batch_chars", 80_000)
+    focus_areas = getattr(cfg, "focus_areas", None)
+    risk = classify_risk(context)
+
+    if backend == "openai":
+        from .ai.openai import OpenAIProvider
+        provider = OpenAIProvider(
+            api_key=getattr(cfg, "openai_api_key", "") or "unused",
+            model=model,
+            max_tokens=max_tokens,
+            batch_chars=batch_chars,
+            focus_areas=focus_areas,
+            base_url=getattr(cfg, "openai_base_url", ""),
+            retry=RetryPolicy(),
+        )
+    elif backend == "gemini":
+        from .ai.gemini import GeminiProvider
+        provider = GeminiProvider(
+            api_key=cfg.gemini_api_key,
+            model=model,
+            max_tokens=max_tokens,
+            batch_chars=batch_chars,
+            focus_areas=focus_areas,
+            retry=RetryPolicy(),
+        )
+    else:
+        provider = ClaudeProvider(
+            api_key=cfg.anthropic_api_key,
+            model=model or "claude-sonnet-4-6",
+            max_tokens=max_tokens,
+            batch_chars=batch_chars,
+            focus_areas=focus_areas,
+            retry=RetryPolicy(),
+        )
     if risk.level == "high":
-        # Informational only: surface why the PR was flagged. The risk level
-        # does not change which model or batching is used.
         provider.startup_warnings.append(f"high-risk PR ({'; '.join(risk.reasons)})")
     return provider

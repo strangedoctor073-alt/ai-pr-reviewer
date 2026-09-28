@@ -141,14 +141,16 @@ def test_exclude_globs_drop_files(fixtures):
     assert {f.path for f in keep} == {"payments/api.py"}
 
 
-def test_findings_snap_to_diff_lines():
+def test_findings_outside_diff_are_dropped_not_snapped():
+    """Findings on lines outside the diff must not be snapped to innocent code;
+    they are kept out of inline comments and returned in dropped."""
     fd = parse_unified_diff(
         "--- a/x.py\n+++ b/x.py\n@@ -1,2 +1,3 @@\n context\n+bad = 1\n context2\n")
     f = Finding(file="x.py", line=99, severity="high", title="t", explanation="e")
     inline, _, dropped = validate_findings([f], fd, _cfg())
-    assert len(inline) == 1
-    assert inline[0].line == 3      # snapped to the nearest changed line (99 → 3)
-    assert not dropped
+    assert len(inline) == 0
+    assert len(dropped) == 1
+    assert dropped[0].line == 99  # original line preserved, not snapped
 
 
 # ---------------------------------------------------------------- report shape

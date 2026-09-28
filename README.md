@@ -37,14 +37,40 @@ dashboard.
                                      └─────────────────────────────────────┘
 ```
 
+## ✨ Highlights
+
+| Capability | What It Does | Why It Matters |
+|---|---|---|
+| 🧠 **Multi-Provider AI** | Claude, OpenAI, and Google Gemini in one action — pass one provider's API key (and, for OpenAI/Gemini, a `model`) | Use whichever provider your team already pays for |
+| 🤖 **Custom LLM Endpoints** | Pass `openai_base_url` (+ `model`) to use Ollama, Groq, DeepSeek or any OpenAI-compatible server; the key is optional for local endpoints | Local/private reviews or low-latency inference via drop-in replacement |
+| 💯 **PR Health Score** | 0–100 score + letter grade (A+/A/B/C/D) computed from open findings | At-a-glance PR risk gauge in every comment, dashboard tile, and badge |
+| 🛡️ **Defensive Prompt Architecture** | Nonce-fenced diff boundaries with local instruction-injection screening | Mitigates (does not eliminate) attempts to steer the review model from PR contents |
+| 🔒 **Secret Redaction & Privacy Baseline** | Pattern-based scrubbing of tokens, credentials and PEM keys, plus exact removal of the credentials the run was configured with; secret-bearing paths never reach a provider | Best-effort defence against credential leaks into comments and the dashboard |
+| ⚡ **Deterministic Static Fallback** | ~25 regex/AST rules that run when no API key is set or a provider call fails | Full pipeline testing and CI dry-runs with zero API cost |
+| 🎯 **Safe Line Anchoring** | Unanchored findings stay in summary; never misattributed to unrelated code | Developers only get inline comments on code they actually changed |
+| 📊 **Live Dashboard + ⚡ Sandbox** | Self-hosted web UI with live findings/metrics, real feedback API, and a one-click diff sandbox for instant demos | Full visibility, feedback loop, and a shareable demo with no setup |
+| 🏷️ **Dynamic SVG Badge** | `GET /api/badge/{owner}/{repo}` — embed a live health score badge in any README (public, unauthenticated endpoint) | Every repository can show its review health at a glance |
+
+---
+
+### Embed a health badge in your README
+
+```markdown
+![AI Review Health](https://your-dashboard.example.com/api/badge/your-org/your-repo)
+```
+
+Displays: **AI PR Reviewer** | **98% health (A+)** — colour shifts green → amber → red as the score drops.
+
+---
+
 ## What's in the box
 
 - **Claude-backed review** with a machine-checkable contract: `file`, `line`
   (in the *new* file), `severity`, `category`, `explanation`, optional
   `suggestion` snippet, `confidence`.
-- **Correct inline anchoring** — a unified-diff parser maps findings to lines
-  GitHub allows comments on; out-of-range lines snap to the nearest changed
-  line; unanchorable findings stay in the summary.
+- **Safe inline anchoring** — a unified-diff parser maps findings strictly to lines
+  changed in the PR; findings that reference lines outside the diff stay in the
+  summary with their original file and line, never snapped to innocent code.
 - **Prompt-injection defenses** — diffs are fenced between nonce-tagged
   `<untrusted_diff>` markers (spoofed markers neutralized), screened locally
   for instruction-impersonation phrases, and the system prompt tells the model
@@ -82,7 +108,7 @@ the free deterministic static rules instead: regex plus a few AST checks, **not
 AI**. It is useful for trying the plumbing, not a substitute for the Claude
 review.
 
-The example workflow uses `strangedoctor073-alt/ai-pr-reviewer@v1`. If you fork
+The example workflow uses `strangedoctor073-alt/ai-pr-reviewer@v2`. If you fork
 this repository, point `uses:` at your fork and tag a release.
 
 The workflow checks out the PR's **base revision** before running the Action,
@@ -91,9 +117,14 @@ untrusted PR content. Fork PRs use the static engine and produce only an
 artifact; they receive no repository secrets and make no GitHub or dashboard
 writes. Do not replace `pull_request` with `pull_request_target`.
 
-For an on-demand run, choose **Run workflow** and supply the pull-request
-number. The same Action configuration can be used without an API key by
-setting `mock: true`; that runs deterministic static rules, not AI.
+Setting `mock: true` forces the deterministic static rules (not AI) even when
+an API key is present.
+
+**Other providers.** For OpenAI, Gemini or a custom OpenAI-compatible endpoint,
+set the matching key input **and** `model`. There is deliberately no built-in
+default model for them: providers retire model IDs regularly, and a stale
+default would fail every review. Without `model` the run exits with code `1`
+and a clear message. Claude defaults to `claude-sonnet-4-6`.
 
 ### Inputs (abridged)
 
@@ -102,7 +133,9 @@ setting `mock: true`; that runs deterministic static rules, not AI.
 | `github_token` | — (required) | Token with `pull-requests:write` |
 | `pr_number` | Event PR | Required for manual workflow runs; otherwise taken from the event |
 | `anthropic_api_key` | — | Without it (or with `mock: true`) the static fallback runs |
-| `model` | `claude-sonnet-4-6` | Any Claude model id (`claude-haiku-4-5` for cheap/high-volume) |
+| `model` | Claude: `claude-sonnet-4-6` | Model id. **Required** for OpenAI, Gemini and custom endpoints |
+| `openai_api_key` / `gemini_api_key` | — | Use OpenAI / Gemini instead of Claude (needs `model`) |
+| `openai_base_url` | — | OpenAI-compatible endpoint (Ollama, Groq, …); needs `model`, key optional |
 | `severity_threshold` | `medium` | Min severity for inline comments; an explicit input overrides repository policy |
 | `max_comments` | `20` | Inline-comment cap; rest go to the summary |
 | `batch_chars` | `80000` | Maximum diff characters per Claude request batch |
@@ -115,9 +148,9 @@ setting `mock: true`; that runs deterministic static rules, not AI.
 | `dashboard_url` / `dashboard_token` | — | Push reports + pull shared rules |
 | `output` | `review-report.json` | Workspace-relative report path |
 
-**Outputs:** `findings_count`, `critical_count`, `report_path`. A markdown
-digest is also written to the job's **Step Summary**, and `review-report.json`
-is available as an artifact.
+**Outputs:** `findings_count`, `critical_count`, `report_path`, `health_score`,
+`health_grade`. A markdown digest is also written to the job's **Step Summary**;
+the example workflow uploads `review-report.json` as an artifact.
 
 ### Repository policy
 
@@ -154,6 +187,15 @@ analyzer, on top of whatever `exclude` your policy adds — a repository's
   dashboard (or `--storage-file` when running locally) is configured. Without
   one, every run is a fresh, full review, so a new push can post findings that
   an earlier push already raised.
+- **Repository policy is only trusted if you check out the PR base.** The Action reads
+  `.ai-pr-reviewer.yml` from the workspace. With a default `actions/checkout` on
+  `pull_request` that is the merge commit, so a PR could rewrite its own exclusions.
+  Use the base-checkout step from the example workflow. The Action also warns when a PR
+  modifies the policy file.
+- **Static fallback is regex-level.** It will miss most real bugs and produces false
+  positives; it is a plumbing test and safety net, not a code reviewer.
+- **Large PRs are batched** (`batch_chars`); the model never sees the whole repository,
+  only the diff plus a few related files.
 - **Fork and Dependabot PRs get a read-only token**, so the Action cannot
   comment on them. The review is still produced, and a failed post is reported
   as a warning in the step summary instead of failing the run. The example
@@ -196,16 +238,10 @@ detail with suggested fixes and GitHub deep links, warnings panel (including
 prompt-injection screens), and a **Rules & Settings** page (threshold, comment
 cap, exclude globs, focus areas) served to the Action via `GET /api/config`.
 
-The **Findings** and **Metrics** tabs, the per-review timeline, and the
-project-rules and feedback panels on the Settings page are previews that show
-sample data. That data — repos like `acme/payments-service`, `acme/infra`,
-`webshop/frontend` — is hardcoded in `dashboard/static/app.js` (the `MOCK`
-object) and is not fetched from the API, so it appears on a completely fresh
-install with zero real reviews, before you've run anything. Each of those
-sections carries a visible **PREVIEW** badge for that reason. The **Reviews**
-list, review detail page, and the settings form are the only parts wired to
-real stored data (`GET/PUT /api/...`) — if a review doesn't show up there, it
-isn't actually stored.
+The **Findings** and **Metrics** tabs, the feedback buttons, the diff **Sandbox**
+and the settings form are all backed by the API below (`/api/findings`,
+`/api/metrics`, `/api/findings/{fp}/feedback`, `/api/sandbox/simulate`,
+`/api/settings`). On a fresh install with zero reviews they are simply empty.
 
 To connect the Action, deploy the dashboard somewhere GitHub-hosted runners can
 reach over HTTPS (`localhost` will not work) and set the `PR_DASHBOARD_URL` and
@@ -224,6 +260,10 @@ reach over HTTPS (`localhost` will not work) and set the `PR_DASHBOARD_URL` and
 | `GET`/`PUT` | `/api/settings` | reads* / token | Validated rules |
 | `GET` | `/api/config` | token | Action consumes before review |
 | `GET`/`PUT`/`POST` | `/api/reviews/{owner}/{repo}/{pr}/state` and `/findings`; `/api/repos/{owner}/{repo}/memory` | reads* / token | Review state the Action stores between pushes |
+| `GET` | `/api/findings`, `/api/metrics` | reads* | Findings browser and aggregate metrics |
+| `POST` | `/api/findings/{fingerprint}/feedback` | token | `up` / `down` / `mute` |
+| `GET` | `/api/badge/{owner}/{repo}` | **none (public)** | SVG health badge; reveals a repo's average score to anyone who knows its name |
+| `POST` | `/api/sandbox/simulate` | **none (rate-limited)** | Runs the static rules on a pasted diff (≤ 50 000 chars) |
 
 \* Reads require the token by default (`DASHBOARD_REQUIRE_TOKEN_FOR_READS=1`).
 The UI prompts for it, keeps it in `sessionStorage` and sends it on every call.
@@ -243,7 +283,7 @@ production" list below is what we'd still want.
 | Guessable dashboard token on an exposed host | Token auto-generated (`secrets.token_urlsafe`), weak/known defaults (`demo-token`, `changeme`, …) refused at startup unless `DASHBOARD_ALLOW_DEMO_TOKEN=1`; token compare is constant-time (`hmac.compare_digest`) |
 | API abuse / brute force | Per-IP sliding-window rate limits (reads 240/min, writes 30/min; tunable via `DASHBOARD_RATE_LIMIT_*`), 429 + `Retry-After` |
 | Oversized/abusive payloads | Request bodies > 2 MB → 413; reports capped at 500 stored findings (worst kept, `truncated_findings` flagged) |
-| Secrets leaking out via findings | `redact_secrets()` scrubs AWS/GitHub/Slack/Google-style keys, `Bearer` headers, `key=secret` pairs, private-key blocks and long hex from every posted/stored string |
+| Secrets leaking out via findings or errors | `redact_secrets()` scrubs AWS/GitHub/Slack/Google-style keys, `Bearer` headers, `key=secret` pairs, private-key blocks and long hex from every posted/stored string; provider warnings are additionally scrubbed of the exact credentials the run was configured with, and API keys are never put in request URLs. This is best-effort pattern matching, not a guarantee |
 | Prompt injection from PR content | Nonce-fenced `<untrusted_diff>` blocks with spoofed-tag neutralization, local injection screening (hits → report warnings), system-prompt rules to treat fenced text as data and never comply, model-reported `warnings` surfaced in the dashboard |
 | XSS via malicious PR titles/finding text | All model data rendered through escaping (`esc()` before markdown-lite); links restricted to `https?:` with `rel="noopener"`; CSP `default-src 'self'`, `nosniff`, `Referrer-Policy: no-referrer` |
 | Secrets living in reviewed files | A non-removable privacy baseline (`.env*`, `*.pem`/`*.key`, cloud/SSH credential dirs, service-account JSON, …) excludes secret-bearing paths from the diff before it reaches any analyzer, in both `ai_pr_reviewer/rules.py` and the dashboard's saved settings |
@@ -251,12 +291,17 @@ production" list below is what we'd still want.
 | Posture mistakes | **Never** switch the trigger to `pull_request_target` — it runs with base-repo secrets against untrusted forks |
 | No forensic trail | Every write and every rejected auth attempt appended to `dashboard/data/audit.jsonl` |
 | Dashboard tampering | Settings writes validated server-side (threshold enum, caps, list limits) |
+| Token at rest | `dashboard/data/settings.json` is written with mode `0600` where the OS supports it |
 
 **Before production (known gaps, on purpose)**
 
 - Put the dashboard behind TLS + real SSO/OIDC or an authenticating proxy
   (GitHub OAuth apps work well here); the token is a service credential, not a
   user-login system.
+- Rate limits key on the socket IP: behind a reverse proxy every client shares the
+  proxy's address unless you configure proxy headers correctly.
+- `GET /api/badge/...` and `POST /api/sandbox/simulate` are unauthenticated by design;
+  put them behind your proxy's auth or disable them if that is not acceptable.
 - Serve with multiple uvicorn/gunicorn workers only against PostgreSQL
   (in-memory rate-limit buckets and the audit file are per-process).
 - Add schema migrations (Alembic) once the model evolves beyond v1.
@@ -285,23 +330,26 @@ Exit codes: `0` clean, `1` config error, `2` `fail_on` threshold reached.
 python -m pytest tests/ -q
 ```
 
-The suite covers diff parsing, Action input layering, provider fallback,
-GitHub review recovery, dashboard storage/authentication, and security
-boundaries.
+The suite covers diff parsing, Action input layering, provider selection and
+fallback, GitHub review recovery, dashboard storage/authentication, security
+boundaries, and regression tests for the v2 pre-release audit
+(`tests/test_release_hardening.py`). All provider and GitHub traffic is mocked;
+no network or API key is needed.
 
 ## 6 · Layout
 
 ```
-ai_pr_reviewer/          # the engine (shipped in the Action's Docker image)
+ai_pr_reviewer/          # the engine (run by the composite Action; also buildable as a Docker image)
   diff_parser.py         #   unified diff → hunks with new-file line map
   security.py            #   injection screening, diff fencing, secret redaction
   rules.py                #   .ai-pr-reviewer.yml parsing → ReviewPolicy
   context.py              #   diff + related files + rules + memory → ReviewContext
-  model_router.py         #   picks Claude vs. the static engine per PR/policy
+  model_router.py         #   picks Claude / OpenAI / Gemini / static per config and validates it
   retry.py                #   backoff + jitter for the Anthropic call
   ai/
-    provider.py           #     AIProvider protocol (shared by both backends)
+    provider.py           #     AIProvider protocol (shared by all backends)
     claude.py              #     ClaudeProvider — prompting, batching, fallback-on-failure
+    openai.py, gemini.py   #     OpenAI / OpenAI-compatible and Gemini providers
   static/                 #   deterministic rule engine (NOT AI)
     engine.py              #     StaticEngine: runs the registry, implements AIProvider too
     registry.py             #     RuleRegistry — rule_id/language/category/severity/confidence
@@ -323,9 +371,12 @@ dashboard/
   static/                #   dependency-free SPA
 demo/                    #   fixture repos, diffs, dashboard seeder
 tests/                   #   pytest suite
-action.yml + Dockerfile  #   GitHub Action wrapper
+action.yml               #   composite GitHub Action (pip install + python -m ai_pr_reviewer)
+Dockerfile               #   optional container build of the same engine (built in CI)
 ```
 
-## 7 · License
+## 7 · Changelog & license
+
+See [CHANGELOG.md](CHANGELOG.md).
 
 [MIT](LICENSE).

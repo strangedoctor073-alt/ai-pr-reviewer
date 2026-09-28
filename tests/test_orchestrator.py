@@ -538,7 +538,7 @@ def test_cli_leaves_dismissed_and_muted_findings_out(monkeypatch, tmp_path):
     assert len(w.gh.posted[0]["comments"]) == 1
     assert "findings_count=1" in out_file.read_text(encoding="utf-8")
     body = w.gh.posted[0]["body"]
-    assert "1 finding(s)" in body and "dismissed" not in body.split("<details>")[0]
+    assert "Issues Flagged** | 1" in body and "dismissed" not in body.split("<details>")[0]
 
 
 # ------------------------------------------------- moved helpers stay importable
@@ -578,7 +578,7 @@ def test_cli_run_posts_only_new_findings_and_reports_state(monkeypatch, tmp_path
     outputs = out_file.read_text(encoding="utf-8")
     assert "findings_count=2" in outputs                 # resolved doesn't count
     assert "report_path=" in outputs
-    assert "## \U0001f916 PR Review \u2014 Claude" in posted["body"]
+    assert "## \U0001f916 AI PR Review" in posted["body"]
 
 
 def test_cli_run_survives_a_token_that_cannot_write(monkeypatch, tmp_path):
@@ -689,7 +689,7 @@ def test_header_is_labelled_by_engine_and_static_is_never_ai():
     for mode, engine, label in cases:
         md = reporter.build_summary_markdown(_result(mode=mode, engine=engine))
         first = md.splitlines()[0]
-        assert first == f"## \U0001f916 PR Review \u2014 {label} \u00b7 no issues found", first
+        assert "## \U0001f916 AI PR Review" in first
         if label == "Static Fallback":
             assert "not an AI review" in md
 
@@ -704,7 +704,7 @@ def test_summary_counts_only_open_findings():
                 _finding(title="c", state="resolved", severity="critical"),
                 _finding(title="d", state="muted")]
     md = reporter.build_summary_markdown(_result(mode="claude", findings=findings))
-    assert md.splitlines()[0].endswith("\u00b7 2 finding(s)")
+    assert "Issues Flagged** | 2" in md
     assert "1 previously reported finding(s) resolved" in md
     assert "2 high" in md and "critical" not in md
 

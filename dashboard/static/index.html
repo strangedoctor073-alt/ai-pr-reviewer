@@ -8,11 +8,12 @@
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
+<a class="skip-link" href="#app">Skip to main content</a>
 <div class="shell">
   <aside class="rail">
     <div class="rail-brand">
       <span class="mark">
-        <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true">
           <rect x="0.5" y="0.5" width="23" height="23" rx="5.5" stroke="currentColor" stroke-opacity="0.35"/>
           <path d="M7 5v14M7 9h4a3 3 0 0 1 0 6H7" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/>
           <circle cx="17.2" cy="7" r="1.8" fill="currentColor"/>
@@ -24,27 +25,36 @@
       </span>
     </div>
 
-    <nav id="nav">
+    <nav id="nav" aria-label="Main navigation">
       <a href="#/" data-nav="reviews">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
         Reviews
+        <span class="nav-kbd" aria-label="keyboard shortcut 1">1</span>
       </a>
       <a href="#/findings" data-nav="findings">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
         Findings
+        <span class="nav-kbd" aria-label="keyboard shortcut 2">2</span>
       </a>
       <a href="#/metrics" data-nav="metrics">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 20V10M12 20V4M20 20v-7"/></svg>
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M4 20V10M12 20V4M20 20v-7"/></svg>
         Metrics
+        <span class="nav-kbd" aria-label="keyboard shortcut 3">3</span>
+      </a>
+      <a href="#/sandbox" data-nav="sandbox">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+        &#x26A1; Sandbox
+        <span class="nav-kbd" aria-label="keyboard shortcut 5">5</span>
       </a>
       <a href="#/settings" data-nav="settings">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.55V21a2 2 0 1 1-4 0v-.09A1.7 1.7 0 0 0 9 19.4a1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.55-1H3a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.6 9a1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.55V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.55 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.4 9a1.7 1.7 0 0 0 1.55 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.55 1z"/></svg>
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.55V21a2 2 0 1 1-4 0v-.09A1.7 1.7 0 0 0 9 19.4a1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.55-1H3a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.6 9a1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.55V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.55 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.4 9a1.7 1.7 0 0 0 1.55 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.55 1z"/></svg>
         Rules &amp; Settings
+        <span class="nav-kbd" aria-label="keyboard shortcut 4">4</span>
       </a>
     </nav>
 
     <div class="rail-foot" id="dataModeFoot">
-      <span class="dot dot-live"></span>live&nbsp;&nbsp;<span class="dot dot-mock"></span>v2 preview
+      <span class="dot dot-live"></span>live data
     </div>
   </aside>
 
@@ -57,7 +67,7 @@
       <div class="topbar-actions" id="pageActions"></div>
     </header>
     <main id="app" aria-live="polite">
-      <div class="loading"><div class="spinner"></div><p>Loading…</p></div>
+      <div class="loading"><div class="spinner"></div><p>Loading&#8230;</p></div>
     </main>
   </div>
 </div>
