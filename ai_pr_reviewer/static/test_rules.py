@@ -71,7 +71,7 @@ def _stem(path: str) -> str:
     return name.lower()
 
 
-def test_gap_findings(files: list[FileDiff]) -> list[Finding]:
+def gap_findings(files: list[FileDiff]) -> list[Finding]:
     test_stems = {_stem(fd.path) for fd in files
                   if not fd.is_binary and _is_test_path(fd.path)}
 
@@ -102,4 +102,4 @@ def test_gap_findings(files: list[FileDiff]) -> list[Finding]:
 
 
 def register(registry: RuleRegistry) -> None:
-    registry.add_diff_rule(test_gap_findings)
+    registry.add_diff_rule(gap_findings)

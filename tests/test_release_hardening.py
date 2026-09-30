@@ -215,6 +215,8 @@ def test_no_retired_model_ids_are_hardcoded_in_the_engine():
     root = pathlib.Path(cli.__file__).parent
     banned = ("gemini-2.0", "gemini-1.5", "claude-3-5", "claude-3-7")
     for path in root.rglob("*.py"):
-        text = path.read_text()
+        # Explicit encoding: the default is locale-dependent (cp1252 on
+        # Windows), and these sources are UTF-8 with non-ASCII punctuation.
+        text = path.read_text(encoding="utf-8")
         for b in banned:
             assert b not in text, f"{path.name} hard-codes retired model id {b!r}"

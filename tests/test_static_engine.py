@@ -288,7 +288,7 @@ def test_gap_flagged_when_no_test_file_changed():
         "def charge(order_id, amount_cents):\n"
         "    return process(order_id, amount_cents)\n"
     ))
-    findings = test_gap_rules.test_gap_findings(_files(diff))
+    findings = test_gap_rules.gap_findings(_files(diff))
     assert len(findings) == 1
     f = findings[0]
     assert f.rule_id == "TEST001"
@@ -308,7 +308,7 @@ def test_gap_not_flagged_when_matching_test_present():
         ))
     )
     files = parse_unified_diff(combined)
-    findings = test_gap_rules.test_gap_findings(files)
+    findings = test_gap_rules.gap_findings(files)
     assert findings == []
 
 
@@ -322,7 +322,7 @@ def test_gap_ignores_test_config_and_doc_files():
         _new_file_diff(".ai-pr-reviewer.yml", "review:\n  mode: balanced\n")
     )
     files = parse_unified_diff(combined)
-    findings = test_gap_rules.test_gap_findings(files)
+    findings = test_gap_rules.gap_findings(files)
     assert findings == []
 
 

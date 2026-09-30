@@ -40,7 +40,13 @@ async function api(path, opts = {}) {
   return res.json();
 }
 
+let _tokenPrompt = null;
 function askForToken() {
+  if (!_tokenPrompt) _tokenPrompt = _askForToken().finally(() => { _tokenPrompt = null; });
+  return _tokenPrompt;
+}
+
+function _askForToken() {
   return new Promise((resolve) => {
     let ov = document.querySelector(".overlay");
     if (ov) { ov.querySelector("input").focus(); return resolve(); }
@@ -200,21 +206,27 @@ window.addEventListener("keydown", (e) => {
   }
 });
 
-async function route() {
-  const hash = location.hash || "#/";
-  const render = () => {
-    if (hash.startsWith("#/report/")) return renderDetail(hash.slice("#/report/".length));
-    if (hash === "#/findings") return renderFindings();
-    if (hash === "#/metrics") return renderMetrics();
-    if (hash === "#/sandbox") return renderSandbox();
-    if (hash === "#/settings") return renderSettings();
-    return renderList();
-  };
+/* Ask for the token up front. /api/health is public and says whether reads
+   need one. This must happen OUTSIDE document.startViewTransition(): while a
+   transition's update callback is pending, Chrome holds rendering, so a token
+   dialog opened inside it may not paint or take input and the page appears to
+   hang on "Loading...". */
+async function ensureAuth() {
+  try {
+    const h = await (await fetch("/api/health")).json();
+    if (h.reads_require_token && !storedToken()) await askForToken();
+  } catch (_) { /* fall through; api() handles 401s */ }
+}
 
-  if (!document.startViewTransition) {
-    return render();
-  }
-  document.startViewTransition(() => render());
+async function route() {
+  await ensureAuth();
+  const hash = location.hash || "#/";
+  if (hash.startsWith("#/report/")) return renderDetail(hash.slice("#/report/".length));
+  if (hash === "#/findings") return renderFindings();
+  if (hash === "#/metrics") return renderMetrics();
+  if (hash === "#/sandbox") return renderSandbox();
+  if (hash === "#/settings") return renderSettings();
+  return renderList();
 }
 
 /* ================================================================= REVIEWS
