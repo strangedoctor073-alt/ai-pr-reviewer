@@ -70,9 +70,7 @@ class Config:
 
     # V2 knobs (context.py / rules.py / storage.py)
     review_mode: str = "automatic"     # economy | balanced | maximum | automatic
-    fallback_enabled: bool = True      # allow static-analysis fallback on Claude failure
     incremental_enabled: bool = True   # review only changes since last reviewed SHA
-    memory_enabled: bool = True        # pull repository memory/feedback into context
     rules_file: str = ".ai-pr-reviewer.yml"  # project rules file, relative to repo root
     storage_file: str = ""             # local SQLite file for stateful reviews;
                                         # empty = stateless unless dashboard_url/token set
@@ -108,12 +106,8 @@ def load_config(args) -> Config:
     cfg.batch_chars = int(_env("INPUT_BATCH_CHARS", default="80000"))
     cfg.review_mode = (getattr(args, "review_mode", None) or _env(
         "INPUT_REVIEW_MODE", default="automatic")).lower()
-    cfg.fallback_enabled = _bool_field(getattr(args, "fallback", None),
-                                       "INPUT_FALLBACK", default=True)
     cfg.incremental_enabled = _bool_field(getattr(args, "incremental", None),
                                           "INPUT_INCREMENTAL", default=True)
-    cfg.memory_enabled = _bool_field(getattr(args, "memory", None),
-                                     "INPUT_MEMORY", default=True)
     cfg.rules_file = getattr(args, "rules_file", None) or _env(
         "INPUT_RULES_FILE", default=".ai-pr-reviewer.yml")
     cfg.storage_file = getattr(args, "storage_file", None) or _env(

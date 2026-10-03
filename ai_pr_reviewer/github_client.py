@@ -1,8 +1,7 @@
 """Thin GitHub REST client covering exactly what the reviewer needs:
 fetch PR metadata + diff (whole PR or just the commits since the last
 review), read repository files for context, post a review with inline
-comments, fall back to a regular PR comment when inline anchoring fails,
-edit an existing review comment, and publish a check run."""
+comments, fall back to a regular PR comment when inline anchoring fails."""
 from __future__ import annotations
 
 import base64
@@ -17,11 +16,6 @@ from .models import PRContext
 # total). Stop after 10 pages so a pathological PR can't loop us forever.
 _FILES_PER_PAGE = 100
 _MAX_FILE_PAGES = 10
-
-# The check-run API rejects output.summary / output.text over 65,535 characters.
-_CHECK_TEXT_LIMIT = 65_000
-_CHECK_STATUSES = ("in_progress", "completed")
-_CHECK_CONCLUSIONS = ("success", "neutral", "failure")
 
 
 class GitHubError(RuntimeError):
@@ -53,13 +47,6 @@ def _safe_repo_path(path: str) -> str:
     if not path or any(seg in ("", ".", "..") for seg in path.split("/")):
         raise GitHubError(f"refusing unsafe repository path: {path!r}")
     return path
-
-
-def _clip(text: str, limit: int = _CHECK_TEXT_LIMIT) -> str:
-    text = text or ""
-    if len(text) <= limit:
-        return text
-    return text[: limit - 60].rstrip() + "\n\n... [truncated to fit GitHub's check-run limit]"
 
 
 class GitHubClient:
@@ -252,44 +239,6 @@ class GitHubClient:
         if r.status_code in (200, 201):
             return {"ok": True}
         raise _api_error("POST comment", r)
-
-    def update_review_comment(self, comment_id: int, body: str) -> dict:
-        """Edit an existing inline review comment in place (returns its JSON)."""
-        r = self._http.patch(
-            f"/repos/{self.repo}/pulls/comments/{int(comment_id)}", json={"body": body})
-        if r.status_code != 200:
-            raise _api_error("PATCH review comment", r)
-        return r.json()
-
-    # ------------------------------------------------------------- check runs
-    def create_check_run(self, head_sha: str, name: str, status: str,
-                         conclusion: str | None, summary: str, text: str) -> dict:
-        """Create a check run on ``head_sha`` (returns the API response, incl. ``id``).
-
-        ``status`` is "in_progress" or "completed"; ``conclusion`` is required
-        when completed ("success" | "neutral" | "failure") and must be None
-        otherwise. Bad combinations raise ValueError before anything is sent.
-        Needs ``checks: write`` on the token.
-        """
-        if status not in _CHECK_STATUSES:
-            raise ValueError(f"status must be one of {_CHECK_STATUSES}, got {status!r}")
-        if status == "completed" and conclusion not in _CHECK_CONCLUSIONS:
-            raise ValueError(
-                f"a completed check run needs a conclusion in {_CHECK_CONCLUSIONS}, "
-                f"got {conclusion!r}")
-        if status != "completed" and conclusion is not None:
-            raise ValueError("conclusion is only valid when status is 'completed'")
-
-        output = {"title": name, "summary": _clip(summary)}
-        if text:
-            output["text"] = _clip(text)
-        payload = {"name": name, "head_sha": head_sha, "status": status, "output": output}
-        if status == "completed":
-            payload["conclusion"] = conclusion
-        r = self._http.post(f"/repos/{self.repo}/check-runs", json=payload)
-        if r.status_code not in (200, 201):
-            raise _api_error("POST check run", r)
-        return r.json()
 
     # ------------------------------------------------------- helper utilities
     @staticmethod

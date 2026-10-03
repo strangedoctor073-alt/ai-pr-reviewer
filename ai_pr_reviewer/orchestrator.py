@@ -29,6 +29,7 @@ from .rules import DEFAULT_SEVERITY, load_project_rules
 # --- Pipeline stages (each lives in its own module) -------------------------
 from .context import build_context                   # provided by context.py
 from .findings import apply_lifecycle, deduplicate   # provided by findings.py
+from .findings import mark_dismissed                 # muted findings (D4)
 from .model_router import get_provider               # provided by model_router.py
 
 # Lifecycle fields persisted with each finding (Finding.to_dict() may or may
@@ -174,6 +175,12 @@ class ReviewOrchestrator:
         previous = self._previous_findings(repo, pr, context)
         lifecycle_findings = self._apply_lifecycle(previous, inline, files,
                                                    incremental, pr.head_sha)
+        # ... then park anything the dashboard user muted (see
+        # _apply_dismissals) — after the lifecycle so a mute can never
+        # overwrite a "resolved" transition, and before the health score
+        # so muted findings don't count against it.
+        lifecycle_findings = self._apply_dismissals(repo, lifecycle_findings,
+                                                    warnings)
 
         from .models import calculate_health_score
         score, grade = calculate_health_score(lifecycle_findings)
@@ -297,6 +304,31 @@ class ReviewOrchestrator:
             if getattr(p, "state", "new") in ("new", "reopened"):
                 p.state = "active"
         return updated + untouched
+
+    def _apply_dismissals(self, repo: str, findings: list[Finding],
+                          warnings: list[str]) -> list[Finding]:
+        """Mute findings the dashboard user dismissed (fingerprint match).
+
+        ``get_dismissed_fingerprints`` is an optional storage capability —
+        only the dashboard feedback store has it — so backends without it
+        (local SQLite, fakes, no storage at all) simply skip this step. A
+        failing lookup downgrades to a warning rather than losing the
+        review, same policy as every other storage read here.
+        """
+        getter = getattr(self.storage, "get_dismissed_fingerprints", None) \
+            if self.storage is not None else None
+        if not callable(getter):
+            return findings
+        try:
+            dismissed = set(getter(repo) or [])
+        except Exception as exc:  # noqa: BLE001 — storage must never lose a review
+            warnings.append(_scrub(
+                f"muted-fingerprint lookup failed ({exc}); no findings were "
+                f"muted this run.", self.cfg))
+            return findings
+        if not dismissed:
+            return findings
+        return mark_dismissed(findings, dismissed)
 
     # ------------------------------------------------------------ persistence
     def _persist(self, result: ReviewResult, repo: str, pr: PRContext) -> None:

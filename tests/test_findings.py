@@ -180,3 +180,17 @@ def test_mark_dismissed_empty_set_changes_nothing():
     findings = [_finding(), _finding(file="other.py")]
     result = mark_dismissed(findings, set())
     assert [f.state for f in result] == [f.state for f in findings]
+
+
+def test_mark_dismissed_never_rewrites_a_resolved_finding():
+    """A stale mute entry must not flip "fixed" history to "muted" —
+    those are different facts, and the flip would repeat every run."""
+    fixed = _finding(file="payments.py", title="SQL injection", state="resolved")
+    live = _finding(file="refunds.py", title="Missing error handling", state="active")
+    dismissed = {fingerprint_finding(fixed), fingerprint_finding(live)}
+
+    result = mark_dismissed([fixed, live], dismissed)
+    by_file = {f.file: f for f in result}
+
+    assert by_file["payments.py"].state == "resolved"   # untouched
+    assert by_file["refunds.py"].state == "muted"

@@ -201,6 +201,89 @@ def test_json_storage_review_state_and_lifecycle(tmp_path):
     assert notes == ["Python best practice"]
 
 
+# ----------------------------------------------------- repo memory (D3)
+def test_db_list_repo_memory_returns_rows_verbatim(db_storage):
+    repo = "acme/payments"
+    db_storage.add_repo_memory(repo, "pay*.py", "Note on payments")
+    db_storage.add_repo_memory(repo, "*", "Repo-wide note")
+
+    rows = {r["path_pattern"]: r["note"] for r in db_storage.list_repo_memory(repo)}
+
+    assert rows == {"pay*.py": "Note on payments", "*": "Repo-wide note"}
+    assert db_storage.list_repo_memory("acme/other") == []
+
+
+def test_json_list_repo_memory_returns_rows_verbatim(tmp_path):
+    storage = JsonStorage(tmp_path / "reports", data_dir=tmp_path)
+    storage.init()
+    repo = "acme/orders"
+    storage.add_repo_memory(repo, "*.py", "Python best practice")
+
+    assert storage.list_repo_memory(repo) == [
+        {"path_pattern": "*.py", "note": "Python best practice"}]
+    assert storage.list_repo_memory("acme/other") == []
+
+
+def test_db_record_feedback_only_mute_writes_repo_memory(db_storage):
+    repo = "acme/payments"
+
+    db_storage.record_feedback("fp_down", "down", repo=repo)
+    db_storage.record_feedback("fp_up", "up", repo=repo)
+    assert db_storage.list_repo_memory(repo) == []     # a vote is not a mute
+
+    db_storage.record_feedback("fp_mute", "mute", repo=repo)
+    assert db_storage.list_repo_memory(repo) == [
+        {"path_pattern": "fingerprint:fp_mute", "note": "Muted finding fp_mute"}]
+    # ...and the mute row is not a path-scoped note
+    assert db_storage.get_repo_memory(repo, ["pay.py"]) == []
+
+
+def test_json_record_feedback_only_mute_writes_repo_memory(tmp_path):
+    storage = JsonStorage(tmp_path / "reports", data_dir=tmp_path)
+    storage.init()
+    repo = "acme/orders"
+
+    storage.record_feedback("fp_down", "down", repo=repo)
+    assert storage.list_repo_memory(repo) == []
+
+    storage.record_feedback("fp_mute", "mute", repo=repo, note="not useful")
+    assert storage.list_repo_memory(repo) == [
+        {"path_pattern": "fingerprint:fp_mute", "note": "not useful"}]
+
+
+# ------------------------------------------------------- memory endpoint (D3)
+def _memory_app(monkeypatch, tmp_path, storage):
+    monkeypatch.setattr(dashboard_app, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(dashboard_app, "REPORTS_DIR", tmp_path / "reports")
+    monkeypatch.setattr(dashboard_app, "SETTINGS_PATH", tmp_path / "settings.json")
+    monkeypatch.setattr(dashboard_app, "AUDIT_PATH", tmp_path / "audit.jsonl")
+    monkeypatch.setattr(dashboard_app, "_storage", storage)
+    monkeypatch.setattr(dashboard_app, "_api_token", "test-token")
+    return {"X-Dashboard-Token": "test-token"}
+
+
+def test_memory_endpoint_returns_real_path_patterns(monkeypatch, tmp_path):
+    storage = JsonStorage(tmp_path / "reports", data_dir=tmp_path)
+    storage.init()
+    storage.add_repo_memory("acme/widgets", "src/*.py", "scoped note")
+    storage.record_feedback("fp123", "mute", repo="acme/widgets")
+    headers = _memory_app(monkeypatch, tmp_path, storage)
+
+    with TestClient(dashboard_app.app) as client:
+        rows = client.get("/api/repos/acme/widgets/memory",
+                          headers=headers).json()["memory"]
+        filtered = client.get("/api/repos/acme/widgets/memory",
+                              params=[("paths", "src/app.py")],
+                              headers=headers).json()["memory"]
+
+    by_pattern = {r["path_pattern"]: r["note"] for r in rows}
+    assert by_pattern == {"src/*.py": "scoped note",
+                          "fingerprint:fp123": "Muted finding fp123"}
+    # ?paths= filters on each row's own pattern — the reviewer's client
+    # splits note rows from mute rows itself.
+    assert [r["path_pattern"] for r in filtered] == ["src/*.py"]
+
+
 # ------------------------------------------------------ privacy baseline (settings)
 def test_validated_rules_preserves_sensitive_baseline_and_custom_glob():
     body = {"severity_threshold": "high", "max_comments": 10,

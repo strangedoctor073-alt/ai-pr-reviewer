@@ -9,7 +9,8 @@ from ..diff_parser import FileDiff
 from ..models import Finding
 from ..retry import RetryPolicy
 from ..security import scan_prompt_injection, wrap_untrusted_diff
-from .claude import SYSTEM_PROMPT, _batch_with_files
+from .claude import (SYSTEM_PROMPT, _batch_with_files, _memory_notes,
+                     build_untrusted_memory_block)
 
 if TYPE_CHECKING:
     from ..context import ReviewContext
@@ -52,12 +53,16 @@ class OpenAIProvider:
         fallback_used = False
         any_success = False
 
+        # Repository memory is PR-adjacent text: screen + fence it once,
+        # then send the same block with every batch.
+        memory_block = build_untrusted_memory_block(_memory_notes(context), warnings)
+
         for idx, (batch_text, batch_files) in enumerate(batches, 1):
             for hit in scan_prompt_injection(batch_text):
                 warnings.append(f"batch {idx}: prompt-injection screen: {hit}")
             try:
                 result = self._review_batch(batch_text, len(batches), idx, focus_areas,
-                                            project_rules)
+                                            project_rules, memory_block)
             except Exception as exc:
                 warnings.append(
                     f"Batch {idx}/{len(batches)} failed after retries ({exc}) — "
@@ -98,7 +103,8 @@ class OpenAIProvider:
         return self._static.analyze(batch_files).findings
 
     def _review_batch(self, batch: str, total_batches: int, idx: int,
-                      focus_areas: list[str], project_rules: list[str]) -> dict:
+                      focus_areas: list[str], project_rules: list[str],
+                      memory_block: str = "") -> dict:
         fenced, nonce = wrap_untrusted_diff(batch)
 
         user = (
@@ -114,6 +120,8 @@ class OpenAIProvider:
         if project_rules:
             user += ("Repository-owner rules (trusted):\n- "
                      + "\n- ".join(project_rules) + "\n")
+        if memory_block:
+            user += memory_block
         user += "\n" + fenced
 
         url = f"{self.base_url.rstrip('/')}/chat/completions" if self.base_url else self.API_URL

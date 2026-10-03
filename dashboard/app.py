@@ -24,6 +24,7 @@ Auth: X-Dashboard-Token header (token is printed to the server log on first
 from __future__ import annotations
 
 import datetime as _dt
+import fnmatch
 import hmac
 import json
 import logging
@@ -520,11 +521,23 @@ async def post_review_findings(repo_owner: str, repo_name: str, pr_number: int, 
 
 @app.get("/api/repos/{repo_owner}/{repo_name}/memory")
 def get_repo_memory_endpoint(repo_owner: str, repo_name: str, request: Request):
+    """All stored memory rows for this repo: ``{note, path_pattern}``.
+
+    Rows are returned verbatim (including ``fingerprint:<fp>`` mute rows
+    written by the feedback endpoint) so callers can tell "review advice"
+    apart from "dismissed finding". ``?paths=`` optionally filters by the
+    row's own path_pattern, which is what the reviewer uses for a PR's
+    file list.
+    """
     _check_reads(request)
     repo = f"{repo_owner}/{repo_name}"
-    paths = request.query_params.getlist("paths") or ["*"]
-    notes = get_storage().get_repo_memory(repo, paths)
-    return {"repo": repo, "memory": [{"note": n, "path_pattern": "*"} for n in notes]}
+    rows = get_storage().list_repo_memory(repo)
+    paths = request.query_params.getlist("paths")
+    if paths:
+        rows = [r for r in rows
+                if any(fnmatch.fnmatch(p, r.get("path_pattern") or "*")
+                       for p in paths)]
+    return {"repo": repo, "memory": rows}
 
 
 @app.post("/api/repos/{repo_owner}/{repo_name}/memory")

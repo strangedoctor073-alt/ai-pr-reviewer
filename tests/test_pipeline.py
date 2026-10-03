@@ -4,8 +4,6 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-import pytest
-
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
@@ -14,12 +12,6 @@ from ai_pr_reviewer.diff_parser import chunk_files, parse_unified_diff
 from ai_pr_reviewer.analyzer import MockAnalyzer
 from ai_pr_reviewer.cli import filter_files, validate_findings
 from ai_pr_reviewer.models import Finding
-from demo.make_fixtures import build_all
-
-
-@pytest.fixture(scope="module")
-def fixtures():
-    return {fx["name"]: fx for fx in build_all()}
 
 
 def _files(diff_text):

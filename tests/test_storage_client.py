@@ -50,8 +50,16 @@ def test_local_review_storage_crud(tmp_path):
     titles = {f.title for f in loaded}
     assert titles == {"Null pointer", "Unused import"}
 
-    # Repo memory
-    storage.add_repo_memory(repo, "*.py", "Always check None")
+    # Repo memory — the engine never writes this (see D10), so seed the
+    # row the way external tooling would: straight SQL into the table.
+    import sqlite3
+
+    with sqlite3.connect(db_file) as conn:
+        conn.execute(
+            "INSERT INTO repo_memory(repo, path_pattern, note, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            (repo, "*.py", "Always check None", "2026-01-01T00:00:00+00:00"),
+        )
     notes = storage.get_repo_memory(repo, ["main.py"])
     assert notes == ["Always check None"]
     assert storage.get_repo_memory(repo, ["styles.css"]) == []
@@ -121,6 +129,54 @@ def test_dashboard_storage_client_resilience_on_errors():
     assert client.get_previous_findings("a/b", 1) == []
     client.save_findings("a/b#1@sha", [])  # does not raise
     assert client.get_repo_memory("a/b", ["file.py"]) == []
+    assert client.get_dismissed_fingerprints("a/b") == set()  # does not raise
+
+
+# ------------------------------------------------- dismissed fingerprints (D3/D4)
+def _memory_client(rows: list[dict]) -> DashboardStorageClient:
+    """A client whose dashboard returns exactly ``rows`` for /memory."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and "/memory" in str(request.url):
+            return httpx.Response(200, json={"memory": rows})
+        return httpx.Response(404, json={"detail": "not found"})
+
+    mock_client = httpx.Client(transport=httpx.MockTransport(handler),
+                               base_url="https://dashboard.example.com")
+    return DashboardStorageClient("https://dashboard.example.com", "tok",
+                                  client=mock_client)
+
+
+def test_dismissed_fingerprints_come_back_from_fingerprint_rows():
+    client = _memory_client([
+        {"path_pattern": "*.py", "note": "Safe eval only"},
+        {"path_pattern": "fingerprint:0123456789abcdef", "note": "Muted finding 0123456789abcdef"},
+        {"path_pattern": "fingerprint:fedcba9876543210", "note": "Muted finding fedcba9876543210"},
+        {"path_pattern": "fingerprint:", "note": "Muted finding "},   # malformed
+    ])
+
+    assert client.get_dismissed_fingerprints("acme/api") == {
+        "0123456789abcdef", "fedcba9876543210"}
+
+
+def test_mute_rows_never_surface_as_repository_memory_notes():
+    client = _memory_client([
+        {"path_pattern": "*.py", "note": "Safe eval only"},
+        {"path_pattern": "fingerprint:0123456789abcdef", "note": "Muted finding 0123456789abcdef"},
+    ])
+
+    assert client.get_repo_memory("acme/api", ["app.py"]) == ["Safe eval only"]
+
+
+def test_dismissed_fingerprints_missing_endpoint_returns_empty_set():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"detail": "not found"})
+
+    mock_client = httpx.Client(transport=httpx.MockTransport(handler),
+                               base_url="https://dashboard.example.com")
+    client = DashboardStorageClient("https://dashboard.example.com", "tok",
+                                    client=mock_client)
+    assert client.get_dismissed_fingerprints("acme/api") == set()
 
 
 # -------------------------------------------------------------- resolve_storage

@@ -1,0 +1,31 @@
+# Tool configuration only — this repo is not a packaged distribution
+# (no [project] table on purpose: the Action image installs
+# requirements-action.txt, and the dev/CI install is requirements.txt).
+
+# ---------------------------------------------------------------- pytest
+# Central home for pytest config (previously there was none — defaults).
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+# Intentionally no addopts: CI and the docs invoke
+# `python -m pytest tests/ -q` explicitly, and a hidden default here would
+# make local runs disagree with CI.
+
+# ---------------------------------------------------------------- ruff
+# Optional linter (not installed locally and not part of CI). The baseline
+# below is "critical defects only": syntax errors, broken tuple/list
+# comparisons, misplaced assertions, and undefined names. Style/formatting
+# rules are deliberately absent — this codebase has no formatter history,
+# so enabling them would produce a wall of unrelated noise instead of a
+# usable signal.
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E9",   # syntax errors
+    "F63",  # assertion/comparison mistakes
+    "F7",   # statement issues (e.g. `return` outside function)
+    "F82",  # undefined names
+]

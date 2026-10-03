@@ -1,6 +1,6 @@
 """Incremental-review plumbing: GitHubClient.compare_commits / get_pr_files /
-get_file / create_check_run / update_review_comment, plus the diff-parser
-guarantees the incremental flow depends on. No network, no API keys.
+get_file, plus the diff-parser guarantees the incremental flow depends on.
+No network, no API keys.
 
 The diff fixtures below are verbatim `git diff <base>...<head>` output from a
 scratch repository (git 2.43) - the same git-format text GitHub's compare
@@ -401,94 +401,10 @@ def test_get_file_path_cannot_smuggle_a_query_string_or_fragment(monkeypatch):
 
 
 # =========================================================================
-# GitHubClient.create_check_run
+# JSON request-body helper shared by the API-shape tests below
 # =========================================================================
 def _body(request) -> dict:
     return json.loads(request.content)
-
-
-def test_create_check_run_completed_posts_the_expected_payload(monkeypatch):
-    gh, seen = make_client(monkeypatch, lambda r: httpx.Response(
-        201, json={"id": 991, "html_url": "https://github.com/acme/payments/runs/991"}))
-
-    out = gh.create_check_run(
-        HEAD_SHA, "AI PR Reviewer", "completed", "failure",
-        "2 high, 1 medium", "Security: warning\nTests: warning")
-
-    assert out["id"] == 991
-    (req,) = seen
-    assert req.method == "POST"
-    assert req.url.path == "/repos/acme/payments/check-runs"
-    assert _body(req) == {
-        "name": "AI PR Reviewer",
-        "head_sha": HEAD_SHA,
-        "status": "completed",
-        "conclusion": "failure",
-        "output": {"title": "AI PR Reviewer", "summary": "2 high, 1 medium",
-                   "text": "Security: warning\nTests: warning"},
-    }
-
-
-def test_create_check_run_in_progress_sends_no_conclusion(monkeypatch):
-    gh, seen = make_client(monkeypatch, lambda r: httpx.Response(201, json={"id": 1}))
-    gh.create_check_run(HEAD_SHA, "AI PR Reviewer", "in_progress", None, "Reviewing...", "")
-    body = _body(seen[0])
-    assert body["status"] == "in_progress"
-    assert "conclusion" not in body
-    assert "text" not in body["output"]          # empty text is omitted, not sent as ""
-
-
-@pytest.mark.parametrize("status,conclusion", [
-    ("queued", None),               # not one of the two supported statuses
-    ("completed", None),            # completed needs a conclusion
-    ("completed", "cancelled"),     # outside success | neutral | failure
-    ("in_progress", "success"),     # conclusion would silently complete the run
-])
-def test_create_check_run_rejects_bad_combinations_before_sending(monkeypatch, status, conclusion):
-    gh, seen = make_client(monkeypatch, lambda r: httpx.Response(201, json={}))
-    with pytest.raises(ValueError):
-        gh.create_check_run(HEAD_SHA, "AI PR Reviewer", status, conclusion, "s", "t")
-    assert seen == []
-
-
-def test_create_check_run_clips_text_to_githubs_limit(monkeypatch):
-    gh, seen = make_client(monkeypatch, lambda r: httpx.Response(201, json={"id": 1}))
-    gh.create_check_run(HEAD_SHA, "AI PR Reviewer", "completed", "success",
-                        "s" * 70_000, "t" * 70_000)
-    out = _body(seen[0])["output"]
-    assert len(out["summary"]) <= 65_535 and len(out["text"]) <= 65_535
-    assert out["text"].endswith("check-run limit]")
-
-
-def test_create_check_run_api_failure_raises_github_error(monkeypatch):
-    gh, _ = make_client(monkeypatch, lambda r: httpx.Response(
-        403, json={"message": "Resource not accessible by integration"}))
-    with pytest.raises(GitHubError, match=r"POST check run failed \(403\)") as exc:
-        gh.create_check_run(HEAD_SHA, "AI PR Reviewer", "completed", "success", "s", "t")
-    assert exc.value.status_code == 403
-
-
-# =========================================================================
-# GitHubClient.update_review_comment
-# =========================================================================
-def test_update_review_comment_patches_the_comment_body(monkeypatch):
-    gh, seen = make_client(monkeypatch, lambda r: httpx.Response(
-        200, json={"id": 555, "body": "Resolved in abc1234"}))
-
-    out = gh.update_review_comment(555, "Resolved in abc1234")
-
-    assert out["id"] == 555
-    (req,) = seen
-    assert req.method == "PATCH"
-    assert req.url.path == "/repos/acme/payments/pulls/comments/555"
-    assert _body(req) == {"body": "Resolved in abc1234"}
-
-
-def test_update_review_comment_failure_raises(monkeypatch):
-    gh, _ = make_client(monkeypatch, lambda r: httpx.Response(404, json={"message": "Not Found"}))
-    with pytest.raises(GitHubError, match=r"\(404\)") as exc:
-        gh.update_review_comment(555, "x")
-    assert exc.value.status_code == 404
 
 
 # =========================================================================

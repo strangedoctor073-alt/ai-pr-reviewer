@@ -336,6 +336,66 @@ def test_same_sha_rerun_keeps_open_findings_open(monkeypatch):
     assert [f.state for f in result.findings] == ["active"]
 
 
+# --------------------------------------------------- dashboard muting (D4)
+class MutedStorage(FakeStorage):
+    """Storage that also has the optional dashboard feedback capability
+    (``get_dismissed_fingerprints``)."""
+
+    def __init__(self, dismissed):
+        super().__init__(log=[])
+        self.dismissed = set(dismissed)
+
+    def get_dismissed_fingerprints(self, repo):
+        self.log.append("get_dismissed_fingerprints")
+        return set(self.dismissed)
+
+
+def test_dismissed_fingerprints_are_muted_after_the_lifecycle(monkeypatch):
+    from ai_pr_reviewer.findings import fingerprint_finding
+
+    f = _finding()
+    w = Wired(monkeypatch, storage=MutedStorage([fingerprint_finding(f)]),
+              findings=[_finding()])
+
+    result = w.run()
+
+    assert [x.state for x in result.findings] == ["muted"]
+    # muting happens after the lifecycle pass, never before it
+    assert w.log.index("apply_lifecycle") < w.log.index("get_dismissed_fingerprints")
+
+
+def test_stale_mute_does_not_overwrite_a_resolved_finding(monkeypatch):
+    from ai_pr_reviewer.findings import fingerprint_finding
+
+    def lifecycle(previous, current):
+        return [_finding(title="still open", state="new"),
+                _finding(title="fixed already", state="resolved")]
+
+    storage = MutedStorage({fingerprint_finding(_finding(title="still open")),
+                            fingerprint_finding(_finding(title="fixed already",
+                                                         state="resolved"))})
+    w = Wired(monkeypatch, storage=storage, lifecycle=lifecycle,
+              findings=[_finding()])
+
+    result = w.run()
+
+    by_title = {x.title: x.state for x in result.findings}
+    assert by_title == {"still open": "muted", "fixed already": "resolved"}
+
+
+def test_dismissed_fingerprint_lookup_failure_degrades_to_a_warning(monkeypatch):
+    class BrokenStorage(FakeStorage):
+        def get_dismissed_fingerprints(self, repo):
+            raise RuntimeError("dashboard down")
+
+    w = Wired(monkeypatch, storage=BrokenStorage([]), findings=[_finding()])
+
+    result = w.run()
+
+    assert len(result.findings) == 1                     # review still returned
+    assert any("muted-fingerprint lookup failed" in x for x in result.warnings)
+
+
 # --------------------------------------------------------------- result shape
 def test_result_shape_matches_v1_and_carries_provider_metadata(monkeypatch):
     w = Wired(monkeypatch, findings=[_finding(), _finding(severity="info", title="nit")],

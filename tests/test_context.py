@@ -1,5 +1,5 @@
-"""Tests for ai_pr_reviewer/context.py — find_relevant_files, build_context,
-and the ContextBudget trim.
+"""Tests for ai_pr_reviewer/context.py — build_context (rules, previous
+findings, repository memory) and the ContextBudget trim.
 
 """
 from __future__ import annotations
@@ -11,8 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from ai_pr_reviewer.config import Config
-from ai_pr_reviewer.context import (MAX_RELEVANT_FILES, ReviewContext,
-                                    build_context, find_relevant_files)
+from ai_pr_reviewer.context import ReviewContext, build_context
 from ai_pr_reviewer.diff_parser import FileDiff, Hunk, HunkLine
 from ai_pr_reviewer.models import PRContext
 from ai_pr_reviewer.rules import ReviewPolicy
@@ -33,56 +32,6 @@ def _file(path: str, added_lines: list[str] | None = None) -> FileDiff:
     return FileDiff(old_path=path, new_path=path, hunks=[hunk])
 
 
-# --------------------------------------------------------------- find_relevant_files
-def test_same_directory_match():
-    changed = "src/payments/api.py"
-    repo_files = [
-        "src/payments/api.py",       # the changed file itself — must be excluded
-        "src/payments/refunds.py",   # same dir
-        "src/payments/models.py",    # same dir
-        "src/unrelated/other.py",    # different dir
-    ]
-    found = find_relevant_files(changed, repo_files)
-    assert "src/payments/refunds.py" in found
-    assert "src/payments/models.py" in found
-    assert "src/payments/api.py" not in found
-    assert "src/unrelated/other.py" not in found
-
-
-def test_test_naming_convention_match_when_no_same_dir_candidates():
-    changed = "payments.py"
-    repo_files = ["tests/test_payments.py", "unrelated/thing.py"]
-    found = find_relevant_files(changed, repo_files)
-    assert found == ["tests/test_payments.py"]
-
-
-def test_test_file_change_finds_its_implementation():
-    changed = "tests/test_payments.py"
-    repo_files = ["payments.py", "unrelated/thing.py"]
-    found = find_relevant_files(changed, repo_files)
-    assert "payments.py" in found
-
-
-def test_respects_five_file_cap():
-    changed = "pkg/mod.py"
-    repo_files = [f"pkg/sibling_{i}.py" for i in range(30)]
-    found = find_relevant_files(changed, repo_files)
-    assert len(found) == MAX_RELEVANT_FILES
-    assert len(set(found)) == MAX_RELEVANT_FILES  # no duplicates
-
-
-def test_import_grep_strategy_matches_local_module():
-    changed = "app/main.py"
-    repo_files = ["app/utils.py", "app/other_unrelated.py"]
-    diff_text = "+from .utils import helper\n+helper()\n"
-    found = find_relevant_files(changed, repo_files, diff_text=diff_text)
-    assert "app/utils.py" in found
-
-
-def test_no_matches_returns_empty_list():
-    assert find_relevant_files("standalone.py", ["totally/different.py"]) == []
-
-
 # ------------------------------------------------------------------- build_context
 def test_build_context_basic_no_storage_no_rules_file(tmp_path):
     cfg = Config(focus_areas=["performance"])
@@ -94,7 +43,6 @@ def test_build_context_basic_no_storage_no_rules_file(tmp_path):
     assert isinstance(ctx, ReviewContext)
     assert ctx.project_rules == ReviewPolicy()
     assert ctx.previous_findings == []
-    assert ctx.relevant_files == {}
     assert ctx.memory_notes == []
     assert ctx.focus_areas == ["performance"]
     assert ctx.token_budget == cfg.batch_chars
@@ -153,19 +101,21 @@ def test_build_context_survives_storage_error(tmp_path):
     assert ctx.memory_notes == []  # degrades gracefully, doesn't raise
 
 
-def test_build_context_populates_relevant_files_when_contents_given(tmp_path):
+def test_build_context_redacts_secrets_in_memory_notes(tmp_path):
+    """Memory notes are PR-adjacent text: anything that looks like a
+    credential must be scrubbed before it can reach a prompt or a report."""
     cfg = Config()
     cfg.repo_root = str(tmp_path)
-    files = [_file("src/payments/api.py")]
-    contents = {
-        "src/payments/api.py": "<the changed file itself>",
-        "src/payments/refunds.py": "def refund(): ...",
-        "unrelated/thing.py": "x = 1",
-    }
 
-    ctx = build_context(_pr(), files, cfg, repo_file_contents=contents)
+    class FakeStorage:
+        def get_repo_memory(self, repo, files):
+            return ["rotate this token: ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789 please"]
 
-    assert ctx.relevant_files == {"src/payments/refunds.py": "def refund(): ..."}
+    ctx = build_context(_pr(), [_file("a.py")], cfg, storage=FakeStorage())
+
+    assert ctx.memory_notes
+    assert "ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789" not in ctx.memory_notes[0]
+    assert "[REDACTED]" in ctx.memory_notes[0]
 
 
 # ------------------------------------------------------------- ContextBudget
@@ -174,19 +124,15 @@ def test_build_context_respects_token_budget_by_trimming(tmp_path):
     cfg.repo_root = str(tmp_path)
     files = [_file(f"file_{i}.py", [f"some added line number {j}" for j in range(50)])
             for i in range(5)]
-    contents = {f.path: "x" * 500 for f in files}
 
     untrimmed_total = sum(len(f.to_diff_text()) for f in files)
     assert untrimmed_total > cfg.batch_chars  # sanity: this really is oversized
 
-    ctx = build_context(_pr(), files, cfg, repo_file_contents=contents)
+    ctx = build_context(_pr(), files, cfg)
 
-    trimmed_total = (sum(len(f.to_diff_text()) for f in ctx.files)
-                     + sum(len(v) for v in ctx.relevant_files.values()))
+    trimmed_total = sum(len(f.to_diff_text()) for f in ctx.files)
     assert trimmed_total <= cfg.batch_chars
     assert ctx.token_budget == cfg.batch_chars
-    # relevant-file content is dropped before changed-code hunks are touched
-    assert ctx.relevant_files == {}
     assert any("context budget" in note for note in ctx.memory_notes)
 
 

@@ -31,7 +31,13 @@ def _now_iso() -> str:
 
 @runtime_checkable
 class ReviewStorage(Protocol):
-    """Storage contract expected by ReviewOrchestrator and build_context."""
+    """Storage contract expected by ReviewOrchestrator and build_context.
+
+    One capability is deliberately optional and therefore NOT declared
+    here: ``get_dismissed_fingerprints(repo)``. Only backends with a
+    feedback store (the dashboard) have it, so callers getattr-guard it —
+    declaring it would make this Protocol a lie for the SQLite backend.
+    """
 
     def get_last_reviewed_sha(self, repo: str, pr_number: int) -> str | None:
         """Return the head commit SHA from the most recent completed review, or None."""
@@ -51,7 +57,11 @@ class ReviewStorage(Protocol):
         ...
 
     def get_repo_memory(self, repo: str, paths: list[str]) -> list[str]:
-        """Fetch past review memory notes or dismissed pattern feedback for paths."""
+        """Fetch past review memory notes matching ``paths``.
+
+        Mute decisions (``fingerprint:<fp>`` rows) are deliberately not
+        notes: they are read via ``get_dismissed_fingerprints`` instead.
+        """
         ...
 
 
@@ -166,6 +176,10 @@ class DashboardStorageClient:
             for item in items:
                 pattern = item.get("path_pattern", "*")
                 note = item.get("note", "")
+                # "fingerprint:<fp>" rows are mute decisions, not review
+                # memory — they are read by get_dismissed_fingerprints.
+                if pattern.startswith("fingerprint:"):
+                    continue
                 if any(fnmatch.fnmatch(p, pattern) for p in paths):
                     notes.append(note)
             return notes
@@ -173,9 +187,44 @@ class DashboardStorageClient:
             log.warning("DashboardStorageClient: get_repo_memory failed: %s", exc)
             return []
 
+    def get_dismissed_fingerprints(self, repo: str) -> set[str]:
+        """Fingerprints the dashboard user muted for ``repo``.
+
+        Feedback with kind="mute" is stored as a memory row whose
+        ``path_pattern`` is ``fingerprint:<fp>``; this reads them back so
+        the orchestrator can park matching findings instead of
+        re-reporting them. Optional capability: callers must getattr-guard
+        it (storage backends without a feedback store simply don't have
+        it), and failures degrade to "nothing muted" like every other
+        read here.
+        """
+        url = f"/api/repos/{repo}/memory"
+        try:
+            client = self._get_client()
+            r = client.get(url)
+            if r.status_code == 404:
+                return set()
+            r.raise_for_status()
+            out: set[str] = set()
+            for item in r.json().get("memory", []):
+                pattern = str(item.get("path_pattern", ""))
+                if pattern.startswith("fingerprint:"):
+                    fp = pattern[len("fingerprint:"):].strip()
+                    if fp:
+                        out.add(fp)
+            return out
+        except Exception as exc:
+            log.warning("DashboardStorageClient: get_dismissed_fingerprints failed: %s", exc)
+            return set()
+
 
 class LocalReviewStorage:
-    """SQLite-backed local storage requiring no third-party libraries."""
+    """SQLite-backed local storage requiring no third-party libraries.
+
+    Read-only with respect to ``repo_memory``: this engine never writes
+    memory (it would turn PR-derived text into future prompt input), so
+    notes here are seeded by tooling/tests directly.
+    """
 
     def __init__(self, db_path: str | Path):
         self.db_path = Path(db_path)
@@ -319,13 +368,6 @@ class LocalReviewStorage:
                 if any(fnmatch.fnmatch(p, pattern) for p in paths):
                     notes.append(note)
             return notes
-
-    def add_repo_memory(self, repo: str, path_pattern: str, note: str) -> None:
-        with self._connect() as conn:
-            conn.execute(
-                "INSERT INTO repo_memory(repo, path_pattern, note, created_at) VALUES (?, ?, ?, ?)",
-                (repo, path_pattern, note, _now_iso()),
-            )
 
 
 def resolve_storage(cfg: Any) -> ReviewStorage | None:

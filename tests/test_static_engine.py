@@ -3,7 +3,7 @@
 Layout:
   1. Regression — every rule_id that fired on the existing demo fixtures
      before the split still fires after it (same inputs as test_pipeline.py
-     uses, via demo.make_fixtures.build_all()).
+     uses, via the shared `fixtures` session fixture in tests/conftest.py).
   2. New AST-based Python checks (AST001-AST006).
   3. New JavaScript checks (JS001-JS002).
   4. New shell checks (SH001-SH003).
@@ -17,8 +17,6 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-import pytest
-
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
@@ -28,7 +26,6 @@ from ai_pr_reviewer.static import javascript_rules, python_rules, security_rules
 from ai_pr_reviewer.static import test_rules as test_gap_rules
 from ai_pr_reviewer.static.engine import StaticEngine, build_default_registry
 from ai_pr_reviewer.static.registry import Rule, RuleRegistry
-from demo.make_fixtures import build_all
 
 
 # --------------------------------------------------------------------- helpers
@@ -58,11 +55,6 @@ def _new_file_diff(path: str, content: str) -> str:
 
 def _ids(findings) -> set[str]:
     return {f.rule_id for f in findings}
-
-
-@pytest.fixture(scope="module")
-def fixtures():
-    return {fx["name"]: fx for fx in build_all()}
 
 
 # =========================================================== 1 · regression

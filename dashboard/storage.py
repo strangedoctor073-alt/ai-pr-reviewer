@@ -265,7 +265,9 @@ class DbStorage:
         }
 
     def record_feedback(self, fingerprint: str, kind: str, repo: str = "", note: str = "") -> dict:
-        """Persist feedback. 'down' or 'mute' writes to repo memory for future reviews."""
+        """Persist feedback. Only 'mute' writes to repo memory (as a
+        ``fingerprint:<fp>`` row the reviewer reads back as a dismissal);
+        'up'/'down' are votes, not a request to stop reporting."""
         from .models_db import RepoMemoryRow
         
         entry = {
@@ -276,14 +278,11 @@ class DbStorage:
             "recorded_at": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
         }
         
-        if kind in ("down", "mute") and repo:
+        if kind == "mute" and repo:
             with self.Session() as session:
                 mem_row = session.get(RepoMemoryRow, repo)
                 if mem_row is None:
                     mem_row = RepoMemoryRow(id=f"{repo}#{uuid.uuid4().hex[:8]}", repo=repo)
-                # Ensure memory property is handled (it's not natively on RepoMemoryRow in models_db,
-                # actually it is note and path_pattern)
-                # Instead of adding muted_fingerprints, let's just add it as a new memory entry for that fingerprint
                 mem_row.path_pattern = f"fingerprint:{fingerprint}"
                 mem_row.note = note or f"Muted finding {fingerprint}"
                 session.add(mem_row)
@@ -416,6 +415,20 @@ class DbStorage:
                 if any(fnmatch.fnmatch(p, pat) for p in paths):
                     notes.append(r.note)
             return notes
+
+    def list_repo_memory(self, repo: str) -> list[dict]:
+        """Every memory row for ``repo`` as ``{note, path_pattern}``,
+        including ``fingerprint:<fp>`` mute rows — callers decide which
+        ones they want (the API returns them; the reviewer splits them)."""
+        from sqlalchemy import select
+        from .models_db import RepoMemoryRow
+
+        with self.Session() as session:
+            rows = session.execute(
+                select(RepoMemoryRow).where(RepoMemoryRow.repo == repo)
+            ).scalars().all()
+            return [{"note": r.note, "path_pattern": r.path_pattern or "*"}
+                    for r in rows]
 
     def add_repo_memory(self, repo: str, path_pattern: str, note: str) -> None:
         from .models_db import RepoMemoryRow
@@ -620,7 +633,7 @@ class JsonStorage:
             "recorded_at": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
         }
         
-        if kind in ("down", "mute") and repo:
+        if kind == "mute" and repo:
             self.add_repo_memory(repo, f"fingerprint:{fingerprint}", note or f"Muted finding {fingerprint}")
             
         return entry
@@ -748,6 +761,21 @@ class JsonStorage:
                 return notes
             except Exception:
                 return []
+
+    def list_repo_memory(self, repo: str) -> list[dict]:
+        """Every memory row for ``repo`` as ``{note, path_pattern}``,
+        including ``fingerprint:<fp>`` mute rows."""
+        with self._lock:
+            p = self._memory_file()
+            if not p.exists():
+                return []
+            try:
+                items = json.loads(p.read_text(encoding="utf-8"))
+            except Exception:
+                return []
+            return [{"note": item.get("note", ""),
+                     "path_pattern": item.get("path_pattern", "*")}
+                    for item in items if item.get("repo") == repo]
 
     def add_repo_memory(self, repo: str, path_pattern: str, note: str) -> None:
         now = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")

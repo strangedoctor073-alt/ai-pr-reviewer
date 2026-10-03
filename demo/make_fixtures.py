@@ -199,8 +199,14 @@ def build_diff(fixture: dict, out_dir: Path = SAMPLES_DIR) -> Path:
     return out
 
 
-def build_all() -> list[dict]:
-    return [{**fx, "diff": str(build_diff(fx))} for fx in FIXTURES]
+def build_all(out_dir: Path = SAMPLES_DIR) -> list[dict]:
+    """Build every fixture diff into ``out_dir``.
+
+    Defaults to the committed ``demo/samples`` directory (the demo
+    workflow), but callers that must not touch tracked files — the test
+    suite — pass their own directory (see ``tests/conftest.py``).
+    """
+    return [{**fx, "diff": str(build_diff(fx, out_dir=out_dir))} for fx in FIXTURES]
 
 
 if __name__ == "__main__":

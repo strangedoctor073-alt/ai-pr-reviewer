@@ -336,6 +336,12 @@ boundaries, and regression tests for the v2 pre-release audit
 (`tests/test_release_hardening.py`). All provider and GitHub traffic is mocked;
 no network or API key is needed.
 
+The run is hermetic: pytest config lives in `pyproject.toml`, and the demo
+PR-diff fixtures are generated into a pytest temp directory (the committed
+`demo/samples/*.diff` files are reference data and are never rewritten), so
+two consecutive runs leave `git status` clean. CI runs the suite on Python
+3.11, 3.12 and 3.13.
+
 ## 6 · Layout
 
 ```
@@ -343,7 +349,7 @@ ai_pr_reviewer/          # the engine (run by the composite Action; also buildab
   diff_parser.py         #   unified diff → hunks with new-file line map
   security.py            #   injection screening, diff fencing, secret redaction
   rules.py                #   .ai-pr-reviewer.yml parsing → ReviewPolicy
-  context.py              #   diff + related files + rules + memory → ReviewContext
+  context.py              #   diff + rules + previous findings + memory → ReviewContext
   model_router.py         #   picks Claude / OpenAI / Gemini / static per config and validates it
   retry.py                #   backoff + jitter for the Anthropic call
   ai/

@@ -176,11 +176,17 @@ def mark_dismissed(
     itself, it only applies a decision that's already been made. Kept as
     a pure function here (rather than in the orchestrator or storage
     layer) so the muting logic itself stays independently testable.
+
+    A finding that is already "resolved" is left alone even when its
+    fingerprint is dismissed: "fixed" and "muted" are different facts,
+    and letting a stale mute entry rewrite history would make an absent
+    problem look like one somebody silenced (and would flip the state
+    back and forth between runs).
     """
     result: list[Finding] = []
     for f in findings:
         fp = fingerprint_finding(f)
-        if fp in dismissed_fingerprints:
+        if fp in dismissed_fingerprints and f.state != _RESOLVED_STATE:
             result.append(replace(f, fingerprint=fp, state="muted"))
         else:
             result.append(f)
