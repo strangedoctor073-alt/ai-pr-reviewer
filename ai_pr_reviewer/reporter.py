@@ -57,6 +57,11 @@ _VERIFICATION_MARKS = {
     "unable_to_verify": " · ❓ unable to verify",
 }
 
+# Severity emoji used when a finding carries an unknown severity. Kept outside
+# the f-string below: Python 3.11 rejects a backslash escape inside an f-string
+# expression part (only 3.12+ allows it).
+_UNKNOWN_SEVERITY_EMOJI = "\u26aa"
+
 def _engine_note(engine: str) -> str:
     """Suffix that keeps static output from ever reading as an AI review."""
     if engine in ("static",):
@@ -201,7 +206,7 @@ def _finding_line_md(result: ReviewResult, f) -> str:
     if f.suggestion:
         fence = "```suggestion\n" + f.suggestion + "\n```"
         sug = "\n\n" + fence
-    return (f"{SEVERITY_EMOJI.get(f.severity, '\u26aa')} **[{f.severity.upper()}]** "
+    return (f"{SEVERITY_EMOJI.get(f.severity, _UNKNOWN_SEVERITY_EMOJI)} **[{f.severity.upper()}]** "
             f"**{f.title}** ({f.category}) — {link}\n\n{f.explanation}{sug}")
 
 

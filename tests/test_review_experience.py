@@ -381,3 +381,59 @@ def test_a_reopened_finding_is_postable_and_marked_on_its_old_comment():
     assert gh.posted[0]["comments"] == []
     assert gh.updates and gh.updates[0][0] == 99
     assert gh.updates[0][1].startswith("🔁 **Reopened**")
+
+
+# --------------------------------------------------- Python 3.11 compatibility
+
+def test_an_unknown_severity_still_gets_a_neutral_emoji():
+    """The fallback emoji is a module constant, not a literal written inside
+    the f-string: Python 3.11 rejects a backslash escape in an f-string
+    expression part (only 3.12+ accepts it), which would fail collection."""
+    md = reporter.build_summary_markdown(
+        _result([_finding(title="odd severity", severity="unknown")]))
+
+    assert "⚪ **[UNKNOWN]**" in md
+
+
+def test_no_source_file_puts_a_backslash_in_an_fstring_expression():
+    """Guards the oldest interpreter in the CI matrix.
+
+    A backslash escape inside an f-string expression is a hard SyntaxError up
+    to Python 3.11 and legal from 3.12 on — so it compiles on the local
+    interpreter and only explodes during collection on the 3.11 leg, which is
+    exactly how the fallback emoji escaped review.
+
+    Parsing is the whole guard on 3.11 (both constructs are SyntaxErrors
+    there). From 3.12 the f-string nodes carry trustworthy source positions,
+    so the expression text can be inspected directly; <=3.11 points those
+    nodes at the wrong offsets, hence the version gate.
+    """
+    import ast
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    offenders = []
+    for folder in ("ai_pr_reviewer", "dashboard", "tests"):
+        for path in sorted((root / folder).rglob("*.py")):
+            source = path.read_text(encoding="utf-8")
+            rel = path.relative_to(root).as_posix()
+            try:
+                tree = ast.parse(source, filename=str(path))
+            except SyntaxError as exc:
+                offenders.append(f"{rel}:{exc.lineno} {exc.msg}")
+                continue
+            if sys.version_info < (3, 12):
+                continue
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.JoinedStr):
+                    continue
+                for value in node.values:
+                    if not isinstance(value, ast.FormattedValue):
+                        continue
+                    expr = ast.get_source_segment(source, value) or ""
+                    if "\\" in expr:
+                        offenders.append(
+                            f"{rel}:{value.lineno} backslash in expression")
+
+    assert offenders == []
