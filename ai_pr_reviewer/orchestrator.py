@@ -28,14 +28,17 @@ from .rules import DEFAULT_SEVERITY, load_project_rules
 
 # --- Pipeline stages (each lives in its own module) -------------------------
 from .context import build_context                   # provided by context.py
-from .findings import apply_lifecycle, deduplicate   # provided by findings.py
-from .findings import mark_dismissed                 # muted findings (D4)
-from .model_router import get_provider               # provided by model_router.py
+from .findings import (apply_lifecycle, deduplicate,  # provided by findings.py
+                       fingerprint_finding, mark_dismissed)
+from .model_router import (classify_risk, get_provider,  # model_router.py
+                           run_analysis)
+from .verification import verification_counts, verify_findings  # C4
 
 # Lifecycle fields persisted with each finding (Finding.to_dict() may or may
 # not emit them yet — see _finding_row).
 _LIFECYCLE_FIELDS = ("fingerprint", "state", "first_seen_sha", "last_seen_sha",
-                     "resolved_at", "github_comment_id")
+                     "resolved_at", "github_comment_id",
+                     "verification_status", "verification_reason", "verified_at")
 
 
 # ----------------------------------------------------- moved out of cli.py ----
@@ -157,9 +160,13 @@ class ReviewOrchestrator:
             warnings.append("No reviewable code changes found after filtering.")
 
         # c-e. context -> provider -> analysis
-        context = build_context(pr, files, cfg, self.storage)
+        context = build_context(pr, files, cfg, self.storage, gh=self.gh)
+        # Repository-context problems (budget reached, GitHub unavailable)
+        # are surfaced as run warnings; the review continues either way.
+        warnings.extend(_scrub(w, cfg) for w in
+                        (getattr(context, "context_warnings", None) or []))
         provider = get_provider(cfg, context)
-        outcome = provider.analyze(context)
+        outcome = run_analysis(cfg, context, provider)
         warnings.extend(_scrub(w, cfg) for w in outcome.warnings)
 
         # f. dedupe (before the cap, so duplicates can't eat the comment
@@ -175,6 +182,11 @@ class ReviewOrchestrator:
         previous = self._previous_findings(repo, pr, context)
         lifecycle_findings = self._apply_lifecycle(previous, inline, files,
                                                    incremental, pr.head_sha)
+        # ... then verify the "resolved" transitions the lifecycle inferred
+        # (C4): anything we cannot actually confirm goes back to active,
+        # so a finding never closes itself without evidence.
+        lifecycle_findings = verify_findings(lifecycle_findings, previous,
+                                             inline, files)
         # ... then park anything the dashboard user muted (see
         # _apply_dismissals) — after the lifecycle so a mute can never
         # overwrite a "resolved" transition, and before the health score
@@ -184,6 +196,8 @@ class ReviewOrchestrator:
 
         from .models import calculate_health_score
         score, grade = calculate_health_score(lifecycle_findings)
+        risk = classify_risk(context)
+        transitions = _state_transitions(previous, lifecycle_findings)
 
         # h. result — same shape as v1, plus what the provider told us
         engine = reporter.resolve_engine(outcome)
@@ -209,8 +223,16 @@ class ReviewOrchestrator:
         result.engine = engine
         result.fallback_used = fallback_used
         result.review_state = "fallback" if fallback_used else "completed"
+        # V3: additive, read with getattr by the reporter / cli.
+        result.risk = risk                          # ReviewRisk (C8 summary)
+        result.previous_findings_count = len(previous)
+        result.state_transition_count = transitions  # (C8: skip duplicate posts)
+        result.verification = verification_counts(lifecycle_findings)  # (C4)
 
         # i. persist (last: only a fully successful run advances the SHA)
+        # ``engine == "static"`` + ``fallback_used`` is the forced-fallback
+        # outcome: no AI backend completed and the rule engine stood in.
+        result.analysis_degraded = (engine == "static" and fallback_used)
         self._persist(result, repo, pr)
         result.duration_ms = int((time.monotonic() - t0) * 1000)
         return result
@@ -334,7 +356,15 @@ class ReviewOrchestrator:
     def _persist(self, result: ReviewResult, repo: str, pr: PRContext) -> None:
         """Store findings, then advance last-reviewed SHA. Advancing the SHA is
         the commit point, so it only happens once the findings are saved. A
-        storage failure never loses the review — it becomes a warning."""
+        storage failure never loses the review — it becomes a warning.
+
+        A *degraded* analysis (``engine == "static"`` with ``fallback_used``,
+        i.e. every AI backend failed and the rule engine covered for them —
+        see ``model_router.run_analysis``) still stores its findings and its
+        report, but deliberately does NOT advance the SHA: the analysis that
+        should have covered these commits didn't happen, so the next run
+        re-reviews them and gives the providers another try.
+        """
         if self.storage is None or not pr.head_sha:
             return
         review_id = ReviewKey(repo=repo, pr_number=pr.pr_number,
@@ -342,11 +372,37 @@ class ReviewOrchestrator:
         try:
             self.storage.save_findings(review_id,
                                        [_finding_row(f) for f in result.findings])
+            if getattr(result, "analysis_degraded", False):
+                result.warnings.append(
+                    "last-reviewed SHA not advanced: no AI provider completed "
+                    "this review, so the next run re-reviews these commits.")
+                return
             self.storage.set_last_reviewed_sha(repo, pr.pr_number, pr.head_sha,
                                                getattr(pr, "base_sha", "") or "")
         except Exception as exc:  # noqa: BLE001
             result.warnings.append(f"review state not saved ({exc}); the next run "
                                    f"will not be incremental.")
+
+
+def _state_transitions(previous: list[Finding], findings: list[Finding]) -> int:
+    """How many findings changed lifecycle state compared with the stored
+    baseline (0 when nothing new happened this run).
+
+    Used by ``cli`` to decide whether a follow-up review is worth posting:
+    an unchanged PR must not produce another identical summary comment.
+    """
+    if not previous:
+        return 0
+    before: dict[str, str] = {}
+    for p in previous:
+        before[p.fingerprint or fingerprint_finding(p)] = str(getattr(p, "state", "") or "")
+    changed = 0
+    for f in findings:
+        fp = f.fingerprint or fingerprint_finding(f)
+        old = before.get(fp)
+        if old is not None and old != str(getattr(f, "state", "") or ""):
+            changed += 1
+    return changed
 
 
 def _stamp_shas(findings: list[Finding], head_sha: str) -> None:

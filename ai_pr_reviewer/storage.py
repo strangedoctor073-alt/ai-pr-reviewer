@@ -33,10 +33,12 @@ def _now_iso() -> str:
 class ReviewStorage(Protocol):
     """Storage contract expected by ReviewOrchestrator and build_context.
 
-    One capability is deliberately optional and therefore NOT declared
-    here: ``get_dismissed_fingerprints(repo)``. Only backends with a
-    feedback store (the dashboard) have it, so callers getattr-guard it —
-    declaring it would make this Protocol a lie for the SQLite backend.
+    Two capabilities are deliberately optional and therefore NOT declared
+    here: ``get_dismissed_fingerprints(repo)`` and ``list_repo_memory(repo)``.
+    Only backends with a feedback store (the dashboard) have the first, and
+    only backends that store memory metadata have the second, so callers
+    getattr-guard both — declaring them would make this Protocol a lie for
+    the SQLite backend.
     """
 
     def get_last_reviewed_sha(self, repo: str, pr_number: int) -> str | None:
@@ -187,6 +189,27 @@ class DashboardStorageClient:
             log.warning("DashboardStorageClient: get_repo_memory failed: %s", exc)
             return []
 
+    def list_repo_memory(self, repo: str) -> list[dict]:
+        """Every memory row for ``repo`` *with* its metadata (V3 C7).
+
+        Unlike ``get_repo_memory`` this returns rows verbatim — mute rows,
+        disabled rows and categories included — so ``ai_pr_reviewer.memory``
+        can decide what is project advice and what is a dismissal. Rows are
+        returned without path filtering: the caller knows which paths matter.
+        """
+        url = f"/api/repos/{repo}/memory"
+        try:
+            client = self._get_client()
+            r = client.get(url)
+            if r.status_code == 404:
+                return []
+            r.raise_for_status()
+            rows = r.json().get("memory", [])
+            return [row for row in rows if isinstance(row, dict)]
+        except Exception as exc:
+            log.warning("DashboardStorageClient: list_repo_memory failed: %s", exc)
+            return []
+
     def get_dismissed_fingerprints(self, repo: str) -> set[str]:
         """Fingerprints the dashboard user muted for ``repo``.
 
@@ -264,9 +287,26 @@ class LocalReviewStorage:
                 repo TEXT NOT NULL,
                 path_pattern TEXT NOT NULL,
                 note TEXT NOT NULL,
-                created_at TEXT
+                created_at TEXT,
+                category TEXT,
+                enabled INTEGER DEFAULT 1,
+                updated_at TEXT
             );
             """)
+            # V3 C7: memory rows gained category/enabled/updated_at. A table
+            # created by an older build lacks them, and SQLite has no
+            # "ADD COLUMN IF NOT EXISTS", so each statement is allowed to
+            # fail silently while a fresh database gets them twice (once
+            # from CREATE TABLE, once as a no-op).
+            for ddl in (
+                "ALTER TABLE repo_memory ADD COLUMN category TEXT",
+                "ALTER TABLE repo_memory ADD COLUMN enabled INTEGER DEFAULT 1",
+                "ALTER TABLE repo_memory ADD COLUMN updated_at TEXT",
+            ):
+                try:
+                    conn.execute(ddl)
+                except sqlite3.OperationalError:
+                    pass
 
     def get_last_reviewed_sha(self, repo: str, pr_number: int) -> str | None:
         with self._connect() as conn:
@@ -368,6 +408,30 @@ class LocalReviewStorage:
                 if any(fnmatch.fnmatch(p, pattern) for p in paths):
                     notes.append(note)
             return notes
+
+    def list_repo_memory(self, repo: str) -> list[dict]:
+        """Every memory row for ``repo`` *with* its metadata (V3 C7).
+
+        Returned verbatim (mute rows, disabled rows and categories included)
+        so ``ai_pr_reviewer.memory`` can decide what is project advice and
+        what is a dismissal decision. Read-only: this engine never writes
+        memory — see the class docstring and D10.
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT path_pattern, note, category, enabled FROM repo_memory "
+                "WHERE repo = ? ORDER BY id",
+                (repo,),
+            ).fetchall()
+            out: list[dict] = []
+            for row in rows:
+                out.append({
+                    "path_pattern": row["path_pattern"],
+                    "note": row["note"],
+                    "category": row["category"],
+                    "enabled": row["enabled"],
+                })
+            return out
 
 
 def resolve_storage(cfg: Any) -> ReviewStorage | None:

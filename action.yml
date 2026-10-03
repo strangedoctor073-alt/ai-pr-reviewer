@@ -84,6 +84,14 @@ inputs:
     description: 'Path where review-report.json is written.'
     required: false
     default: 'review-report.json'
+  provider_order:
+    description: 'Comma-separated AI failover order, e.g. "claude,openai". Each backend is tried when the previous one fails or is unavailable (circuit open); backends without credentials are skipped with a warning. The static rule engine is always the last fallback and is never listed.'
+    required: false
+    default: ''
+  repo_context_chars:
+    description: 'Character budget for extra repository context the reviewer may read (imports the change depends on, project configuration). 0 disables it.'
+    required: false
+    default: '12000'
 
 outputs:
   findings_count:
@@ -138,4 +146,6 @@ runs:
         INPUT_DASHBOARD_URL: ${{ inputs.dashboard_url }}
         INPUT_DASHBOARD_TOKEN: ${{ inputs.dashboard_token }}
         INPUT_OUTPUT: ${{ inputs.output }}
+        INPUT_PROVIDER_ORDER: ${{ inputs.provider_order }}
+        INPUT_REPO_CONTEXT_CHARS: ${{ inputs.repo_context_chars }}
       run: python -m ai_pr_reviewer

@@ -767,6 +767,18 @@ focus:
   - privacy
   - authentication`;
 
+  // ---- project memory (V3 C7): pick a repo, then read/edit its notes -----
+  const MEMORY_REPO_KEY = "apr_memory_repo";
+  const MEMORY_CATEGORIES = ["project-rule", "preferred-pattern",
+                             "known-exception", "review-preference"];
+  let repoSuggestions = [];
+  try {
+    const page = await api("/api/reports?limit=200&offset=0");
+    repoSuggestions = [...new Set((page || []).map((r) => r.repo))]
+      .filter(Boolean).sort();
+  } catch (_) { repoSuggestions = []; }
+  const lastRepo = localStorage.getItem(MEMORY_REPO_KEY) || repoSuggestions[0] || "";
+
   app.innerHTML = `
     <div class="panel">
       <h3>Review rules</h3>
@@ -802,7 +814,161 @@ focus:
       <h3 style="margin:0 0 4px">Project rules</h3>
       <p class="panel-note">The Action loads <code>.ai-pr-reviewer.yml</code> from the checked-out base revision on every review. This repository-owner-trusted policy is intentionally edited in git, not from the dashboard — the dashboard has no access to your repo's file, so it can't show your actual policy here. Below is a reference example of the format.</p>
       <div class="readonly-yaml">${esc(projectRulesYaml)}</div>
+    </div>
+
+    <div class="panel" id="memory-panel">
+      <h3 style="margin:0 0 4px">Project memory</h3>
+      <p class="panel-note">Human-authored notes for this repository. The reviewer reads them as <strong>untrusted reference material</strong> — secret-redacted, screened and nonce-fenced exactly like the diff, so they can inform a review but can never act as instructions. Mute rows (<code>fingerprint:…</code>) are dismissal decisions and are read-only here.</p>
+      <div class="field-row">
+        <div class="field">
+          <label for="m-repo">Repository</label>
+          <input id="m-repo" list="m-repos" placeholder="owner/name" value="${esc(lastRepo)}">
+          <datalist id="m-repos">${repoSuggestions.map((r) => `<option value="${esc(r)}">`).join("")}</datalist>
+        </div>
+        <div class="field" style="display:flex;align-items:flex-end">
+          <button class="btn" id="m-load">Load memory</button>
+        </div>
+      </div>
+      <div id="m-list"></div>
+      <div class="field-row">
+        <div class="field">
+          <label for="m-pattern">Path pattern</label>
+          <input id="m-pattern" placeholder="payments/*.py (or *)">
+        </div>
+        <div class="field">
+          <label for="m-category">Category</label>
+          <select id="m-category">${MEMORY_CATEGORIES.map((c) => `<option value="${c}">${c}</option>`).join("")}</select>
+        </div>
+      </div>
+      <div class="field">
+        <label for="m-note">Note</label>
+        <textarea id="m-note" rows="3" placeholder="e.g. Refunds are idempotent by design — do not flag the retry."></textarea>
+      </div>
+      <button class="btn btn-primary" id="m-save">Add memory</button>
+      <button class="btn btn-ghost" id="m-cancel" style="display:none">Cancel edit</button>
     </div>`;
+
+  const listEl = document.getElementById("m-list");
+  const repoEl = document.getElementById("m-repo");
+  const patternEl = document.getElementById("m-pattern");
+  const categoryEl = document.getElementById("m-category");
+  const noteEl = document.getElementById("m-note");
+  const saveBtn = document.getElementById("m-save");
+  const cancelBtn = document.getElementById("m-cancel");
+  let memoryRows = [];
+  let editId = null;
+
+  function memoryRowHtml(row) {
+    const mute = String(row.path_pattern || "").startsWith("fingerprint:");
+    const on = row.enabled !== false;
+    const chips = [`<span class="chip">${esc(row.path_pattern || "*")}</span>`,
+                   `<span class="chip">${esc(row.category || "project-rule")}</span>`];
+    if (!on) chips.push('<span class="chip">disabled</span>');
+    if (mute) chips.push('<span class="chip">dismissed (read-only)</span>');
+    return `<div class="memory-row" data-id="${esc(row.id || "")}"
+                 style="border-top:1px solid var(--hairline);padding:10px 0">
+      <div class="chip-list">${chips.join("")}</div>
+      <div style="margin:6px 0 0">${esc(row.note || "")}</div>
+      ${mute ? "" : `<div style="margin-top:6px;display:flex;gap:6px">
+        <button class="btn btn-ghost" data-act="toggle">${on ? "Disable" : "Enable"}</button>
+        <button class="btn btn-ghost" data-act="edit">Edit</button>
+        <button class="btn btn-ghost" data-act="delete">Delete</button>
+      </div>`}
+    </div>`;
+  }
+
+  function renderMemory() {
+    const notes = memoryRows.filter((r) => !String(r.path_pattern || "").startsWith("fingerprint:"));
+    const mutes = memoryRows.filter((r) => String(r.path_pattern || "").startsWith("fingerprint:"));
+    if (!memoryRows.length) {
+      listEl.innerHTML = '<p class="panel-note">No memory stored for this repository yet.</p>';
+      return;
+    }
+    listEl.innerHTML =
+      (notes.length ? `<p class="panel-note">Notes the reviewer sees</p>${notes.map(memoryRowHtml).join("")}` : "") +
+      (mutes.length ? `<p class="panel-note">Dismissed findings (managed by the feedback API, read-only)</p>${mutes.map(memoryRowHtml).join("")}` : "");
+  }
+
+  async function loadMemory() {
+    const repo = repoEl.value.trim();
+    if (!/^[^/\s]+\/[^/\s]+$/.test(repo)) { toast("Enter a repository as owner/name", true); return; }
+    localStorage.setItem(MEMORY_REPO_KEY, repo);
+    try {
+      const data = await api(`/api/repos/${repo}/memory`);
+      memoryRows = data.memory || [];
+      renderMemory();
+    } catch (e) { toast(`Couldn't load memory: ${e.message}`, true); }
+  }
+
+  function resetForm() {
+    editId = null;
+    patternEl.value = "";
+    categoryEl.value = "project-rule";
+    noteEl.value = "";
+    saveBtn.textContent = "Add memory";
+    cancelBtn.style.display = "none";
+  }
+
+  document.getElementById("m-load").addEventListener("click", loadMemory);
+  cancelBtn.addEventListener("click", resetForm);
+  saveBtn.addEventListener("click", async () => {
+    const repo = repoEl.value.trim();
+    const body = { path_pattern: patternEl.value.trim() || "*",
+                   note: noteEl.value, category: categoryEl.value };
+    if (!body.note.trim()) { toast("A note is required", true); return; }
+    try {
+      if (editId) {
+        await api(`/api/repos/${repo}/memory?id=${encodeURIComponent(editId)}`,
+                  { method: "PUT", headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(body) });
+        toast("Memory updated.");
+      } else {
+        await api(`/api/repos/${repo}/memory`,
+                  { method: "POST", headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(body) });
+        toast("Memory added.");
+      }
+      resetForm();
+      await loadMemory();
+    } catch (e) { toast(`Memory save failed: ${e.message}`, true); }
+  });
+
+  listEl.addEventListener("click", async (ev) => {
+    const btn = ev.target.closest("button[data-act]");
+    if (!btn) return;
+    const row = memoryRows.find((r) => r.id === btn.closest(".memory-row").dataset.id);
+    if (!row) return;
+    const repo = repoEl.value.trim();
+    const act = btn.dataset.act;
+    try {
+      if (act === "edit") {
+        editId = row.id;
+        patternEl.value = row.path_pattern || "*";
+        categoryEl.value = MEMORY_CATEGORIES.includes(row.category) ? row.category : "project-rule";
+        noteEl.value = row.note || "";
+        saveBtn.textContent = "Save changes";
+        cancelBtn.style.display = "";
+        noteEl.focus();
+        return;
+      }
+      if (act === "toggle") {
+        await api(`/api/repos/${repo}/memory?id=${encodeURIComponent(row.id)}`,
+                  { method: "PUT", headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ enabled: row.enabled === false }) });
+        toast(row.enabled === false ? "Note enabled." : "Note disabled — the reviewer will ignore it.");
+      }
+      if (act === "delete") {
+        if (!confirm("Delete this memory row?")) return;
+        await api(`/api/repos/${repo}/memory?id=${encodeURIComponent(row.id)}`,
+                  { method: "DELETE" });
+        toast("Memory row deleted.");
+      }
+      if (editId === row.id) resetForm();
+      await loadMemory();
+    } catch (e) { toast(`Memory update failed: ${e.message}`, true); }
+  });
+
+  if (lastRepo) loadMemory();
 
   const effectiveToken = (el) => el.value.trim() || storedToken();
   document.getElementById("s-save").addEventListener("click", async () => {

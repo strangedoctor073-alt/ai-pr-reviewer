@@ -45,7 +45,29 @@ _FINDING_PASSTHROUGH = (
     "suggestion_type", "start_line", "end_line",
     "fingerprint", "state", "first_seen_sha", "last_seen_sha",
     "resolved_at", "github_comment_id",
+    "verification_status", "verification_reason", "verified_at",
 )
+
+# How each verification outcome is appended to a resolved finding in the
+# summary: a fix that survived a re-review is labelled as verified, and one
+# we could not confirm is never allowed to read as "fixed".
+_VERIFICATION_MARKS = {
+    "resolved": " · ✅ verified fixed",
+    "still_present": " · 🔍 re-reported by this review",
+    "unable_to_verify": " · ❓ unable to verify",
+}
+
+def _engine_note(engine: str) -> str:
+    """Suffix that keeps static output from ever reading as an AI review."""
+    if engine in ("static",):
+        return " — not an AI review"
+    if engine.endswith("+static"):
+        return " (partly static fallback)"
+    return ""
+
+
+def _verification_mark(status) -> str:
+    return _VERIFICATION_MARKS.get(str(status or ""), "")
 
 
 def now_iso() -> str:
@@ -183,6 +205,60 @@ def _finding_line_md(result: ReviewResult, f) -> str:
             f"**{f.title}** ({f.category}) — {link}\n\n{f.explanation}{sug}")
 
 
+def _risk_row(result: ReviewResult) -> list[str]:
+    """PR-level risk line (V3 C8). Only shown when the orchestrator computed
+    a risk for this run, so hand-built summaries stay byte-identical."""
+    risk = getattr(result, "risk", None)
+    if risk is None:
+        return []
+    level = str(getattr(risk, "level", "low") or "low")
+    reasons = [str(r) for r in (getattr(risk, "reasons", None) or [])]
+    detail = "; ".join(reasons) if reasons else "no sensitive paths detected"
+    icon = "⚠️" if level == "high" else "🟢"
+    return [f"| **Risk** | {icon} {level} — {detail.replace('|', '/')} |"]
+
+
+def _verification_row(result: ReviewResult) -> list[str]:
+    """Counts from V3 C4's fix verification, so a developer can tell verified
+    fixes from findings that simply were not re-reported."""
+    ver = getattr(result, "verification", None)
+    if not isinstance(ver, dict):
+        return []
+    parts = []
+    for key, label in (("resolved", "✅ fixed & verified"),
+                       ("still_present", "🔍 re-reported"),
+                       ("unable_to_verify", "❓ unable to verify")):
+        count = int(ver.get(key, 0) or 0)
+        if count:
+            parts.append(f"{count} {label}")
+    if not parts:
+        return []
+    return [f"| **Verification** | {' · '.join(parts)} |"]
+
+
+def _resolved_list_md(result: ReviewResult, top_n: int) -> list[str]:
+    """Resolved findings, listed WITHOUT their severity.
+
+    A closed finding must not be counted (or labelled) among the issues a
+    developer still has to act on — the list only says *where* it was and
+    whether verification could confirm the fix.
+    """
+    rows = [f for f in result.findings if finding_state(f) == "resolved"]
+    if not rows:
+        return []
+    out = ["", "<details>",
+           f"<summary><strong>Resolved findings ({len(rows)})</strong></summary>",
+           ""]
+    for f in rows[:top_n]:
+        loc = f"`{f.file}:{f.line}`" if f.line else f"`{f.file}`"
+        mark = _verification_mark(getattr(f, "verification_status", None))
+        out.append(f"- ✅ {loc} — {f.title}{mark}")
+    if len(rows) > top_n:
+        out.append(f"- … and {len(rows) - top_n} more")
+    out.append("</details>")
+    return out
+
+
 def build_summary_markdown(result: ReviewResult, top_n: int = 8) -> str:
     open_ = open_findings(result.findings)
     resolved = count_by_state(result.findings).get("resolved", 0)
@@ -200,7 +276,8 @@ def build_summary_markdown(result: ReviewResult, top_n: int = 8) -> str:
         gauge = "🔴"
     
     score_label = f"{gauge} **{score}/100** ({grade})"
-    
+    engine_label = _ENGINE_TITLE.get(engine, engine)
+
     lines = [
         f"## 🤖 AI PR Review · Health Score: {score_label}",
         "",
@@ -211,8 +288,11 @@ def build_summary_markdown(result: ReviewResult, top_n: int = 8) -> str:
         f"| **Health Grade** | `{grade} ({score}/100)` |",
         f"| **Issues Flagged** | {len(open_)} ({' · '.join(bits) if bits else 'none'}) |",
         f"| **Files Reviewed** | {result.stats.files} (+{result.stats.additions} / −{result.stats.deletions} lines) |",
-        f"| **Review Engine** | `{result.model or engine}` ({result.duration_ms} ms) |",
+        f"| **Review Engine** | `{result.model or engine}` · {engine_label}"
+        f"{_engine_note(engine)} ({result.duration_ms} ms) |",
     ]
+    lines.extend(_risk_row(result))
+    lines.extend(_verification_row(result))
     
     shown = open_[:top_n]
     if shown:
@@ -227,6 +307,7 @@ def build_summary_markdown(result: ReviewResult, top_n: int = 8) -> str:
     
     if resolved:
         lines.append(f"\n> ✅ {resolved} previously reported finding(s) resolved.")
+        lines.extend(_resolved_list_md(result, top_n))
     if result.suppressed:
         lines.append(f"\n> ℹ️ {result.suppressed} finding(s) below the comment threshold or "
                      f"over the inline-comment cap were summarized here instead of annotated inline.")

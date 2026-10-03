@@ -66,4 +66,11 @@ class RepoMemoryRow(Base):
     path_pattern: Mapped[str] = mapped_column(String(255), default="*")
     note: Mapped[str] = mapped_column(String(1000), default="")
     created_at: Mapped[str] = mapped_column(String(32), default="")
+    # V3 C7: human-authored metadata. ``category`` is one of
+    # ai_pr_reviewer.memory.CATEGORIES (anything else reads as the default
+    # "project-rule"), ``enabled == 0`` keeps a note on the dashboard
+    # without feeding it to the reviewer, ``updated_at`` records edits.
+    category: Mapped[str] = mapped_column(String(64), default="project-rule")
+    enabled: Mapped[int] = mapped_column(Integer, default=1)
+    updated_at: Mapped[str] = mapped_column(String(32), default="")
 

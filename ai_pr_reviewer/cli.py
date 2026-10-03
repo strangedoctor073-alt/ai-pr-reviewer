@@ -16,12 +16,15 @@ import time
 
 from .config import Config, load_config, merge_dashboard_rules, sev_rank
 from .github_client import GitHubClient, GitHubError
-from .models import PRContext, ReviewResult, SEVERITY_ORDER
+from .github_sync import (link_comment_ids, record_comment_ids,  # C5
+                          render_finding_comment, sync_finding_states)
+from .models import PRContext, ReviewKey, ReviewResult, SEVERITY_ORDER
 from . import reporter
-# filter_files / validate_findings / _is_excluded moved to orchestrator.py;
-# re-exported so `from ai_pr_reviewer.cli import filter_files` keeps working.
-from .orchestrator import (ReviewOrchestrator, _is_excluded,  # noqa: F401
-                            filter_files, validate_findings)
+# filter_files / validate_findings / _is_excluded / _finding_row moved to
+# orchestrator.py; re-exported so `from ai_pr_reviewer.cli import filter_files`
+# keeps working.
+from .orchestrator import (ReviewOrchestrator, _finding_row,  # noqa: F401
+                            _is_excluded, filter_files, validate_findings)
 from .security import redact_secrets  # noqa: F401
 from .storage import resolve_storage
 
@@ -59,6 +62,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--pr-title", help="(local mode) PR title for the report")
     p.add_argument("--pr-author", help="(local mode) author login for the report")
     p.add_argument("--pr-branch", help="(local mode) branch name for the report")
+    p.add_argument("--provider-order",
+                   help="comma-separated AI failover order, e.g. 'claude,openai' "
+                        "(also INPUT_PROVIDER_ORDER); the static rule engine is "
+                        "always the last fallback and is never listed")
+    p.add_argument("--repo-context-chars", type=int, default=None,
+                   help="character budget for extra repository context pulled in "
+                        "for the reviewer (<=0 disables; also "
+                        "INPUT_REPO_CONTEXT_CHARS, default 12000)")
     return p.parse_args(argv)
 
 
@@ -98,10 +109,7 @@ def run(cfg: Config, pr_overrides: dict | None = None) -> ReviewResult:
 
     # ------------------------------------------------------------ post review
     if gh and not cfg.no_comment:
-        # Only findings the PR hasn't seen yet get inline comments; with no
-        # stored state that is every finding, exactly as in v1.
-        to_post = [f for f in open_ if reporter.finding_state(f) in ("new", "reopened")]
-        result.posted_inline = _post_review(gh, cfg, result, to_post)
+        result.posted_inline = _post_and_sync(gh, cfg, storage, result, open_)
 
     # ---------------------------------------------------------------- outputs
     result.duration_ms = int((time.monotonic() - t0) * 1000)
@@ -129,16 +137,93 @@ def run(cfg: Config, pr_overrides: dict | None = None) -> ReviewResult:
     return result
 
 
+def _review_is_worth_posting(result: ReviewResult, to_post: list) -> bool:
+    """V3 C8: an unchanged follow-up review must not post a duplicate comment.
+
+    Posts when this is the first review of the PR, when there is something new
+    to say inline, or when at least one finding changed lifecycle state this
+    run (opened, resolved, muted, dismissed or reopened). Otherwise the PR has
+    seen everything we have — the report and step summary are still written.
+    """
+    if getattr(result, "previous_findings_count", 0) == 0:
+        return True
+    if to_post:
+        return True
+    return getattr(result, "state_transition_count", 0) > 0
+
+
+def _post_and_sync(gh: GitHubClient, cfg: Config, storage, result: ReviewResult,
+                   open_) -> int:
+    """Post this run's review, then keep GitHub in sync with our state (C5).
+
+    Three things happen in order: the new/reopened findings that don't already
+    have a GitHub comment get inline comments, the comments we posted in an
+    *earlier* run are updated when their finding changed state, and any comment
+    ids we learned are written back so the next review can reuse them.
+    Nothing here can lose the review: every GitHub failure is a warning.
+    """
+    # Findings the PR hasn't seen yet get inline comments; a finding that
+    # already carries a GitHub comment id is updated below instead of being
+    # posted a second time (C5 — no duplicate comments).
+    to_post = [f for f in open_
+               if reporter.finding_state(f) in ("new", "reopened")
+               and not getattr(f, "github_comment_id", None)]
+
+    posted = 0
+    linked = 0
+    if _review_is_worth_posting(result, to_post):
+        posted, res = _post_review(gh, cfg, result, to_post)
+        if res is not None:
+            linked += record_comment_ids(result.findings, res)
+            n_linked, link_warnings = link_comment_ids(
+                gh, result.pr.pr_number, to_post, result.pr.head_sha)
+            linked += n_linked
+            result.warnings.extend(link_warnings)
+    else:
+        print("[ai-pr-reviewer] nothing changed since the previous review — "
+              "skipping a duplicate review comment.")
+
+    # Reflect resolved/muted/dismissed/reopened on the comments already on
+    # the PR. Deletions, rate limits and missing permissions all degrade to
+    # warnings; the report has already been produced and is unaffected.
+    _updated, sync_warnings = sync_finding_states(gh, result.findings)
+    result.warnings.extend(sync_warnings)
+
+    if linked:
+        _persist_comment_ids(storage, result)
+    return posted
+
+
+def _persist_comment_ids(storage, result: ReviewResult) -> None:
+    """Save the GitHub comment ids learned while posting.
+
+    The orchestrator already stored this review's findings before the post;
+    this second write only adds ids, and its failure only costs us a possible
+    duplicate comment on the next run.
+    """
+    if storage is None or not result.pr.head_sha:
+        return
+    review_id = ReviewKey(repo=result.pr.repo, pr_number=result.pr.pr_number,
+                          head_sha=result.pr.head_sha).as_id()
+    try:
+        storage.save_findings(review_id, [_finding_row(f) for f in result.findings])
+    except Exception as exc:  # noqa: BLE001 — ids are an optimisation, not data
+        result.warnings.append(f"GitHub comment ids not saved ({exc}); the next "
+                               f"review may open a duplicate comment.")
+
+
 def _post_review(gh: GitHubClient, cfg: Config, result: ReviewResult,
-                 findings) -> int:
-    """Post a COMMENT review with inline comments + markdown summary."""
+                 findings) -> tuple[int, dict | None]:
+    """Post a COMMENT review with inline comments + markdown summary.
+
+    Returns ``(inline comments posted, raw response | None)`` — the response
+    carries the comment ids when GitHub returned them (see
+    ``github_sync.record_comment_ids``).
+    """
     comments = []
     for f in findings:
-        body = (f"**\U0001f916 {f.severity.upper()}: {f.title}** `{f.category}`\n\n"
-                f"{f.explanation}")
-        if f.suggestion:
-            body += "\n\n```suggestion\n" + f.suggestion + "\n```"
-        comment: dict = {"path": f.file, "side": "RIGHT", "body": body}
+        comment: dict = {"path": f.file, "side": "RIGHT",
+                         "body": render_finding_comment(f)}
         if f.line is not None:
             comment["line"] = f.line
         comments.append(comment)
@@ -151,7 +236,7 @@ def _post_review(gh: GitHubClient, cfg: Config, result: ReviewResult,
                 "GitHub rejected the grouped inline review; valid findings were posted "
                 "as individual inline comments."
             )
-        return len(comments) - res.get("dropped", 0)
+        return len(comments) - res.get("dropped", 0), res
     except GitHubError as exc:
         # Last resort: land the whole review as a regular PR comment. If that
         # is refused too (typically a read-only token: fork and Dependabot PRs),
@@ -164,7 +249,7 @@ def _post_review(gh: GitHubClient, cfg: Config, result: ReviewResult,
                 f"could not post the review to GitHub ({exc2}). The report was still "
                 f"written. Check that the token has pull-requests: write; fork and "
                 f"Dependabot PRs only get a read-only token.")
-        return 0
+        return 0, None
 
 
 def _set_github_output(name: str, value: str) -> None:

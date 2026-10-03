@@ -4,13 +4,13 @@
 into: it takes the raw diff + config and hands back one ``ReviewContext``
 containing everything ``AIProvider.analyze()`` (in
 ``ai/provider.py``) needs — changed files, the repo's trusted
-``ReviewPolicy``, previous findings, repository memory, and a character
-budget that's already been enforced.
+``ReviewPolicy``, previous findings, repository memory, repository
+context, and a character budget that's already been enforced.
 
 Two things this module deliberately does NOT do:
-  * fetch other repository files to enrich the diff (there is no content
-    fetcher in the review path; a future context stage can add one
-    without changing this signature);
+  * browse the repository. ``repo_context`` is a *bounded* set of named
+    files collected by :mod:`ai_pr_reviewer.repo_context` (strict budget,
+    no listing, no search); everything else about the repo stays out;
   * build a real token-aware optimizer for the budget — a simple greedy
     trim from the end is explicitly called out as good enough.
 """
@@ -18,11 +18,13 @@ from __future__ import annotations
 
 import copy
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
+from . import memory as memory_rules
 from .config import Config
 from .diff_parser import FileDiff
 from .models import Finding, PRContext
+from .repo_context import RepoContextEntry, collect_repository_context
 from .rules import ReviewPolicy, load_project_rules
 from .security import redact_secrets
 
@@ -45,6 +47,12 @@ class ReviewContext:
     memory_notes: list[str]
     focus_areas: list[str]
     token_budget: int = DEFAULT_TOKEN_BUDGET
+    # V3 C3: other repository files worth showing the reviewer (untrusted,
+    # already secret-redacted; the providers screen + fence them).
+    repo_context: list[RepoContextEntry] = field(default_factory=list)
+    # V3 C3: collection problems (budget reached, GitHub unavailable) that
+    # must surface as run warnings rather than silently vanish.
+    context_warnings: list[str] = field(default_factory=list)
 
 
 # --------------------------------------------------------------------------- ContextBudget
@@ -94,10 +102,59 @@ def _apply_context_budget(files: list[FileDiff],
     return trimmed, notes
 
 
+# --------------------------------------------------------------------------- memory / repo context
+
+def _load_memory_entries(storage, repo: str, paths: list[str]) -> list[dict]:
+    """Human-authored project memory for ``paths``, or ``[]``.
+
+    Backends that expose the full row (``list_repo_memory``) get the C7
+    treatment — categories, disabled rows, mute rows split out. Older /
+    minimal backends only expose plain notes through ``get_repo_memory``
+    and are used verbatim. Storage failure is always "no memory", never a
+    failed review.
+    """
+    if storage is None:
+        return []
+
+    lister = getattr(storage, "list_repo_memory", None)
+    if callable(lister):
+        try:
+            return memory_rules.select_memory(lister(repo) or [], paths)
+        except Exception as exc:  # noqa: BLE001 — storage must never take the review down
+            log.warning("list_repo_memory(%s) failed — continuing without "
+                        "repository memory (%s)", repo, exc)
+            return []
+
+    getter = getattr(storage, "get_repo_memory", None)
+    if callable(getter):
+        try:
+            notes = getter(repo, paths) or []
+        except Exception as exc:  # noqa: BLE001
+            log.warning("get_repo_memory(%s) failed — continuing without "
+                        "repository memory (%s)", repo, exc)
+            return []
+        return memory_rules.select_memory(
+            [{"note": n, "path_pattern": "*"} for n in notes if n], paths)
+    return []
+
+
+def _collect_repo_context(gh, pr: PRContext, files: list[FileDiff],
+                          cfg: Config) -> tuple[list[RepoContextEntry], list[str]]:
+    """Bounded repository context; never raises, never blocks a review."""
+    if gh is None:
+        return [], []
+    try:
+        return collect_repository_context(gh, pr, files, cfg)
+    except Exception as exc:  # noqa: BLE001 — context is a bonus, not a dependency
+        log.warning("repository context collection failed: %s", exc)
+        return [], ["repository context unavailable "
+                    f"({type(exc).__name__}); continuing the review without it"]
+
+
 # --------------------------------------------------------------------------- build_context
 
 def build_context(pr: PRContext, files: list[FileDiff], cfg: Config,
-                  storage=None) -> ReviewContext:
+                  storage=None, gh=None) -> ReviewContext:
     """Assemble a :class:`ReviewContext` for this PR.
 
     Repository memory (``memory_notes``) comes from whatever storage
@@ -105,6 +162,12 @@ def build_context(pr: PRContext, files: list[FileDiff], cfg: Config,
     it through the feedback/memory API. It is PR-adjacent text, so it is
     secret-redacted here; the providers additionally fence it as untrusted
     data before it reaches a prompt.
+
+    Repository context (``repo_context``) is fetched from GitHub through
+    ``gh`` when one is available (local ``--diff-file`` runs have none). It
+    is bounded by ``cfg.repo_context_chars``, a non-positive value disables
+    it, and any GitHub failure degrades to a warning — see
+    :mod:`ai_pr_reviewer.repo_context`.
     """
     repo_root = getattr(cfg, "repo_root", None) or "."
     rules_file = getattr(cfg, "rules_file", None) or ".ai-pr-reviewer.yml"
@@ -124,19 +187,14 @@ def build_context(pr: PRContext, files: list[FileDiff], cfg: Config,
                 log.warning("get_previous_findings(%s, %s) failed: %s",
                             pr.repo, pr.pr_number, exc)
 
-    memory_notes: list[str] = []
-    memory_getter = getattr(storage, "get_repo_memory", None) if storage is not None else None
-    if callable(memory_getter):
-        try:
-            memory_notes = [
-                redact_secrets(str(note))
-                for note in (memory_getter(pr.repo, [f.path for f in files]) or [])
-                if note
-            ]
-        except Exception as exc:  # storage must never take the review down
-            log.warning("get_repo_memory(%s) failed — continuing without "
-                       "repository memory (%s)", pr.repo, exc)
-            memory_notes = []
+    paths = [f.path for f in files]
+    memory_notes = [
+        redact_secrets(memory_rules.format_note(entry))
+        for entry in _load_memory_entries(storage, pr.repo, paths)
+        if entry.get("note")
+    ]
+
+    repo_entries, repo_warnings = _collect_repo_context(gh, pr, files, cfg)
 
     focus_areas: list[str] = []
     for area in list(getattr(cfg, "focus_areas", None) or []) + list(project_rules.focus):
@@ -155,4 +213,6 @@ def build_context(pr: PRContext, files: list[FileDiff], cfg: Config,
         memory_notes=memory_notes,
         focus_areas=focus_areas,
         token_budget=budget,
+        repo_context=repo_entries,
+        context_warnings=repo_warnings,
     )

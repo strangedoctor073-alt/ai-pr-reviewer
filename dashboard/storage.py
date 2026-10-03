@@ -15,14 +15,36 @@ import datetime as _dt
 import fnmatch
 import re
 import json
+import logging
 import os
 import threading
 import uuid
 from collections import Counter
 from pathlib import Path
 
+log = logging.getLogger(__name__)
+
 SEV_KEYS = ("critical", "high", "medium", "low", "info")
 MAX_FINDINGS_STORED = 500          # hard cap per report, defense against abuse
+
+
+def _normalize_category(raw) -> str:
+    """Memory row category, restricted to the reviewer's known set.
+
+    Lives here (rather than being reimplemented) so the dashboard and the
+    engine agree on what a category is; imported lazily in the style of the
+    other ``ai_pr_reviewer`` uses in this package, because the dependency-free
+    JSON fallback must keep working without the engine installed.
+    """
+    try:
+        from ai_pr_reviewer.memory import normalize_category
+        return normalize_category(raw)
+    except Exception:
+        pass
+    value = str(raw or "").strip().lower().replace("_", "-").replace(" ", "-")
+    known = ("project-rule", "preferred-pattern", "known-exception",
+             "review-preference")
+    return value if value in known else "project-rule"
 
 
 def summarize(report: dict) -> dict:
@@ -71,6 +93,7 @@ class DbStorage:
         from .models_db import Base, ReportRow
 
         Base.metadata.create_all(self.engine)
+        self._add_missing_columns()
         if self.engine.dialect.name == "sqlite":
             from sqlalchemy import text
 
@@ -78,6 +101,37 @@ class DbStorage:
                 conn.execute(text("PRAGMA journal_mode=WAL"))
                 conn.execute(text("PRAGMA busy_timeout=5000"))
         self._migrate_json_once()
+
+    # V3 C7: columns added to existing tables. ``create_all`` only creates
+    # missing tables, so a dashboard database from a previous build has to
+    # gain columns the same way LocalReviewStorage does it: inspect, then add.
+    _COLUMN_UPGRADES = {
+        "repo_memories": {
+            "category": "VARCHAR(64)",
+            "enabled": "INTEGER DEFAULT 1",
+            "updated_at": "VARCHAR(32)",
+        },
+    }
+
+    def _add_missing_columns(self) -> None:
+        from sqlalchemy import inspect, text
+
+        inspector = inspect(self.engine)
+        existing_tables = set(inspector.get_table_names())
+        with self.engine.begin() as conn:
+            for table, columns in self._COLUMN_UPGRADES.items():
+                if table not in existing_tables:
+                    continue
+                present = {c["name"] for c in inspector.get_columns(table)}
+                for name, ddl in columns.items():
+                    if name in present:
+                        continue
+                    try:
+                        conn.execute(text(
+                            f"ALTER TABLE {table} ADD COLUMN {name} {ddl}"))
+                    except Exception as exc:  # noqa: BLE001 — dialect quirks
+                        log.warning("DbStorage: could not add %s.%s (%s)",
+                                    table, name, exc)
 
     # ----------------------------------------------------------------- writes
     def upsert(self, report: dict) -> str:
@@ -417,9 +471,12 @@ class DbStorage:
             return notes
 
     def list_repo_memory(self, repo: str) -> list[dict]:
-        """Every memory row for ``repo`` as ``{note, path_pattern}``,
-        including ``fingerprint:<fp>`` mute rows — callers decide which
-        ones they want (the API returns them; the reviewer splits them)."""
+        """Every memory row for ``repo``, verbatim.
+
+        Includes ``fingerprint:<fp>`` mute rows, disabled rows, the id and
+        the category — callers decide which ones they want (the API returns
+        them; the reviewer splits them with ``ai_pr_reviewer.memory``).
+        """
         from sqlalchemy import select
         from .models_db import RepoMemoryRow
 
@@ -427,20 +484,78 @@ class DbStorage:
             rows = session.execute(
                 select(RepoMemoryRow).where(RepoMemoryRow.repo == repo)
             ).scalars().all()
-            return [{"note": r.note, "path_pattern": r.path_pattern or "*"}
+            return [{"id": r.id,
+                     "note": r.note,
+                     "path_pattern": r.path_pattern or "*",
+                     "category": getattr(r, "category", "") or "",
+                     "enabled": bool(getattr(r, "enabled", 1))}
                     for r in rows]
 
-    def add_repo_memory(self, repo: str, path_pattern: str, note: str) -> None:
+    def add_repo_memory(self, repo: str, path_pattern: str, note: str,
+                        category: str = "", enabled: bool = True) -> None:
         from .models_db import RepoMemoryRow
 
         now = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
         mid = f"{repo}#{uuid.uuid4().hex[:8]}"
         with self.Session() as session:
             row = RepoMemoryRow(
-                id=mid, repo=repo, path_pattern=path_pattern, note=note, created_at=now
+                id=mid, repo=repo, path_pattern=path_pattern, note=note,
+                created_at=now, updated_at=now,
+                category=_normalize_category(category),
+                enabled=1 if enabled else 0,
             )
             session.add(row)
             session.commit()
+
+    def update_repo_memory(self, repo: str, memory_id: str,
+                           fields: dict) -> dict | None:
+        """Edit one memory row; returns it, or None when it isn't this repo's.
+
+        Only the editable columns are accepted (an id or a created_at in the
+        payload is ignored), and the category is normalized so the reviewer
+        can rely on a small known set.
+        """
+        from sqlalchemy import select
+        from .models_db import RepoMemoryRow
+
+        editable = {k: v for k, v in fields.items()
+                    if k in ("path_pattern", "note", "category", "enabled")}
+        if not editable:
+            return None
+        now = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
+        with self.Session() as session:
+            row = session.execute(
+                select(RepoMemoryRow).where(RepoMemoryRow.id == memory_id,
+                                            RepoMemoryRow.repo == repo)
+            ).scalars().first()
+            if row is None:
+                return None
+            for key, value in editable.items():
+                if key == "enabled":
+                    row.enabled = 1 if value else 0
+                elif key == "category":
+                    row.category = _normalize_category(value)
+                elif key == "path_pattern":
+                    row.path_pattern = str(value)[:255] or "*"
+                else:
+                    row.note = str(value)[:1000]
+            row.updated_at = now
+            session.commit()
+            return {"id": row.id, "note": row.note,
+                    "path_pattern": row.path_pattern or "*",
+                    "category": row.category or "",
+                    "enabled": bool(row.enabled)}
+
+    def delete_repo_memory(self, repo: str, memory_id: str) -> bool:
+        from sqlalchemy import delete as sa_delete
+        from .models_db import RepoMemoryRow
+
+        with self.Session() as session:
+            res = session.execute(sa_delete(RepoMemoryRow)
+                                  .where(RepoMemoryRow.id == memory_id,
+                                         RepoMemoryRow.repo == repo))
+            session.commit()
+            return bool(res.rowcount)
 
     # -------------------------------------------------------------- migration
     def _migrate_json_once(self) -> None:
@@ -763,8 +878,8 @@ class JsonStorage:
                 return []
 
     def list_repo_memory(self, repo: str) -> list[dict]:
-        """Every memory row for ``repo`` as ``{note, path_pattern}``,
-        including ``fingerprint:<fp>`` mute rows."""
+        """Every memory row for ``repo``, verbatim — including
+        ``fingerprint:<fp>`` mute rows, disabled rows, id and category."""
         with self._lock:
             p = self._memory_file()
             if not p.exists():
@@ -773,11 +888,15 @@ class JsonStorage:
                 items = json.loads(p.read_text(encoding="utf-8"))
             except Exception:
                 return []
-            return [{"note": item.get("note", ""),
-                     "path_pattern": item.get("path_pattern", "*")}
+            return [{"id": item.get("id", ""),
+                     "note": item.get("note", ""),
+                     "path_pattern": item.get("path_pattern", "*"),
+                     "category": item.get("category", "") or "",
+                     "enabled": bool(item.get("enabled", True))}
                     for item in items if item.get("repo") == repo]
 
-    def add_repo_memory(self, repo: str, path_pattern: str, note: str) -> None:
+    def add_repo_memory(self, repo: str, path_pattern: str, note: str,
+                        category: str = "", enabled: bool = True) -> None:
         now = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
         with self._lock:
             p = self._memory_file()
@@ -793,10 +912,82 @@ class JsonStorage:
                 "path_pattern": path_pattern,
                 "note": note,
                 "created_at": now,
+                "updated_at": now,
+                "category": _normalize_category(category),
+                "enabled": bool(enabled),
             })
             tmp = p.with_suffix(".tmp")
             tmp.write_text(json.dumps(items, indent=2), encoding="utf-8")
             os.replace(tmp, p)
+
+    def _write_memory_rows(self, p: Path, items: list) -> None:
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps(items, indent=2), encoding="utf-8")
+        os.replace(tmp, p)
+
+    def _read_memory_rows(self, p: Path) -> list | None:
+        if not p.exists():
+            return None
+        try:
+            items = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        return items if isinstance(items, list) else None
+
+    def update_repo_memory(self, repo: str, memory_id: str,
+                           fields: dict) -> dict | None:
+        editable = {k: v for k, v in fields.items()
+                    if k in ("path_pattern", "note", "category", "enabled")}
+        if not editable:
+            return None
+        now = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
+        with self._lock:
+            p = self._memory_file()
+            items = self._read_memory_rows(p)
+            if items is None:
+                return None
+            updated_row: dict | None = None
+            for index, item in enumerate(items):
+                if item.get("repo") != repo or item.get("id") != memory_id:
+                    continue
+                updated = dict(item)
+                for key, value in editable.items():
+                    if key == "enabled":
+                        updated["enabled"] = bool(value)
+                    elif key == "category":
+                        updated["category"] = _normalize_category(value)
+                    elif key == "path_pattern":
+                        updated["path_pattern"] = str(value)[:255] or "*"
+                    else:
+                        updated["note"] = str(value)[:1000]
+                updated["updated_at"] = now
+                items[index] = updated
+                updated_row = {
+                    "id": updated.get("id", ""),
+                    "note": updated.get("note", ""),
+                    "path_pattern": updated.get("path_pattern", "*"),
+                    "category": updated.get("category", ""),
+                    "enabled": bool(updated.get("enabled", True)),
+                }
+                break
+            if updated_row is None:
+                return None
+            self._write_memory_rows(p, items)
+            return updated_row
+
+    def delete_repo_memory(self, repo: str, memory_id: str) -> bool:
+        with self._lock:
+            p = self._memory_file()
+            items = self._read_memory_rows(p)
+            if items is None:
+                return False
+            kept = [item for item in items
+                    if not (item.get("repo") == repo
+                            and item.get("id") == memory_id)]
+            if len(kept) == len(items):
+                return False
+            self._write_memory_rows(p, kept)
+            return True
 
 
 def choose_storage(data_dir: Path, database_url: str | None):

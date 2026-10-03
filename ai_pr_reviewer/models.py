@@ -75,6 +75,16 @@ VALID_FINDING_STATES = {s.value for s in FindingState}
 LIFECYCLE_FIELDS = (
     "fingerprint", "state", "first_seen_sha", "last_seen_sha",
     "resolved_at", "github_comment_id",
+    "verification_status", "verification_reason", "verified_at",
+)
+
+# Verification statuses (V3 C4). ``None``/"" means "not verified", which is
+# distinct from VERIFICATION_UNVERIFIED ("checked, inconclusive").
+VERIFICATION_RESOLVED = "resolved"
+VERIFICATION_PRESENT = "still_present"
+VERIFICATION_UNVERIFIED = "unable_to_verify"
+VERIFICATION_STATUSES = (
+    VERIFICATION_RESOLVED, VERIFICATION_PRESENT, VERIFICATION_UNVERIFIED,
 )
 
 
@@ -117,6 +127,11 @@ class Finding:
     last_seen_sha: str | None = None
     resolved_at: str | None = None      # ISO-8601 timestamp
     github_comment_id: int | None = None
+    # --- V3 C4 verification (pipeline-owned; see LIFECYCLE_FIELDS) ---
+    # None until a finding has previous state to compare against.
+    verification_status: str | None = None    # VERIFICATION_* value
+    verification_reason: str | None = None    # human-readable explanation
+    verified_at: str | None = None            # ISO-8601 timestamp
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -136,6 +151,9 @@ class Finding:
             "last_seen_sha": self.last_seen_sha,
             "resolved_at": self.resolved_at,
             "github_comment_id": self.github_comment_id,
+            "verification_status": self.verification_status,
+            "verification_reason": self.verification_reason,
+            "verified_at": self.verified_at,
         }
 
     @classmethod
@@ -153,6 +171,7 @@ class Finding:
     def from_dict(cls, d: dict[str, Any]) -> "Finding":
         sev = str(d.get("severity", "medium")).lower()
         comment_id = d.get("github_comment_id")
+        vstatus = str(d.get("verification_status") or "").strip().lower()
         return cls(
             file=str(d.get("file", "")),
             line=int(d["line"]) if d.get("line") is not None else None,
@@ -170,6 +189,9 @@ class Finding:
             last_seen_sha=_opt_str(d.get("last_seen_sha")),
             resolved_at=_opt_str(d.get("resolved_at")),
             github_comment_id=int(comment_id) if comment_id not in (None, "") else None,
+            verification_status=vstatus if vstatus in VERIFICATION_STATUSES else None,
+            verification_reason=_opt_str(d.get("verification_reason")),
+            verified_at=_opt_str(d.get("verified_at")),
         )
 
 

@@ -117,10 +117,13 @@ def apply_lifecycle(previous: list[Finding], current: list[Finding]) -> list[Fin
     dict.
 
     Pure function: takes no SHA/commit arguments, does no I/O. It only
-    touches `state`, `resolved_at`, and `fingerprint`; it does not set
-    first_seen_sha/last_seen_sha, since it has no commit context to set
-    them from -- that's the orchestrator's job, which does have the
-    current review's head_sha in hand.
+    touches `state`, `resolved_at`, `fingerprint` and carries the
+    ``github_comment_id`` forward (the GitHub comment a previous review
+    posted for this fingerprint, so the next review can update it instead
+    of opening a duplicate); it does not set first_seen_sha/last_seen_sha,
+    since it has no commit context to set them from -- that's the
+    orchestrator's job, which does have the current review's head_sha in
+    hand.
 
     Returns the union of: every current finding (tagged new/active/
     reopened) plus synthesized resolved findings for anything that dropped
@@ -144,7 +147,14 @@ def apply_lifecycle(previous: list[Finding], current: list[Finding]) -> list[Fin
             state = "reopened"
         else:
             state = "active"
-        result.append(replace(f, fingerprint=fp, state=state, resolved_at=None))
+        # The comment id is ours, not the model's (model output is parsed
+        # with from_untrusted_dict), so reusing it here is safe and keeps a
+        # stable internal-finding <-> GitHub-comment mapping across reviews.
+        result.append(replace(
+            f, fingerprint=fp, state=state, resolved_at=None,
+            github_comment_id=(f.github_comment_id
+                               or (prev.github_comment_id if prev else None)),
+        ))
 
     for fp, prev in previous_by_fp.items():
         if fp in current_by_fp:

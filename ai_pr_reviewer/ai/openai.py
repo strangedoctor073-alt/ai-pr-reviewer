@@ -10,7 +10,8 @@ from ..models import Finding
 from ..retry import RetryPolicy
 from ..security import scan_prompt_injection, wrap_untrusted_diff
 from .claude import (SYSTEM_PROMPT, _batch_with_files, _memory_notes,
-                     build_untrusted_memory_block)
+                     _repo_context_entries, build_untrusted_memory_block,
+                     build_untrusted_repo_context_block)
 
 if TYPE_CHECKING:
     from ..context import ReviewContext
@@ -20,6 +21,7 @@ class OpenAIProvider:
 
     API_URL = "https://api.openai.com/v1/chat/completions"
     MAX_FINDINGS_PER_BATCH = 200
+    backend = "openai"
 
     def __init__(self, api_key: str, model: str,
                 max_tokens: int = 4096, batch_chars: int = 80_000,
@@ -54,15 +56,18 @@ class OpenAIProvider:
         any_success = False
 
         # Repository memory is PR-adjacent text: screen + fence it once,
-        # then send the same block with every batch.
+        # then send the same block with every batch. Repository context is
+        # fenced separately (build_untrusted_repo_context_block).
         memory_block = build_untrusted_memory_block(_memory_notes(context), warnings)
+        repo_block = build_untrusted_repo_context_block(
+            _repo_context_entries(context), warnings)
 
         for idx, (batch_text, batch_files) in enumerate(batches, 1):
             for hit in scan_prompt_injection(batch_text):
                 warnings.append(f"batch {idx}: prompt-injection screen: {hit}")
             try:
                 result = self._review_batch(batch_text, len(batches), idx, focus_areas,
-                                            project_rules, memory_block)
+                                            project_rules, memory_block, repo_block)
             except Exception as exc:
                 warnings.append(
                     f"Batch {idx}/{len(batches)} failed after retries ({exc}) — "
@@ -78,7 +83,10 @@ class OpenAIProvider:
             batch_findings = result.get("findings", [])[:self.MAX_FINDINGS_PER_BATCH]
             for raw in batch_findings:
                 try:
-                    findings.append(Finding.from_dict(raw))
+                    # from_untrusted_dict: model output is attacker-steerable,
+                    # so pipeline-owned fields (state, fingerprint,
+                    # github_comment_id, verification) are always dropped.
+                    findings.append(Finding.from_untrusted_dict(raw))
                 except Exception:
                     warnings.append(f"Batch {idx}: skipped malformed finding: {raw!r}")
 
@@ -104,7 +112,7 @@ class OpenAIProvider:
 
     def _review_batch(self, batch: str, total_batches: int, idx: int,
                       focus_areas: list[str], project_rules: list[str],
-                      memory_block: str = "") -> dict:
+                      memory_block: str = "", repo_block: str = "") -> dict:
         fenced, nonce = wrap_untrusted_diff(batch)
 
         user = (
@@ -122,6 +130,8 @@ class OpenAIProvider:
                      + "\n- ".join(project_rules) + "\n")
         if memory_block:
             user += memory_block
+        if repo_block:
+            user += repo_block
         user += "\n" + fenced
 
         url = f"{self.base_url.rstrip('/')}/chat/completions" if self.base_url else self.API_URL

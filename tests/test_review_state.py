@@ -27,6 +27,8 @@ LEGACY_FINDING_FIELDS = [
 NEW_FINDING_FIELDS = [
     "fingerprint", "state", "first_seen_sha", "last_seen_sha",
     "resolved_at", "github_comment_id",
+    # V3 C4: fix verification, appended last and pipeline-owned.
+    "verification_status", "verification_reason", "verified_at",
 ]
 
 

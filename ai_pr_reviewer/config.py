@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from typing import Any
 
 SEVERITIES = ("info", "low", "medium", "high", "critical")
 
@@ -35,6 +36,23 @@ def _bool_field(cli_value: bool | None, *env_names: str, default: bool) -> bool:
     if cli_value is not None:
         return bool(cli_value)
     return _env_bool(*env_names, default=default)
+
+
+def _str_field(cli_value: str | None, *env_names: str, default: str = "") -> str:
+    """CLI > env > default for a free-form string (blank CLI = unset)."""
+    if cli_value is not None and str(cli_value).strip():
+        return str(cli_value).strip()
+    return _env(*env_names, default=default)
+
+
+def _int_field(cli_value: Any, *env_names: str, default: int) -> int:
+    """CLI > env > default for an integer; unparsable input falls back to
+    ``default`` rather than raising — a typo'd budget must not kill a review."""
+    raw = _str_field(cli_value, *env_names, default=str(default))
+    try:
+        return int(str(raw).strip())
+    except (TypeError, ValueError):
+        return default
 
 
 @dataclass
@@ -75,6 +93,11 @@ class Config:
     storage_file: str = ""             # local SQLite file for stateful reviews;
                                         # empty = stateless unless dashboard_url/token set
 
+    # V3 knobs
+    provider_order: str = ""           # comma-separated failover order, e.g.
+                                        # "claude,openai"; empty = default provider
+    repo_context_chars: int = 12_000   # repo-context character budget; <= 0 disables it
+
 
 def load_config(args) -> Config:
     severity_input = args.severity_threshold or _env("INPUT_SEVERITY_THRESHOLD")
@@ -112,6 +135,11 @@ def load_config(args) -> Config:
         "INPUT_RULES_FILE", default=".ai-pr-reviewer.yml")
     cfg.storage_file = getattr(args, "storage_file", None) or _env(
         "INPUT_STORAGE_FILE", "REVIEW_STORAGE_FILE", default="")
+    cfg.provider_order = _str_field(getattr(args, "provider_order", None),
+                                    "INPUT_PROVIDER_ORDER", "PROVIDER_ORDER")
+    cfg.repo_context_chars = _int_field(getattr(args, "repo_context_chars", None),
+                                        "INPUT_REPO_CONTEXT_CHARS",
+                                        "REPO_CONTEXT_CHARS", default=12_000)
     return cfg
 
 

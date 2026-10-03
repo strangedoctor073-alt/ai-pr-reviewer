@@ -138,7 +138,7 @@ class Wired:
         monkeypatch.setattr(orch, "apply_lifecycle", self._apply_lifecycle)
 
     # -- seams
-    def _build_context(self, pr, files, cfg, storage=None):
+    def _build_context(self, pr, files, cfg, storage=None, gh=None):
         self.log.append("build_context")
         ctx = SimpleNamespace(pr=pr, files=files, previous_findings=[])
         self.contexts.append(ctx)
@@ -288,11 +288,28 @@ def test_no_storage_is_stateless(monkeypatch):
 
 
 def test_failed_analysis_does_not_advance_last_sha(monkeypatch):
+    """A dying provider no longer takes the run down (V3 C6): the rule engine
+    stands in with an honest warning instead of raising.
+
+    The invariants the original test protected are kept where they still
+    matter — nothing claims success for work that did not happen:
+    ``set_calls`` stays empty so the next run re-reviews these commits once a
+    provider works again, while the findings *are* stored (and their comment
+    ids with them) so the re-review matches them instead of duplicating the
+    comments this run already posted.
+    """
     w = Wired(monkeypatch, last_sha="old111", provider_error=RuntimeError("boom"))
-    with pytest.raises(RuntimeError):
-        w.run()
+
+    result = w.run()
+
+    assert (result.engine, result.fallback_used, result.review_state) == \
+        ("static", True, "fallback")
+    assert any("provider review failed (RuntimeError)" in x
+               for x in result.warnings)
+    assert any("not from an AI review" in x for x in result.warnings)
+    assert any("not advanced" in x for x in result.warnings)
     assert w.storage.set_calls == []
-    assert w.storage.saved == []
+    assert w.storage.saved
 
 
 def test_storage_failure_is_a_warning_and_sha_is_not_advanced(monkeypatch):

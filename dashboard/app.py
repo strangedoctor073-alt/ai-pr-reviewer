@@ -519,9 +519,28 @@ async def post_review_findings(repo_owner: str, repo_name: str, pr_number: int, 
     return {"ok": True, "count": len(findings)}
 
 
+def _is_mute_memory_row(storage, repo: str, memory_id: str) -> bool:
+    """True when ``memory_id`` names a dismissal row rather than a note.
+
+    ``fingerprint:<fp>`` rows are mute decisions written by the feedback
+    endpoint and read back by the reviewer's dismissal step; they are not
+    project memory, so this module refuses to edit them. An unknown id
+    falls through (False) and is rejected as 404 by the caller anyway.
+    """
+    try:
+        rows = storage.list_repo_memory(repo)
+    except Exception:
+        return False
+    for row in rows:
+        if isinstance(row, dict) and row.get("id") == memory_id:
+            return str(row.get("path_pattern") or "").startswith("fingerprint:")
+    return False
+
+
 @app.get("/api/repos/{repo_owner}/{repo_name}/memory")
 def get_repo_memory_endpoint(repo_owner: str, repo_name: str, request: Request):
-    """All stored memory rows for this repo: ``{note, path_pattern}``.
+    """All stored memory rows for this repo:
+    ``{id, note, path_pattern, category, enabled}``.
 
     Rows are returned verbatim (including ``fingerprint:<fp>`` mute rows
     written by the feedback endpoint) so callers can tell "review advice"
@@ -550,10 +569,71 @@ async def post_repo_memory_endpoint(repo_owner: str, repo_name: str, request: Re
     if not isinstance(body, dict):
         raise HTTPException(400, "body must be a JSON object")
     repo = f"{repo_owner}/{repo_name}"
-    pat = body.get("path_pattern", "*")
-    note = body.get("note", "")
-    get_storage().add_repo_memory(repo, pat, note)
+    pat = str(body.get("path_pattern", "*") or "*")[:255]
+    note = str(body.get("note", "") or "")[:1000]
+    if not note.strip():
+        raise HTTPException(400, "note must not be empty")
+    get_storage().add_repo_memory(repo, pat, note,
+                                  category=str(body.get("category", "") or ""),
+                                  enabled=bool(body.get("enabled", True)))
     _audit(request, "add_repo_memory", f"{repo}:{pat}", 200)
+    return {"ok": True}
+
+
+@app.put("/api/repos/{repo_owner}/{repo_name}/memory")
+async def put_repo_memory_endpoint(repo_owner: str, repo_name: str,
+                                   request: Request):
+    """Edit one memory row selected by ``?id=`` (note / path pattern /
+    category / enabled).
+
+    The id travels as a query parameter, not a path segment: memory ids are
+    ``<repo>#<token>`` and a repo name contains ``/``, which would never
+    route as a single segment.
+
+    Dismissal rows (``fingerprint:<fp>``) are refused: a mute is owned by
+    the feedback endpoint, not by this one, so a reviewer-facing edit can
+    never silently un-mute a finding.
+    """
+    _check_token(request)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "body must be JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "body must be a JSON object")
+    memory_id = (request.query_params.get("id") or "").strip()
+    if not memory_id:
+        raise HTTPException(400, "id query parameter is required")
+    repo = f"{repo_owner}/{repo_name}"
+    storage = get_storage()
+    if _is_mute_memory_row(storage, repo, memory_id):
+        raise HTTPException(403, "dismissal rows are managed by the feedback API")
+    row = storage.update_repo_memory(repo, memory_id,
+                                     {k: body.get(k) for k in
+                                      ("path_pattern", "note", "category",
+                                       "enabled") if k in body})
+    if row is None:
+        raise HTTPException(404, "memory row not found")
+    _audit(request, "update_repo_memory", f"{repo}:{memory_id}", 200)
+    return {"ok": True, "memory": row}
+
+
+@app.delete("/api/repos/{repo_owner}/{repo_name}/memory")
+async def delete_repo_memory_endpoint(repo_owner: str, repo_name: str,
+                                      request: Request):
+    """Delete one memory row selected by ``?id=``. Dismissal rows are
+    refused (see PUT)."""
+    _check_token(request)
+    memory_id = (request.query_params.get("id") or "").strip()
+    if not memory_id:
+        raise HTTPException(400, "id query parameter is required")
+    repo = f"{repo_owner}/{repo_name}"
+    storage = get_storage()
+    if _is_mute_memory_row(storage, repo, memory_id):
+        raise HTTPException(403, "dismissal rows are managed by the feedback API")
+    if not storage.delete_repo_memory(repo, memory_id):
+        raise HTTPException(404, "memory row not found")
+    _audit(request, "delete_repo_memory", f"{repo}:{memory_id}", 200)
     return {"ok": True}
 
 

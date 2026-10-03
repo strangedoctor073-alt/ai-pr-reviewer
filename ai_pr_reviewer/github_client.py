@@ -50,10 +50,14 @@ def _safe_repo_path(path: str) -> str:
 
 
 class GitHubClient:
-    def __init__(self, token: str, repo: str, api_url: str = "https://api.github.com"):
+    def __init__(self, token: str, repo: str, api_url: str = "https://api.github.com",
+                 retry: "RetryPolicy | None" = None):
         import httpx
 
+        from .retry import RetryPolicy
+
         self.repo = repo.strip("/")
+        self._retry = retry or RetryPolicy()
         self._http = httpx.Client(
             base_url=api_url.rstrip("/"),
             timeout=60.0,
@@ -214,12 +218,23 @@ class GitHubClient:
             raise _api_error("POST review fallback", summary)
 
         dropped = 0
+        comment_ids: dict[tuple, int] = {}
         for comment in comments:
             inline = self._http.post(
                 f"/repos/{self.repo}/pulls/{number}/comments",
                 json={"commit_id": commit_id, **comment},
             )
             if inline.status_code in (200, 201):
+                # Capture the id now: it is the only response in this flow
+                # that carries one, and it is what lets the next review
+                # update this comment instead of opening a duplicate.
+                try:
+                    created = inline.json()
+                    if isinstance(created, dict) and created.get("id") is not None:
+                        comment_ids[(comment.get("path"), comment.get("line"))] = \
+                            created["id"]
+                except Exception:  # noqa: BLE001 — ids are a bonus, never a failure
+                    pass
                 continue
             if inline.status_code == 422:
                 dropped += 1
@@ -231,6 +246,7 @@ class GitHubClient:
             "body": summary.json(),
             "dropped": dropped,
             "recovered": True,
+            "comment_ids": comment_ids,
         }
 
     def create_comment(self, number: int, body: str) -> dict:
@@ -239,6 +255,38 @@ class GitHubClient:
         if r.status_code in (200, 201):
             return {"ok": True}
         raise _api_error("POST comment", r)
+
+    # ------------------------------------------------- comment sync (V3 C5)
+    def list_review_comments(self, number: int, limit: int = 100) -> list[dict]:
+        """The PR's inline review comments, newest first, capped at ``limit``.
+
+        One bounded page — used only to attach ids to comments this run just
+        posted, never to enumerate a whole PR's history.
+        """
+        r = self._http.get(f"/repos/{self.repo}/pulls/{number}/comments",
+                           params={"sort": "created", "direction": "desc",
+                                   "per_page": min(int(limit), 100)})
+        if r.status_code != 200:
+            raise _api_error("GET review comments", r)
+        data = r.json()
+        return list(data)[:limit] if isinstance(data, list) else []
+
+    def update_review_comment(self, comment_id: int, body: str) -> dict:
+        """Edit an existing inline review comment (state markers, updates).
+
+        Bounded retries on transient failures (429/5xx/timeouts) through the
+        shared ``RetryPolicy``; permanent ones — notably 404 for a comment
+        the author deleted — raise immediately so callers can skip instead
+        of retrying a call that can never succeed.
+        """
+        r = self._retry.call(
+            self._http.patch,
+            f"/repos/{self.repo}/pulls/comments/{int(comment_id)}",
+            json={"body": body},
+        )
+        if r.status_code in (200, 201):
+            return {"ok": True, "status": r.status_code, "body": r.json()}
+        raise _api_error("PATCH review comment", r)
 
     # ------------------------------------------------------- helper utilities
     @staticmethod

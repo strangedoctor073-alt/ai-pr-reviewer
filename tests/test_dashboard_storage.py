@@ -219,8 +219,14 @@ def test_json_list_repo_memory_returns_rows_verbatim(tmp_path):
     repo = "acme/orders"
     storage.add_repo_memory(repo, "*.py", "Python best practice")
 
-    assert storage.list_repo_memory(repo) == [
-        {"path_pattern": "*.py", "note": "Python best practice"}]
+    rows = storage.list_repo_memory(repo)
+    # C7: rows now also carry the metadata the reviewer needs (id, category,
+    # enabled) — the original columns still come back byte-identical.
+    assert [{k: r[k] for k in ("path_pattern", "note", "category", "enabled")}
+            for r in rows] == [
+        {"path_pattern": "*.py", "note": "Python best practice",
+         "category": "project-rule", "enabled": True}]
+    assert rows[0]["id"]                       # editable/deletable identity
     assert storage.list_repo_memory("acme/other") == []
 
 
@@ -232,8 +238,9 @@ def test_db_record_feedback_only_mute_writes_repo_memory(db_storage):
     assert db_storage.list_repo_memory(repo) == []     # a vote is not a mute
 
     db_storage.record_feedback("fp_mute", "mute", repo=repo)
-    assert db_storage.list_repo_memory(repo) == [
-        {"path_pattern": "fingerprint:fp_mute", "note": "Muted finding fp_mute"}]
+    assert [(r["path_pattern"], r["note"]) for r in
+            db_storage.list_repo_memory(repo)] == [
+        ("fingerprint:fp_mute", "Muted finding fp_mute")]
     # ...and the mute row is not a path-scoped note
     assert db_storage.get_repo_memory(repo, ["pay.py"]) == []
 
@@ -247,8 +254,9 @@ def test_json_record_feedback_only_mute_writes_repo_memory(tmp_path):
     assert storage.list_repo_memory(repo) == []
 
     storage.record_feedback("fp_mute", "mute", repo=repo, note="not useful")
-    assert storage.list_repo_memory(repo) == [
-        {"path_pattern": "fingerprint:fp_mute", "note": "not useful"}]
+    assert [(r["path_pattern"], r["note"]) for r in
+            storage.list_repo_memory(repo)] == [
+        ("fingerprint:fp_mute", "not useful")]
 
 
 # ------------------------------------------------------- memory endpoint (D3)
