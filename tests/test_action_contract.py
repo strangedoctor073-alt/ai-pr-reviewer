@@ -142,7 +142,7 @@ def test_example_workflow_security_invariants():
     """The example workflow is copy-pasted into user repos, so its security
     posture is part of the contract: `pull_request` trigger (never
     `pull_request_target`), PR-base checkout with no persisted credentials,
-    minimal permissions (no `checks: write`), and a major-version pin."""
+    minimal permissions (no `checks: write`), and a version-tag pin."""
     text = EXAMPLE_WORKFLOW.read_text(encoding="utf-8")
 
     data = yaml.safe_load(text)
@@ -167,9 +167,11 @@ def test_example_workflow_security_invariants():
 
     runner = next(s for s in job["steps"]
                   if str(s.get("uses", "")).startswith("strangedoctor073-alt/"))
-    assert re.fullmatch(r"strangedoctor073-alt/ai-pr-reviewer@v\d+",
-                        runner["uses"]), (
-        "pin a major version tag, never a branch or a moving ref")
+    assert re.fullmatch(
+        r"strangedoctor073-alt/ai-pr-reviewer@v\d+(?:\.\d+\.\d+)?",
+        runner["uses"]), (
+        "pin a version tag (immutable vX.Y.Z release or moving major), "
+        "never a branch or other floating ref")
 
 
 def test_no_shipped_workflow_uses_pull_request_target():

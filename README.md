@@ -124,7 +124,7 @@ the free deterministic static rules instead: regex plus a few AST checks, **not
 AI**. It is useful for trying the plumbing, not a substitute for the Claude
 review.
 
-The example workflow uses `strangedoctor073-alt/ai-pr-reviewer@v2`. If you fork
+The example workflow uses `strangedoctor073-alt/ai-pr-reviewer@v3.0.0`. If you fork
 this repository, point `uses:` at your fork and tag a release.
 
 The workflow checks out the PR's **base revision** before running the Action,
@@ -625,12 +625,13 @@ Dockerfile               #   optional container build of the same engine (built 
 
 ## 7 · Versioning, releases & license
 
-**Pinning.** Pin the Action to a major version tag —
-`uses: strangedoctor073-alt/ai-pr-reviewer@v2`, exactly what
+**Pinning.** Pin the Action to an immutable release tag —
+`uses: strangedoctor073-alt/ai-pr-reviewer@v3.0.0`, exactly what
 [`example-workflow.yml`](example-workflow.yml) does. Published tags are
-`v1`, `v2` (the *moving* major tag) and `v2.0.0` (an immutable release
-the major tag has since advanced past); a full commit SHA pins one exact
-build. New roadmap stages ship as `@v3`, `@v4`, … — **majors are
+`v3.0.0` (the current release), `v2.0.0` (an immutable release), `v2`
+(the *moving* major tag, left in place for existing users) and `v1`;
+a full commit SHA pins one exact build. New roadmap stages ship as
+`@v3`, `@v4`, … — **majors are
 reserved for breaking changes**, and an old major receives security
 fixes for 12 months after a new major ships
 (`docs/planning/MIGRATION_PLAN.md` §6.2).

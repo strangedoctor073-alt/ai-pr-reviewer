@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 3.0.0
 
 Phase 0 ("V3.x" validation & hardening). Nothing here renames or removes
 an input, an output or a required report field — additions only, plus the

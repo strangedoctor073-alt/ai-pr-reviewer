@@ -25,7 +25,7 @@ jobs:
           persist-credentials: false
 
       - name: Run AI PR Reviewer
-        uses: strangedoctor073-alt/ai-pr-reviewer@v2
+        uses: strangedoctor073-alt/ai-pr-reviewer@v3.0.0
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           # Claude (default model: claude-sonnet-4-6). Leave the secret unset to
@@ -47,13 +47,13 @@ jobs:
           if-no-files-found: ignore
 
       # ---- Other providers: `model` is REQUIRED (there is no default) --------
-      # - uses: strangedoctor073-alt/ai-pr-reviewer@v2
+      # - uses: strangedoctor073-alt/ai-pr-reviewer@v3.0.0
       #   with:
       #     github_token: ${{ secrets.GITHUB_TOKEN }}
       #     openai_api_key: ${{ secrets.OPENAI_API_KEY }}
       #     model: "<an OpenAI model id your account can call>"
       #
-      # - uses: strangedoctor073-alt/ai-pr-reviewer@v2
+      # - uses: strangedoctor073-alt/ai-pr-reviewer@v3.0.0
       #   with:
       #     github_token: ${{ secrets.GITHUB_TOKEN }}
       #     gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
