@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from . import memory as memory_rules
 from .config import Config
 from .diff_parser import FileDiff
+from .index import IndexLimits, RepoIndex, build_index
 from .models import Finding, PRContext
 from .repo_context import RepoContextEntry, collect_repository_context
 from .rules import ReviewPolicy, load_project_rules
@@ -56,6 +57,11 @@ class ReviewContext:
     # V3 C3: collection problems (budget reached, GitHub unavailable) that
     # must surface as run warnings rather than silently vanish.
     context_warnings: list[str] = field(default_factory=list)
+    # V4-E01-T05: the ephemeral repository index for this run (files,
+    # symbols, import graph). Built beneath the outer ``repo_context_chars``
+    # ceiling, never persisted, and deliberately NOT read by any provider in
+    # V4-E01 (prompt output is unchanged; E02 selects from it later).
+    repo_index: RepoIndex | None = None
 
 
 # --------------------------------------------------------------------------- ContextBudget
@@ -159,6 +165,44 @@ def _collect_repo_context(gh, pr: PRContext, files: list[FileDiff],
                     f"({type(exc).__name__}); continuing the review without it"]
 
 
+def _build_repo_index(pr: PRContext, files: list[FileDiff], cfg: Config,
+                      policy: ReviewPolicy) -> RepoIndex | None:
+    """V4-E01-T05: build (or decline to build) this run's ephemeral index.
+
+    One budget system, not two — the existing ``repo_context_chars``
+    input (the outer character ceiling on repository context) stays the
+    master switch: ``<= 0`` means "no repository reads beyond the diff"
+    and therefore no index build. ``context.max_files`` / ``context.max_bytes``
+    from the policy then bound the build *beneath* that ceiling; they can
+    shrink what the index reads but can never enlarge what reaches a
+    prompt (no provider reads ``context.repo_index`` in E01).
+
+    Declines (no checkout, origin mismatch) log at INFO and return
+    ``None`` — absence is a supported state while nothing consumes the
+    index; unexpected failures log a WARNING. Either way an index
+    problem never breaks a review, and degradation is log-only in E01
+    (the index changes no report field), so review output stays
+    byte-identical whether the index exists or not.
+    """
+    budget = int(getattr(cfg, "repo_context_chars", 12_000) or 0)
+    if budget <= 0:
+        log.info("repository index not built (repo_context_chars <= 0)")
+        return None
+    root = getattr(cfg, "repo_root", None) or "."
+    try:
+        return build_index(
+            root,
+            expected_repo=getattr(pr, "repo", "") or "",
+            changed_paths=[f.path for f in files],
+            exclusions=[*list(getattr(policy, "exclude", None) or []),
+                        *list(getattr(cfg, "exclude", None) or [])],
+            limits=IndexLimits.from_policy(policy),
+        )
+    except Exception as exc:  # noqa: BLE001 — build_index also never raises
+        log.warning("repository index build failed: %s", exc)
+        return None
+
+
 # --------------------------------------------------------------------------- build_context
 
 def build_context(pr: PRContext, files: list[FileDiff], cfg: Config,
@@ -176,6 +220,12 @@ def build_context(pr: PRContext, files: list[FileDiff], cfg: Config,
     is bounded by ``cfg.repo_context_chars``, a non-positive value disables
     it, and any GitHub failure degrades to a warning — see
     :mod:`ai_pr_reviewer.repo_context`.
+
+    Repository index (``repo_index``, V4-E01-T05) is the ephemeral,
+    bounded inventory/symbol/import view of the local checkout: built
+    beneath ``cfg.repo_context_chars`` (``<= 0`` disables it), limited by
+    ``context.max_files`` / ``context.max_bytes``, and never prompt-
+    visible in E01 — see :mod:`ai_pr_reviewer.index`.
     """
     repo_root = getattr(cfg, "repo_root", None) or "."
     rules_file = getattr(cfg, "rules_file", None) or ".ai-pr-reviewer.yml"
@@ -201,6 +251,9 @@ def build_context(pr: PRContext, files: list[FileDiff], cfg: Config,
     ]
 
     repo_entries, repo_warnings = _collect_repo_context(gh, pr, files, cfg)
+    # V4-E01-T05: the ephemeral index rides along on the context. It is
+    # never prompt-visible in E01 — this is the seam E02 selects from.
+    repo_index = _build_repo_index(pr, files, cfg, project_rules)
 
     focus_areas: list[str] = []
     for area in list(getattr(cfg, "focus_areas", None) or []) + list(project_rules.focus):
@@ -221,4 +274,5 @@ def build_context(pr: PRContext, files: list[FileDiff], cfg: Config,
         token_budget=budget,
         repo_context=repo_entries,
         context_warnings=repo_warnings,
+        repo_index=repo_index,
     )

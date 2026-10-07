@@ -5,7 +5,8 @@ Three jobs, all defense-in-depth around the fact that a pull-request diff is
 
 1. ``wrap_untrusted_diff``  — fence the diff between nonce-tagged markers and
    neutralize spoofed markers, so the model can be told precisely which text
-   is data and which is instruction.
+   is data and which is instruction; ``wrap_untrusted_repo_file`` applies the
+   same contract per repository file (V4-E08-T02).
 2. ``scan_prompt_injection`` — screen diffs for instruction-impersonation
    phrases; matches are surfaced as warnings on the review run.
 3. ``redact_secrets`` — scrub credential-looking strings out of anything we
@@ -22,6 +23,11 @@ import secrets
 # ---------------------------------------------------------------------------
 
 OPEN_TAG_RE = re.compile(r"<\s*/?\s*untrusted_diff[^>]*>", re.I)
+#: V4-E08-T02: per-file fence markers (``<untrusted_repo_file>``). Same
+#: spoofing contract as the diff fence: repository text that tries to emit
+#: these tags is neutralized before we add ours, and the injection screen
+#: flags the attempt.
+REPO_FILE_TAG_RE = re.compile(r"<\s*/?\s*untrusted_repo_file[^>]*>", re.I)
 
 
 def new_nonce() -> str:
@@ -45,6 +51,30 @@ def wrap_untrusted_diff(diff_text: str, nonce: str | None = None) -> tuple[str, 
     return wrapped, nonce
 
 
+def wrap_untrusted_repo_file(nonce: str, header: str, content: str) -> str:
+    """Mark ONE repository file as untrusted data inside a prompt block (V4-E08-T02).
+
+    Every repository-derived file that reaches a provider gets its own
+    ``<untrusted_repo_file id="...">`` fence, so the model sees an explicit
+    per-file trust boundary — not just a prose header that repository text
+    could spoof. ``header`` (the path/reason line) goes *inside* the fence so
+    the filename itself is data too, never a bare attribute the content could
+    escape from. ``content`` is scrubbed of any spoofed ``untrusted_repo_file``
+    tags first, leaving exactly one opening and one closing tag per file —
+    ours, carrying the caller's nonce.
+
+    Callers wrap the result in :func:`wrap_untrusted_diff` for the outer
+    block fence; this per-file marker is defense in depth inside it.
+    """
+    safe = REPO_FILE_TAG_RE.sub("[neutralized-fence-tag]", content)
+    return (
+        f'<untrusted_repo_file id="{nonce}">\n'
+        f"{header}\n"
+        f"{safe}\n"
+        f'</untrusted_repo_file id="{nonce}">'
+    )
+
+
 # ---------------------------------------------------------------------------
 # 2 · Prompt-injection screening
 # ---------------------------------------------------------------------------
@@ -64,6 +94,7 @@ INJECTION_PATTERNS: list[tuple[str, re.Pattern]] = [
         r"(?i)\b(as\s+)?(the\s+)?(maintainer|admin|system|developer)\s+(of\s+this\s+repo\s+)?"
         r"(says|said|instructs|commands|requests)\b")),
     ("fake-tag", OPEN_TAG_RE),
+    ("fake-repo-file-tag", REPO_FILE_TAG_RE),
     ("fake-chat-turn", re.compile(r"^\s*(assistant|system)\s*:", re.I | re.M)),
 ]
 

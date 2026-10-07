@@ -200,6 +200,68 @@ def test_list_entries_capped_defensively(tmp_path):
     assert len(policy.rules) == MAX_LIST_ENTRIES
 
 
+# --------------------------------------------- V4-E01-T04 · index budgets
+def test_context_budgets_default_without_any_config(tmp_path):
+    from ai_pr_reviewer.index import IndexLimits
+    from ai_pr_reviewer.index.limits import (DEFAULT_MAX_BYTES,
+                                             DEFAULT_MAX_FILES)
+
+    policy = load_project_rules(str(tmp_path))          # missing file
+    assert policy.context_max_files == DEFAULT_MAX_FILES
+    assert policy.context_max_bytes == DEFAULT_MAX_BYTES
+    # the limits object the builder consumes reflects the same defaults
+    assert IndexLimits.from_policy(policy) == IndexLimits()
+
+
+def test_context_budgets_are_parsed_from_the_context_section(tmp_path):
+    from ai_pr_reviewer.index import IndexLimits
+
+    _write(tmp_path, "context:\n  max_files: 250\n  max_bytes: 65536\n")
+    policy = load_project_rules(str(tmp_path))
+
+    assert policy.context_max_files == 250
+    assert policy.context_max_bytes == 65536
+    limits = IndexLimits.from_policy(policy)
+    assert limits.max_files == 250 and limits.max_bytes == 65536
+
+
+def test_context_budgets_warn_and_fall_back_on_junk(tmp_path, caplog):
+    from ai_pr_reviewer.index.limits import (DEFAULT_MAX_BYTES,
+                                             DEFAULT_MAX_FILES)
+
+    _write(tmp_path, "context:\n  max_files: 0\n  max_bytes: lots\n")
+    with caplog.at_level("WARNING"):
+        policy = load_project_rules(str(tmp_path))
+
+    assert policy.context_max_files == DEFAULT_MAX_FILES   # 0 is invalid here
+    assert policy.context_max_bytes == DEFAULT_MAX_BYTES   # non-int
+    messages = " ".join(r.getMessage() for r in caplog.records)
+    assert "context.max_files" in messages
+    assert "context.max_bytes" in messages
+
+
+def test_context_budgets_are_clamped_to_the_hard_caps(tmp_path, caplog):
+    from ai_pr_reviewer.index.limits import HARD_MAX_BYTES, HARD_MAX_FILES
+
+    _write(tmp_path, "context:\n  max_files: 1000000\n  max_bytes: 99999999999\n")
+    with caplog.at_level("WARNING"):
+        policy = load_project_rules(str(tmp_path))
+
+    assert policy.context_max_files == HARD_MAX_FILES
+    assert policy.context_max_bytes == HARD_MAX_BYTES
+    assert any("hard cap" in r.getMessage() for r in caplog.records)
+
+
+def test_non_mapping_context_section_is_ignored_with_a_warning(tmp_path, caplog):
+    _write(tmp_path, "context: 500\n")
+    with caplog.at_level("WARNING"):
+        policy = load_project_rules(str(tmp_path))
+
+    from ai_pr_reviewer.rules import ReviewPolicy
+    assert policy.context_max_files == ReviewPolicy().context_max_files
+    assert any("context" in r.getMessage() for r in caplog.records)
+
+
 # --------------------------------------------------------------------- never raises
 def test_never_raises_on_any_input(tmp_path):
     for bad in ["{{{{", "review: null\nrules: null\n", "\x00\x01binary-ish",

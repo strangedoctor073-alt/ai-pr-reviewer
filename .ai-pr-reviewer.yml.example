@@ -48,3 +48,15 @@ focus:
   - input validation
   - error handling
   - tests
+
+# V4 repository-index budgets (optional — these defaults suit most repos).
+# These bound what the per-run index READS from your checkout: at most
+# max_files files (hard cap 10000) and max_bytes of file content
+# (hard cap 104857600). They sit BENEATH the Action's `repo_context_chars`
+# input, which remains the outer ceiling on how much repository context can
+# ever reach a prompt — and setting `repo_context_chars` to 0 disables the
+# index build entirely. The index is ephemeral (per review run, never
+# stored) and never executes repository code.
+context:
+  max_files: 1000
+  max_bytes: 10485760

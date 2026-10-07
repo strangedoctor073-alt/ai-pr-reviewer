@@ -19,6 +19,10 @@ import os
 from dataclasses import dataclass, field
 
 from .config import SEVERITIES
+from .index.limits import (DEFAULT_MAX_BYTES as DEFAULT_CONTEXT_MAX_BYTES,
+                           DEFAULT_MAX_FILES as DEFAULT_CONTEXT_MAX_FILES,
+                           HARD_MAX_BYTES as HARD_CONTEXT_MAX_BYTES,
+                           HARD_MAX_FILES as HARD_CONTEXT_MAX_FILES)
 
 log = logging.getLogger(__name__)
 
@@ -45,7 +49,9 @@ MAX_LIST_ENTRIES = 50
 # V3-E05-T05: keys this parser understands. Anything else at the top level
 # (or a future section) is warned about and skipped — never fatal — so
 # config written for a newer schema still reviews on an older engine.
-KNOWN_TOP_LEVEL_KEYS = frozenset({"review", "rules", "exclude", "focus"})
+# ``context`` (V4-E01-T04) holds the repository-index budgets.
+KNOWN_TOP_LEVEL_KEYS = frozenset({"review", "rules", "exclude", "focus",
+                                  "context"})
 
 
 @dataclass
@@ -58,6 +64,13 @@ class ReviewPolicy:
     rules: list[str] = field(default_factory=list)
     exclude: list[str] = field(default_factory=lambda: list(SENSITIVE_EXCLUDE_GLOBS))
     focus: list[str] = field(default_factory=list)
+    # V4-E01-T04: repository-index budgets. These bound what the index
+    # *reads* from the checkout; they sit BENEATH the Action's
+    # ``repo_context_chars`` input, which stays the outer ceiling on how
+    # much repository context can ever reach a prompt (and whose <= 0
+    # disables the index build entirely). Defaults preserve V3 behavior.
+    context_max_files: int = DEFAULT_CONTEXT_MAX_FILES
+    context_max_bytes: int = DEFAULT_CONTEXT_MAX_BYTES
 
 
 def _with_sensitive_exclusions(values: list[str]) -> list[str]:
@@ -89,6 +102,34 @@ def _as_str_list(value: object, field_name: str, source: str) -> list[str]:
     return out
 
 
+def _bounded_int(value: object, *, default: int, high: int, name: str,
+                 source: str) -> int:
+    """Parse a bounded positive-integer budget (V4-E01-T04).
+
+    Warns and falls back for anything unusable — a typo'd budget must
+    never fail a review — and caps at the hard ceiling so config can only
+    move budgets *down* within ``[1, high]`` (``0`` does not mean
+    "disable": disabling repository context is ``repo_context_chars: 0``,
+    the outer ceiling).
+    """
+    if value is None:
+        return default
+    if isinstance(value, bool) or not isinstance(value, int):
+        log.warning("%s: '%s' should be an integer — defaulting to %d",
+                    source, name, default)
+        return default
+    if value < 1:
+        log.warning("%s: '%s' must be >= 1 (got %d) — defaulting to %d "
+                    "(set repo_context_chars to 0 to disable repository "
+                    "context entirely)", source, name, value, default)
+        return default
+    if value > high:
+        log.warning("%s: '%s' %d exceeds the hard cap — capping at %d",
+                    source, name, value, high)
+        return high
+    return value
+
+
 def _normalize(raw: dict, source: str) -> ReviewPolicy:
     # Forward compatibility (V3-E05-T05): unknown top-level keys warn and are
     # skipped, so future/misspelled sections surface as a notice instead of
@@ -118,6 +159,19 @@ def _normalize(raw: dict, source: str) -> ReviewPolicy:
     else:
         sev = sev.lower()
 
+    ctx = raw.get("context")
+    if ctx is None:
+        ctx = {}
+    elif not isinstance(ctx, dict):
+        log.warning("%s: 'context' should be a mapping — ignoring it", source)
+        ctx = {}
+    context_max_files = _bounded_int(
+        ctx.get("max_files"), default=DEFAULT_CONTEXT_MAX_FILES,
+        high=HARD_CONTEXT_MAX_FILES, name="context.max_files", source=source)
+    context_max_bytes = _bounded_int(
+        ctx.get("max_bytes"), default=DEFAULT_CONTEXT_MAX_BYTES,
+        high=HARD_CONTEXT_MAX_BYTES, name="context.max_bytes", source=source)
+
     return ReviewPolicy(
         mode=mode,
         severity_threshold=sev,
@@ -125,6 +179,8 @@ def _normalize(raw: dict, source: str) -> ReviewPolicy:
         exclude=_with_sensitive_exclusions(
             _as_str_list(raw.get("exclude"), "exclude", source)),
         focus=_as_str_list(raw.get("focus"), "focus", source),
+        context_max_files=context_max_files,
+        context_max_bytes=context_max_bytes,
     )
 
 
