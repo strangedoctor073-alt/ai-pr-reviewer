@@ -17,6 +17,7 @@ working.
 from __future__ import annotations
 
 import fnmatch
+import logging
 import time
 
 from . import reporter
@@ -25,6 +26,9 @@ from .diff_parser import FileDiff, parse_unified_diff
 from .github_client import GitHubClient, GitHubError
 from .models import Finding, PRContext, ReviewKey, ReviewResult, ReviewStats
 from .rules import DEFAULT_SEVERITY, load_project_rules
+from .storage import has_capability
+from .storage_schema import (CAP_DISMISSED_FINGERPRINTS,
+                             CAP_PREVIOUS_FINDINGS, CAP_TELEMETRY)
 
 # --- Pipeline stages (each lives in its own module) -------------------------
 from .context import build_context                   # provided by context.py
@@ -32,6 +36,7 @@ from .findings import (apply_lifecycle, deduplicate,  # provided by findings.py
                        fingerprint_finding, mark_dismissed)
 from .model_router import (classify_risk, get_provider,  # model_router.py
                            run_analysis)
+from .telemetry import to_telemetry_row                 # V3-E02-T02/T04
 from .verification import verification_counts, verify_findings  # C4
 
 # Lifecycle fields persisted with each finding (Finding.to_dict() may or may
@@ -39,6 +44,8 @@ from .verification import verification_counts, verify_findings  # C4
 _LIFECYCLE_FIELDS = ("fingerprint", "state", "first_seen_sha", "last_seen_sha",
                      "resolved_at", "github_comment_id",
                      "verification_status", "verification_reason", "verified_at")
+
+log = logging.getLogger(__name__)
 
 
 # ----------------------------------------------------- moved out of cli.py ----
@@ -60,12 +67,43 @@ def filter_files(files: list[FileDiff], cfg: Config,
     return keep
 
 
+def severity_sort_key(f):
+    """Deterministic pipeline ordering: severity descending, then file, then
+    line (missing lines sort first). Providers are NOT trusted to arrive
+    sorted — D5 showed the old "already sorted by analyzers" assumption let a
+    cap prefer a mild finding over a critical one. Every truncation point
+    (inline cap, summary top-N, report listing) cuts along this one key."""
+    return (-sev_rank(f.severity), f.file or "", f.line or 0)
+
+
 def validate_findings(findings, files: list[FileDiff], cfg: Config,
                       severity_threshold: str | None = None):
     """Drop findings that can't be anchored, apply the severity threshold and
-    the inline-comment cap. Returns (inline_ok, suppressed_count, dropped)."""
+    split the report set from the inline-comment set.
+
+    Returns ``(inline, reported, below_threshold, suppressed, dropped)``:
+
+    * ``inline``          — the top ``max_comments`` findings after the
+                            severity sort (what may be annotated inline on
+                            GitHub);
+    * ``reported``        — every anchored finding at/above the severity
+                            threshold, severity-sorted (the full set the
+                            report, health score, lifecycle and verification
+                            must see — D2/D4: the cap must never shrink
+                            "what this review found");
+    * ``below_threshold`` — anchored findings *under* the severity threshold:
+                            kept (D3 — they used to vanish entirely), listed
+                            separately in the report, never counted towards
+                            ``findings_count``/inline comments;
+    * ``suppressed``      — how many reported findings fell over the inline
+                            cap (they are still reported, just not annotated
+                            inline);
+    * ``dropped``         — findings that could not be anchored to a changed
+                            line.
+    """
     line_maps = {f.path: f.new_line_numbers() for f in files}
     valid: list = []
+    below: list = []
     dropped: list = []
     for f in findings:
         if f.file not in line_maps:
@@ -77,12 +115,19 @@ def validate_findings(findings, files: list[FileDiff], cfg: Config,
             dropped.append(f)
             continue
         if sev_rank(f.severity) < sev_rank(severity_threshold or cfg.severity_threshold):
+            # D3: record instead of dropping — a suppressed finding must stay
+            # visible in the report (and truthful counts) even though it is
+            # not reported as an issue or annotated inline.
+            below.append(f)
             continue
         valid.append(f)
-    # Already sorted high→low by analyzers; cap what gets posted inline.
+    # D5: sort at the pipeline level before any cap applies (see
+    # severity_sort_key) — never trust provider ordering.
+    valid.sort(key=severity_sort_key)
+    below.sort(key=severity_sort_key)
     inline = valid[:cfg.max_comments]
     suppressed = len(valid) - len(inline)
-    return inline, suppressed, dropped
+    return inline, valid, below, suppressed, dropped
 
 
 def _scrub(text: str, cfg: Config) -> str:
@@ -172,7 +217,23 @@ class ReviewOrchestrator:
         # f. dedupe (before the cap, so duplicates can't eat the comment
         #    budget), then anchor / threshold / cap
         findings = deduplicate(outcome.findings)
-        inline, suppressed, dropped = validate_findings(
+        # V4-E04: populate provenance on surviving findings (pipeline-owned,
+        # from AnalysisOutcome — never from model output).
+        _engine = getattr(outcome, "engine", "") or ""
+        _model = getattr(outcome, "model", "") or ""
+        _origin = "static" if _engine == "static" else "ai"
+        for f in findings:
+            f.provenance_engine = _engine or None
+            f.provenance_model = _model or None
+            f.provenance_agent = None  # V5+ specialist agents
+            f.provenance_origin = _origin
+        # D4: ``max_comments`` is a *posting* limit only. ``reported`` is
+        # every anchored finding this review found — the report, the health
+        # score, the lifecycle and the verification must all see the full
+        # set. The severity-sorted top ``max_comments`` (``_inline``) is
+        # enforced where comments are actually posted (cli._post_and_sync),
+        # never by shrinking what the review claims to have found.
+        _inline, reported, below_threshold, suppressed, dropped = validate_findings(
             findings, files, cfg, _effective_severity_threshold(cfg, policy))
         if dropped:
             warnings.append(f"{len(dropped)} finding(s) could not be anchored to a "
@@ -180,19 +241,28 @@ class ReviewOrchestrator:
 
         # g. lifecycle against what earlier reviews reported
         previous = self._previous_findings(repo, pr, context)
-        lifecycle_findings = self._apply_lifecycle(previous, inline, files,
+        lifecycle_findings = self._apply_lifecycle(previous, reported, files,
                                                    incremental, pr.head_sha)
         # ... then verify the "resolved" transitions the lifecycle inferred
         # (C4): anything we cannot actually confirm goes back to active,
         # so a finding never closes itself without evidence.
+        # D2: verification must receive the UNCAPPED ``current`` set — fed the
+        # max_comments-capped list, a still-present finding beyond the cap
+        # looked absent and closed itself as "resolved".
         lifecycle_findings = verify_findings(lifecycle_findings, previous,
-                                             inline, files)
+                                             reported, files)
         # ... then park anything the dashboard user muted (see
         # _apply_dismissals) — after the lifecycle so a mute can never
         # overwrite a "resolved" transition, and before the health score
         # so muted findings don't count against it.
         lifecycle_findings = self._apply_dismissals(repo, lifecycle_findings,
                                                     warnings)
+
+        # D5: one authoritative severity ordering for the whole result —
+        # deterministic report JSON, and every downstream truncation (summary
+        # top-N, inline comment cap) cuts severity-first instead of trusting
+        # provider ordering.
+        lifecycle_findings.sort(key=severity_sort_key)
 
         from .models import calculate_health_score
         score, grade = calculate_health_score(lifecycle_findings)
@@ -208,6 +278,7 @@ class ReviewOrchestrator:
             duration_ms=int((time.monotonic() - t0) * 1000),
             summary=outcome.summary, findings=lifecycle_findings,
             suppressed=suppressed, warnings=warnings,
+            below_threshold=below_threshold,
             stats=ReviewStats(
                 files=len(files),
                 additions=sum(f.additions for f in files),
@@ -228,6 +299,12 @@ class ReviewOrchestrator:
         result.previous_findings_count = len(previous)
         result.state_transition_count = transitions  # (C8: skip duplicate posts)
         result.verification = verification_counts(lifecycle_findings)  # (C4)
+        # V3-E02-T02: run telemetry, serialized exactly once through the
+        # allowlist+redaction chokepoint. Backends without a telemetry
+        # block (test doubles) report null — additive, never invented.
+        outcome_telemetry = getattr(outcome, "telemetry", None)
+        result.telemetry = to_telemetry_row(outcome_telemetry) \
+            if outcome_telemetry is not None else None
 
         # i. persist (last: only a fully successful run advances the SHA)
         # ``engine == "static"`` + ``fallback_used`` is the forced-fallback
@@ -296,11 +373,11 @@ class ReviewOrchestrator:
     def _previous_findings(self, repo: str, pr: PRContext, context) -> list[Finding]:
         if self.storage is None:
             return []
-        # NOTE: get_previous_findings isn't guaranteed on every storage
-        # backend; fall back to what build_context loaded.
-        getter = getattr(self.storage, "get_previous_findings", None)
-        if callable(getter):
-            return list(getter(repo, pr.pr_number) or [])
+        # Declared-capability branch (V3-E04-T04): a backend without the
+        # previous-findings capability falls back to what build_context
+        # loaded — same behavior as the old getattr guard, no probing.
+        if has_capability(self.storage, CAP_PREVIOUS_FINDINGS):
+            return list(self.storage.get_previous_findings(repo, pr.pr_number) or [])
         return list(getattr(context, "previous_findings", None) or [])
 
     @staticmethod
@@ -331,18 +408,22 @@ class ReviewOrchestrator:
                           warnings: list[str]) -> list[Finding]:
         """Mute findings the dashboard user dismissed (fingerprint match).
 
-        ``get_dismissed_fingerprints`` is an optional storage capability —
-        only the dashboard feedback store has it — so backends without it
-        (local SQLite, fakes, no storage at all) simply skip this step. A
-        failing lookup downgrades to a warning rather than losing the
-        review, same policy as every other storage read here.
+        ``get_dismissed_fingerprints`` is a declared optional capability
+        (V3-E04-T04): every real backend provides it, backends that
+        don't (stateless runs, minimal fakes) skip the step with a
+        logged warning instead of silently varying. A failing lookup
+        downgrades to a report warning rather than losing the review,
+        same policy as every other storage read here.
         """
-        getter = getattr(self.storage, "get_dismissed_fingerprints", None) \
-            if self.storage is not None else None
-        if not callable(getter):
+        if self.storage is None:
+            return findings
+        if not has_capability(self.storage, CAP_DISMISSED_FINGERPRINTS):
+            log.warning("storage backend %s lacks get_dismissed_fingerprints "
+                        "— no findings were muted this run",
+                        type(self.storage).__name__)
             return findings
         try:
-            dismissed = set(getter(repo) or [])
+            dismissed = set(self.storage.get_dismissed_fingerprints(repo) or [])
         except Exception as exc:  # noqa: BLE001 — storage must never lose a review
             warnings.append(_scrub(
                 f"muted-fingerprint lookup failed ({exc}); no findings were "
@@ -369,6 +450,21 @@ class ReviewOrchestrator:
             return
         review_id = ReviewKey(repo=repo, pr_number=pr.pr_number,
                               head_sha=pr.head_sha).as_id()
+        # Telemetry is drop-safe (V3-E02-T04 · ADR-014): it rides the same
+        # review id, behind the declared telemetry capability (V3-E04-T04)
+        # instead of a getattr probe — a backend without the capability
+        # (the HTTP client, a pre-telemetry fake) drops the row with a
+        # logged warning, and a storage failure only ever warns.
+        if getattr(result, "telemetry", None):
+            if has_capability(self.storage, CAP_TELEMETRY):
+                try:
+                    self.storage.save_telemetry(review_id, result.telemetry)
+                except Exception as exc:  # noqa: BLE001 — telemetry must not fail a review
+                    result.warnings.append(f"telemetry not saved ({exc})")
+            else:
+                log.warning("storage backend %s cannot store telemetry "
+                            "— dropping this run's row (drop-safe)",
+                            type(self.storage).__name__)
         try:
             self.storage.save_findings(review_id,
                                        [_finding_row(f) for f in result.findings])

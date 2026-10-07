@@ -1,0 +1,27 @@
+id: DEFECT-D3-01
+layer: regression
+title: "D3 — below-threshold findings are retained in the report"
+provenance: hand-authored   # synthetic only — no real PRs
+diff: pr.diff
+config:
+  max_comments: 20
+  severity_threshold: medium
+expect:
+  findings:
+    - file: src/notes.py
+      line_hint: 7
+      category: security
+      severity_min: critical
+      title_match: "SQL injection"
+    - file: src/notes.py
+      line_hint: 6
+      category: style
+      severity_min: low
+      title_match: "Debug print"
+      bucket: below_threshold
+notes: >
+  D3 (below-threshold findings dropped): with threshold=medium the
+  HYG001 print() must stay visible in the report's below_threshold
+  bucket (never silently vanish while the summary claims suppression).
+  If below_threshold is dropped again, the bucket label goes unmatched
+  and recall falls. Unit pin: tests/test_defect_regressions.py::test_d3_...

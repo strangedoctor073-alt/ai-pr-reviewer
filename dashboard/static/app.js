@@ -569,6 +569,16 @@ async function renderMetrics() {
 
   const healthCls = m.avg_health_score >= 90 ? "grade-a-plus" : m.avg_health_score >= 70 ? "grade-b" : "grade-d";
 
+  /* V3-E02-T05: additive telemetry block — guarded so a dashboard
+     serving pre-telemetry reports still renders (zero series, no crash). */
+  const tel = m.telemetry || {};
+  const tok = tel.tokens || {};
+  const states = tel.usage_states || {};
+  const repoTotals = {};
+  Object.entries(tel.by_repo || {}).forEach(([repo, v]) => {
+    repoTotals[repo] = (v.input_tokens || 0) + (v.output_tokens || 0);
+  });
+
   app.innerHTML = `
     <div class="stat-grid">
       <div class="stat-tile"><div class="num">${m.reviews_total}</div><div class="label">Reviews run</div></div>
@@ -584,6 +594,17 @@ async function renderMetrics() {
     <div class="bar-block">
       <h4>Reviews by engine</h4>
       ${barRows(m.engine_distribution || {}, { claude: "var(--accent)", openai: "var(--sev-low)", gemini: "#4CAF50", static: "var(--sev-info)", "claude+static": "var(--sev-medium)", "openai+static": "var(--sev-medium)", "gemini+static": "var(--sev-medium)" })}
+    </div>
+    <div class="bar-block">
+      <h4>Token usage &amp; provider latency</h4>
+      <div class="stat-grid">
+        <div class="stat-tile"><div class="num">${Number(tok.input || 0).toLocaleString()}</div><div class="label">Input tokens</div></div>
+        <div class="stat-tile"><div class="num">${Number(tok.output || 0).toLocaleString()}</div><div class="label">Output tokens</div></div>
+        <div class="stat-tile"><div class="num">${tel.avg_call_ms || 0}</div><div class="label">Avg provider call (ms)</div></div>
+        <div class="stat-tile"><div class="num">${tel.runs || 0}</div><div class="label">Runs with telemetry</div></div>
+      </div>
+      ${barRows(states, { ok: "var(--sev-low)", unavailable: "var(--sev-medium)", "n/a": "var(--sev-info)" })}
+      ${Object.keys(repoTotals).length ? `<h4>Tokens by repo (input + output)</h4>${barRows(repoTotals, {})}` : ""}
     </div>`;
 }
 

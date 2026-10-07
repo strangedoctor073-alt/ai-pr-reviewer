@@ -1,0 +1,16 @@
+id: GOLDEN-SEC-001
+layer: regression
+title: "SQL injection via f-string query is flagged critical"
+provenance: hand-authored   # synthetic only — no real PRs
+diff: pr.diff
+expect:
+  findings:
+    - file: src/orders.py
+      line_hint: 7
+      category: security
+      severity_min: critical
+      title_match: "SQL injection"
+notes: >
+  Headline golden positive: every refactor of the pipeline must keep
+  finding this SEC001 match on the exact line. Anchors the precision /
+  recall numbers of the corpus.

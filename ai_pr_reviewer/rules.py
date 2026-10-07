@@ -42,6 +42,11 @@ SENSITIVE_EXCLUDE_GLOBS = (
 # must not be able to balloon the prompt or the file-matching work.
 MAX_LIST_ENTRIES = 50
 
+# V3-E05-T05: keys this parser understands. Anything else at the top level
+# (or a future section) is warned about and skipped — never fatal — so
+# config written for a newer schema still reviews on an older engine.
+KNOWN_TOP_LEVEL_KEYS = frozenset({"review", "rules", "exclude", "focus"})
+
 
 @dataclass
 class ReviewPolicy:
@@ -85,6 +90,15 @@ def _as_str_list(value: object, field_name: str, source: str) -> list[str]:
 
 
 def _normalize(raw: dict, source: str) -> ReviewPolicy:
+    # Forward compatibility (V3-E05-T05): unknown top-level keys warn and are
+    # skipped, so future/misspelled sections surface as a notice instead of
+    # silently vanishing (and never crash the review).
+    unknown = sorted({str(k) for k in raw} - KNOWN_TOP_LEVEL_KEYS)
+    if unknown:
+        log.warning("%s: unknown top-level key(s) ignored: %s "
+                    "(known: %s)", source, ", ".join(unknown),
+                    ", ".join(sorted(KNOWN_TOP_LEVEL_KEYS)))
+
     review = raw.get("review")
     review = review if isinstance(review, dict) else {}
 

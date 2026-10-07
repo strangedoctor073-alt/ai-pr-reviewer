@@ -1,0 +1,31 @@
+id: DEFECT-D5-01
+layer: regression
+title: "D5 — report findings ordered severity-first, then file, then line"
+provenance: hand-authored   # synthetic only — no real PRs
+diff: pr.diff
+config:
+  max_comments: 20
+  severity_threshold: medium
+expect:
+  findings:
+    - file: src/zzz_sink.py
+      line_hint: 6
+      category: security
+      severity_min: critical
+      title_match: "SQL injection"
+    - file: src/aaa_reader.py
+      line_hint: 4
+      category: resource-leak
+      severity_min: medium
+      title_match: "context manager"
+  report_order:
+    - src/zzz_sink.py
+    - src/aaa_reader.py
+notes: >
+  D5 (no severity sort before caps): the critical finding lives in
+  zzz_sink.py and the medium one in aaa_reader.py — alphabetically the
+  opposite of severity order. The report must present severity-first
+  (then file, then line) via the single pipeline sort key; if the
+  pipeline ever trusts provider/engine order again, the report order
+  assertion fails. Unit pin:
+  tests/test_defect_regressions.py::test_d5_...

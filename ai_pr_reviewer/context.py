@@ -27,6 +27,9 @@ from .models import Finding, PRContext
 from .repo_context import RepoContextEntry, collect_repository_context
 from .rules import ReviewPolicy, load_project_rules
 from .security import redact_secrets
+from .storage import has_capability
+from .storage_schema import (CAP_LIST_REPO_MEMORY, CAP_PREVIOUS_FINDINGS,
+                             CAP_REPO_MEMORY)
 
 log = logging.getLogger(__name__)
 
@@ -107,34 +110,39 @@ def _apply_context_budget(files: list[FileDiff],
 def _load_memory_entries(storage, repo: str, paths: list[str]) -> list[dict]:
     """Human-authored project memory for ``paths``, or ``[]``.
 
-    Backends that expose the full row (``list_repo_memory``) get the C7
-    treatment — categories, disabled rows, mute rows split out. Older /
-    minimal backends only expose plain notes through ``get_repo_memory``
-    and are used verbatim. Storage failure is always "no memory", never a
-    failed review.
+    V3-E04-T04: the backend's *declared* capability picks the path —
+    ``list_repo_memory`` gets the C7 treatment (categories, disabled
+    rows, mute rows split out); a backend without it falls back to
+    ``get_repo_memory`` (plain notes, logged as a degradation); a
+    backend with neither continues without memory, also logged.
+    Storage failure is always "no memory", never a failed review.
     """
     if storage is None:
         return []
 
-    lister = getattr(storage, "list_repo_memory", None)
-    if callable(lister):
+    if has_capability(storage, CAP_LIST_REPO_MEMORY):
         try:
-            return memory_rules.select_memory(lister(repo) or [], paths)
+            return memory_rules.select_memory(storage.list_repo_memory(repo) or [], paths)
         except Exception as exc:  # noqa: BLE001 — storage must never take the review down
             log.warning("list_repo_memory(%s) failed — continuing without "
                         "repository memory (%s)", repo, exc)
             return []
 
-    getter = getattr(storage, "get_repo_memory", None)
-    if callable(getter):
+    if has_capability(storage, CAP_REPO_MEMORY):
+        log.warning("storage backend %s lacks list_repo_memory — falling back "
+                    "to plain get_repo_memory (no categories/disabled/mute-row "
+                    "handling)", type(storage).__name__)
         try:
-            notes = getter(repo, paths) or []
+            notes = storage.get_repo_memory(repo, paths) or []
         except Exception as exc:  # noqa: BLE001
             log.warning("get_repo_memory(%s) failed — continuing without "
                         "repository memory (%s)", repo, exc)
             return []
         return memory_rules.select_memory(
             [{"note": n, "path_pattern": "*"} for n in notes if n], paths)
+
+    log.warning("storage backend %s provides no repository-memory capability "
+                "— continuing without memory", type(storage).__name__)
     return []
 
 
@@ -174,18 +182,16 @@ def build_context(pr: PRContext, files: list[FileDiff], cfg: Config,
     project_rules = load_project_rules(repo_root, filename=rules_file)
 
     previous_findings: list[Finding] = []
-    if storage is not None:
-        getter = getattr(storage, "get_previous_findings", None)
-        if callable(getter):
-            try:
-                raw_findings = getter(pr.repo, pr.pr_number) or []
-                previous_findings = [
-                    f if isinstance(f, Finding) else Finding.from_dict(f)
-                    for f in raw_findings
-                ]
-            except Exception as exc:
-                log.warning("get_previous_findings(%s, %s) failed: %s",
-                            pr.repo, pr.pr_number, exc)
+    if has_capability(storage, CAP_PREVIOUS_FINDINGS):
+        try:
+            raw_findings = storage.get_previous_findings(pr.repo, pr.pr_number) or []
+            previous_findings = [
+                f if isinstance(f, Finding) else Finding.from_dict(f)
+                for f in raw_findings
+            ]
+        except Exception as exc:
+            log.warning("get_previous_findings(%s, %s) failed: %s",
+                        pr.repo, pr.pr_number, exc)
 
     paths = [f.path for f in files]
     memory_notes = [

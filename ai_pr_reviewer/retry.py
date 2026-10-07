@@ -21,7 +21,9 @@ from __future__ import annotations
 
 import random
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+from .telemetry import event_ts
 
 # Exception class names (checked by name, not isinstance, so this module has
 # no hard dependency on httpx being importable) that mean "the network/
@@ -49,6 +51,23 @@ class RetryPolicy:
     base_delay: float = 1.0
     max_delay: float = 30.0
     jitter: float = 0.25  # fraction of the computed delay to randomize by
+    # V3-E02-T03: one structured event per retry actually taken — attempt,
+    # delay, status class and the exception's *type name* only. An
+    # in-memory list the provider copies into its outcome's telemetry; it
+    # changes no retry behavior and no logging.
+    events: list = field(default_factory=list)
+
+    def _record_event(self, attempt: int, delay: float,
+                      status_code: int | None,
+                      exc: Exception | None) -> None:
+        self.events.append({
+            "type": "retry",
+            "attempt": attempt,
+            "delay_ms": int(delay * 1000),
+            "status": status_code,
+            "error": type(exc).__name__ if exc is not None else None,
+            "ts": event_ts(),
+        })
 
     def is_retryable(self, status_code: int | None, exc: Exception | None) -> bool:
         """True if this failure is worth retrying.
@@ -120,7 +139,9 @@ class RetryPolicy:
                                       "status_code", None)
                 if attempt >= self.max_attempts or not self.is_retryable(status_code, exc):
                     raise
-                time.sleep(self._delay_for(attempt))
+                delay = self._delay_for(attempt)
+                self._record_event(attempt, delay, status_code, exc)
+                time.sleep(delay)
                 continue
 
             status_code = getattr(result, "status_code", None)
@@ -129,7 +150,9 @@ class RetryPolicy:
             last_result = result
             if attempt >= self.max_attempts:
                 return result
-            time.sleep(self._delay_for(attempt))
+            delay = self._delay_for(attempt)
+            self._record_event(attempt, delay, status_code, None)
+            time.sleep(delay)
 
         if last_exc is not None:  # pragma: no cover — defensive, loop always returns/raises
             raise last_exc

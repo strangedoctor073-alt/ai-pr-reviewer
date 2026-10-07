@@ -1,0 +1,14 @@
+diff --git a/src/zzz_sink.py b/src/zzz_sink.py
+--- a/src/zzz_sink.py
++++ b/src/zzz_sink.py
+@@ -5,2 +5,3 @@
+ def save(db, payload):
++    cur.execute(f"SELECT * FROM events WHERE data={payload}")
+     return None
+diff --git a/src/aaa_reader.py b/src/aaa_reader.py
+--- a/src/aaa_reader.py
++++ b/src/aaa_reader.py
+@@ -3,2 +3,3 @@
+ def load(path):
++    handle = open(path)
+     return handle

@@ -146,6 +146,53 @@ def test_non_string_list_entries_are_skipped(tmp_path):
     assert policy.focus == ["security", "correctness"]
 
 
+# ------------------------------------- V3-E05-T01 · single-sourced baseline (D12)
+def test_unknown_top_level_keys_warn_but_do_not_break(tmp_path, caplog):
+    """Forward compatibility (V3-E05-T05): a config written for a future
+    schema (or with a typo'd section) warns and is skipped — the known keys
+    still load and the review proceeds. Unknown keys are never fatal."""
+    _write(tmp_path, "review:\n  mode: balanced\n"
+                     "future_section:\n  shiny_new_thing: true\n")
+    with caplog.at_level("WARNING"):
+        policy = load_project_rules(str(tmp_path))
+
+    assert policy.mode == "balanced"               # known keys unaffected
+    assert any("future_section" in r.getMessage() for r in caplog.records)
+
+
+def test_dashboard_reuses_the_engine_baseline_object():
+    """The dashboard must consume the engine's baseline, not keep a copy.
+
+    D12: ``dashboard/app.py`` used to carry a byte-identical duplicate of the
+    privacy exclusion list, synced only by convention. The identity check is
+    the single-source enforcement — re-hardcoding a list (even an identical
+    one) anywhere in the dashboard breaks this test.
+    """
+    import dashboard.app as dashboard_app
+
+    assert dashboard_app.SENSITIVE_EXCLUDE_GLOBS is SENSITIVE_EXCLUDE_GLOBS
+
+
+def test_dashboard_merge_never_drops_the_baseline():
+    """Either side merging user input must keep every baseline glob — the
+    union can only grow (repo config / dashboard settings can *add*
+    exclusions, never remove them)."""
+    import dashboard.app as dashboard_app
+
+    merged = dashboard_app._with_sensitive_exclusions(["**/*.lock"])
+    assert set(SENSITIVE_EXCLUDE_GLOBS) <= set(merged)
+    assert "**/*.lock" in merged
+
+    # Non-list and junk payloads fail closed: the baseline still survives.
+    for payload in (None, "not-a-list", ["x", 1, "  ", None]):
+        assert set(SENSITIVE_EXCLUDE_GLOBS) <= set(
+            dashboard_app._with_sensitive_exclusions(payload))
+
+    # The dashboard's built-in default set is a superset of the baseline.
+    assert set(SENSITIVE_EXCLUDE_GLOBS) <= set(dashboard_app.DEFAULT_EXCLUDE_GLOBS)
+
+
+
 def test_list_entries_capped_defensively(tmp_path):
     entries = "\n".join(f'  - "rule {i}"' for i in range(MAX_LIST_ENTRIES + 20))
     _write(tmp_path, f"rules:\n{entries}\n")

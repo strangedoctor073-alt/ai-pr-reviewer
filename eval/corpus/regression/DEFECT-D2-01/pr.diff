@@ -1,0 +1,16 @@
+diff --git a/src/zzz_orders.py b/src/zzz_orders.py
+--- a/src/zzz_orders.py
++++ b/src/zzz_orders.py
+@@ -5,4 +5,5 @@
+ def charge(db, order_id):
+     cur = db.cursor()
++    cur.execute(f"SELECT * FROM charges WHERE id={order_id}")
+     return cur.fetchone()
+
+diff --git a/src/aaa_creds.py b/src/aaa_creds.py
+--- a/src/aaa_creds.py
++++ b/src/aaa_creds.py
+@@ -3,2 +3,3 @@
+ def list_dir(user_cmd):
++    os.system("ls " + user_cmd)
+     return None

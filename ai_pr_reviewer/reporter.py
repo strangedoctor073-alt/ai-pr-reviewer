@@ -12,6 +12,12 @@ from .models import ReviewResult, SEVERITY_EMOJI, SEVERITY_ORDER
 # Finding lifecycle states that no longer need a developer's attention.
 CLOSED_STATES = frozenset({"resolved", "dismissed", "muted"})
 
+# D13 (V3-E05-T02): how many open findings (and how many resolved entries)
+# one job step-summary lists. Quality ceiling: a large PR's summary truncates
+# here — totals are still shown ("… and N more") — which bounds the size of
+# every job's step summary.
+MAX_MARKDOWN_FINDINGS = 8
+
 # Report header text per engine. Static-only output is NEVER labelled as AI
 # (README promise): the rule engine is deterministic static analysis.
 _ENGINE_TITLE = {
@@ -46,6 +52,8 @@ _FINDING_PASSTHROUGH = (
     "fingerprint", "state", "first_seen_sha", "last_seen_sha",
     "resolved_at", "github_comment_id",
     "verification_status", "verification_reason", "verified_at",
+    "provenance_engine", "provenance_model", "provenance_agent",
+    "provenance_origin",
 )
 
 # How each verification outcome is appended to a resolved finding in the
@@ -146,6 +154,10 @@ def finalize_report(result: ReviewResult, report_id: str | None = None) -> dict:
     data["fallback_used"] = fallback_used
     data["new_findings_count"] = by_state.get("new", 0)
     data["resolved_findings_count"] = by_state.get("resolved", 0)
+    # D3: below-threshold findings are retained and counted explicitly — they
+    # are NOT part of findings_count / Issues Flagged (threshold semantics
+    # unchanged), just no longer invisible.
+    data["below_threshold_count"] = len(data.get("below_threshold") or [])
     # A reopened finding is by definition still open, so it counts as active.
     data["active_findings_count"] = by_state.get("active", 0) + by_state.get("reopened", 0)
 
@@ -264,7 +276,8 @@ def _resolved_list_md(result: ReviewResult, top_n: int) -> list[str]:
     return out
 
 
-def build_summary_markdown(result: ReviewResult, top_n: int = 8) -> str:
+def build_summary_markdown(result: ReviewResult,
+                           top_n: int = MAX_MARKDOWN_FINDINGS) -> str:
     open_ = open_findings(result.findings)
     resolved = count_by_state(result.findings).get("resolved", 0)
     counts = severity_counts(open_)
@@ -314,8 +327,14 @@ def build_summary_markdown(result: ReviewResult, top_n: int = 8) -> str:
         lines.append(f"\n> ✅ {resolved} previously reported finding(s) resolved.")
         lines.extend(_resolved_list_md(result, top_n))
     if result.suppressed:
-        lines.append(f"\n> ℹ️ {result.suppressed} finding(s) below the comment threshold or "
-                     f"over the inline-comment cap were summarized here instead of annotated inline.")
+        # Truthful since D3/D4's fix: cap-overflow findings are genuinely in
+        # this report (counts + JSON) — only the inline annotation was skipped.
+        lines.append(f"\n> ℹ️ {result.suppressed} finding(s) over the inline-comment cap "
+                     f"are included in this report instead of annotated inline.")
+    if getattr(result, "below_threshold", None):
+        lines.append(f"\n> ℹ️ {len(result.below_threshold)} finding(s) below the severity "
+                     f"threshold are listed under `below_threshold` in the report "
+                     f"and are not counted as issues.")
     if result.warnings:
         lines.append("\n> ⚠️ Warnings: " + "; ".join(result.warnings))
     lines.append(f"\n<sub>Posted by AI PR Reviewer — {_ENGINE_FOOTER.get(engine, engine)}</sub>")

@@ -42,6 +42,26 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+# V3-E05-T01 (D12): the non-removable privacy exclusion baseline has exactly
+# ONE owner — ``ai_pr_reviewer.rules`` — and the dashboard re-exports it here
+# instead of keeping its own copy. The two were byte-identical duplicates
+# synced only by convention, which is a silent-failure risk for a security
+# control (engine and dashboard could diverge unnoticed). Deliberately a
+# module-level import rather than this package's call-time engine-import
+# pattern: the baseline feeds the module-level ``DEFAULT_EXCLUDE_GLOBS`` /
+# ``SETTINGS_KEYS`` constants, and ``dashboard.app`` can only be imported with
+# the repo root on ``sys.path`` (it uses relative imports) — exactly when
+# ``ai_pr_reviewer`` is importable. If that ever stops holding, failing closed
+# with an ImportError is the right failure mode for a privacy control: never
+# silently serving an empty baseline.
+from ai_pr_reviewer.rules import SENSITIVE_EXCLUDE_GLOBS
+# V3-E05-T02 (D13): the dashboard's default inline-comment cap shares the
+# engine's default so the value cannot drift between the two surfaces.
+from ai_pr_reviewer.config import DEFAULT_MAX_COMMENTS
+# V3-E05-T02 (D13): memory-note bound shared with the engine — the dashboard
+# must truncate writes at exactly the cap the engine applies on read/write.
+from ai_pr_reviewer.memory import MAX_NOTE_CHARS
+
 BASE = Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ.get("DASHBOARD_DATA_DIR", str(BASE / "data")))
 REPORTS_DIR = DATA_DIR / "reports"
@@ -49,7 +69,24 @@ SETTINGS_PATH = DATA_DIR / "settings.json"
 AUDIT_PATH = DATA_DIR / "audit.jsonl"
 
 MAX_BODY_BYTES = int(os.environ.get("DASHBOARD_MAX_BODY_BYTES", "2000000"))
+# D13 (V3-E05-T02): hard cap on how many findings one uploaded report may
+# carry. Quality ceiling: a report larger than this is stored truncated
+# (worst kept, ``truncated_findings`` flagged) so one oversized artifact can't
+# balloon storage, payloads or the findings browser.
 MAX_FINDINGS = 500
+# D13 (V3-E05-T02): caps for the sandbox analyze endpoint. Quality ceilings:
+# past MAX_ANALYZE_DIFF_CHARS the diff is refused outright (413), and past
+# MAX_ANALYZE_FINDINGS only the first slice of results is returned — the
+# summary and health score still cover every finding the engine produced.
+MAX_ANALYZE_DIFF_CHARS = 50_000
+MAX_ANALYZE_FINDINGS = 50
+# D13-adjacent (V3-E05-T02): bounds for saved dashboard rules. Quality
+# ceilings: a settings payload beyond them is rejected (400) and the stored
+# exclude list is truncated at MAX_SETTINGS_LIST_ENTRIES, so one oversized
+# settings write can't balloon the policy the engine later loads.
+MAX_SETTINGS_ITEM_CHARS = 200
+MAX_SETTINGS_LIST_ENTRIES = 100
+MAX_SETTINGS_FOCUS_ENTRIES = 50
 
 
 def _parse_limit(raw: str | None, default: str) -> tuple[int, int]:
@@ -64,17 +101,8 @@ READ_LIMIT = _parse_limit(os.environ.get("DASHBOARD_RATE_LIMIT_READ"), "240/60")
 WRITE_LIMIT = _parse_limit(os.environ.get("DASHBOARD_RATE_LIMIT_WRITE"), "30/60")
 REQUIRE_READS_AUTH = os.environ.get(
     "DASHBOARD_REQUIRE_TOKEN_FOR_READS", "1").lower() in ("1", "true", "yes")
-SENSITIVE_EXCLUDE_GLOBS = [
-    ".env", ".env.*", "**/.env", "**/.env.*",
-    ".npmrc", ".pypirc", "**/.npmrc", "**/.pypirc",
-    "*.pem", "**/*.pem", "*.key", "**/*.key",
-    "*.p12", "**/*.p12", "*.pfx", "**/*.pfx",
-    "*.tfstate", "**/*.tfstate", "*.keystore", "**/*.keystore",
-    ".ssh/**", "**/.ssh/**", ".aws/**", "**/.aws/**",
-    ".gcp/**", "**/.gcp/**", "secrets/**", "**/secrets/**",
-    "credentials/**", "**/credentials/**",
-    "service-account*.json", "**/service-account*.json",
-]
+# SENSITIVE_EXCLUDE_GLOBS is imported from ai_pr_reviewer.rules at the top of
+# this module (V3-E05-T01) — do not re-declare a copy here.
 DEFAULT_EXCLUDE_GLOBS = [
     *SENSITIVE_EXCLUDE_GLOBS,
     "**/package-lock.json", "**/yarn.lock", "**/poetry.lock",
@@ -88,7 +116,7 @@ CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline';
 
 SETTINGS_KEYS = {
     "severity_threshold": "medium",
-    "max_comments": 20,
+    "max_comments": DEFAULT_MAX_COMMENTS,
     "exclude_globs": DEFAULT_EXCLUDE_GLOBS,
     "focus_areas": ["security vulnerabilities", "race conditions", "error handling"],
 }
@@ -108,7 +136,8 @@ def _with_sensitive_exclusions(values: object) -> list[str]:
     configured = values if isinstance(values, list) else []
     cleaned = [item.strip() for item in configured
                if isinstance(item, str) and item.strip()]
-    return list(dict.fromkeys([*SENSITIVE_EXCLUDE_GLOBS, *cleaned]))[:100]
+    return list(dict.fromkeys([*SENSITIVE_EXCLUDE_GLOBS,
+                               *cleaned]))[:MAX_SETTINGS_LIST_ENTRIES]
 
 
 def load_settings() -> dict:
@@ -215,6 +244,64 @@ def get_token() -> str:
     return _api_token
 
 
+def _schema():
+    """The engine's shared cross-store schema module (V3-E04-T03).
+
+    Key formats and the mute-row prefix have one owner shared with the
+    engine; imported at call time, like this package's other engine uses.
+    """
+    from ai_pr_reviewer import storage_schema
+
+    return storage_schema
+
+
+def _retention_days() -> int:
+    """Configured retention window in days (V3-E04-T02), 0 = keep all.
+
+    ``DASHBOARD_RETENTION_DAYS`` overrides the engine's plain
+    ``RETENTION_DAYS`` so one env var can drive both processes. Garbage
+    disables retention with a printed notice — a dashboard must not
+    crash at startup over a typo'd env var.
+    """
+    raw = (os.environ.get("DASHBOARD_RETENTION_DAYS")
+           or os.environ.get("RETENTION_DAYS") or "0")
+    try:
+        return int(raw)
+    except ValueError:
+        print(f"[dashboard] ignoring non-numeric retention days: {raw!r}",
+              flush=True)
+        return 0
+
+
+def _retention_prune() -> None:
+    """One startup retention pass (V3-E04-T02).
+
+    Same env knob, same policy and cutoff as the engine's resolve-time
+    pass; a backend without the declared prune capability (or a failing
+    prune) logs and continues — retention never blocks a dashboard start.
+    """
+    days = _retention_days()
+    if days <= 0:
+        return
+    storage = get_storage()
+    from ai_pr_reviewer.storage import has_capability
+    from ai_pr_reviewer.storage_schema import CAP_PRUNE
+
+    if not has_capability(storage, CAP_PRUNE):
+        print(f"[dashboard] storage backend {type(storage).__name__} has no "
+              f"prune capability — retention skipped", flush=True)
+        return
+    try:
+        outcome = storage.prune(days)
+    except Exception as exc:  # noqa: BLE001 — retention must not block startup
+        print(f"[dashboard] retention prune failed ({exc}); continuing",
+              flush=True)
+        return
+    print(f"[dashboard] retention: pruned {outcome['finding_history']} "
+          f"finding-history record(s), {outcome['telemetry']} telemetry "
+          f"row(s) (retention_days={days})", flush=True)
+
+
 def _authorized(request: Request) -> bool:
     provided = request.headers.get("X-Dashboard-Token", "")
     return bool(provided) and hmac.compare_digest(provided, get_token())
@@ -272,8 +359,10 @@ def _validated_rules(body: dict) -> dict:
         if not 1 <= mc <= 100:
             raise HTTPException(400, "max_comments must be 1..100")
         clean["max_comments"] = mc
-    for key, maxlen, maxitems in (("exclude_globs", 200, 100),
-                                  ("focus_areas", 200, 50)):
+    for key, maxlen, maxitems in (("exclude_globs", MAX_SETTINGS_ITEM_CHARS,
+                                   MAX_SETTINGS_LIST_ENTRIES),
+                                  ("focus_areas", MAX_SETTINGS_ITEM_CHARS,
+                                   MAX_SETTINGS_FOCUS_ENTRIES)):
         if key in body:
             if not isinstance(body[key], list) or not all(
                     isinstance(x, str) for x in body[key]):
@@ -317,6 +406,7 @@ async def lifespan(_: FastAPI):
     print(f"[dashboard] storage backend: {get_storage().backend}")
     print(f"[dashboard] token source: {_token_source}")
     print(f"[dashboard] reads require token: {REQUIRE_READS_AUTH}")
+    _retention_prune()                    # V3-E04-T02: off unless configured
     yield
 
 
@@ -490,7 +580,7 @@ async def put_review_state(repo_owner: str, repo_name: str, pr_number: int, requ
     get_storage().set_last_reviewed_sha(
         repo, pr_number, body.get("last_reviewed_sha", ""), body.get("base_sha", "")
     )
-    _audit(request, "update_review_state", f"{repo}#{pr_number}", 200)
+    _audit(request, "update_review_state", _schema().repo_pr_key(repo, pr_number), 200)
     return {"ok": True}
 
 
@@ -512,10 +602,10 @@ async def post_review_findings(repo_owner: str, repo_name: str, pr_number: int, 
     if not isinstance(body, dict):
         raise HTTPException(400, "body must be a JSON object")
     repo = f"{repo_owner}/{repo_name}"
-    review_id = body.get("review_id") or f"{repo}#{pr_number}"
+    review_id = body.get("review_id") or _schema().repo_pr_key(repo, pr_number)
     findings = body.get("findings", [])
     get_storage().save_findings(review_id, findings)
-    _audit(request, "save_findings", f"{repo}#{pr_number}", 200)
+    _audit(request, "save_findings", _schema().repo_pr_key(repo, pr_number), 200)
     return {"ok": True, "count": len(findings)}
 
 
@@ -533,7 +623,7 @@ def _is_mute_memory_row(storage, repo: str, memory_id: str) -> bool:
         return False
     for row in rows:
         if isinstance(row, dict) and row.get("id") == memory_id:
-            return str(row.get("path_pattern") or "").startswith("fingerprint:")
+            return _schema().is_mute_pattern(row.get("path_pattern"))
     return False
 
 
@@ -570,7 +660,7 @@ async def post_repo_memory_endpoint(repo_owner: str, repo_name: str, request: Re
         raise HTTPException(400, "body must be a JSON object")
     repo = f"{repo_owner}/{repo_name}"
     pat = str(body.get("path_pattern", "*") or "*")[:255]
-    note = str(body.get("note", "") or "")[:1000]
+    note = str(body.get("note", "") or "")[:MAX_NOTE_CHARS]
     if not note.strip():
         raise HTTPException(400, "note must not be empty")
     get_storage().add_repo_memory(repo, pat, note,
@@ -649,7 +739,7 @@ async def get_findings(
     _check_reads(request)
     findings = get_storage().list_findings(
         state=state, severity=severity, repo=repo,
-        limit=min(limit, 500), offset=offset
+        limit=min(limit, 500), offset=max(0, offset)
     )
     return JSONResponse(findings)
 
@@ -747,8 +837,9 @@ async def sandbox_simulate(request: Request):
     diff_text = str(body.get("diff", "")).strip()
     if not diff_text:
         raise HTTPException(400, "diff is required")
-    if len(diff_text) > 50_000:
-        raise HTTPException(413, "diff too large (max 50,000 chars)")
+    if len(diff_text) > MAX_ANALYZE_DIFF_CHARS:
+        raise HTTPException(413,
+                            f"diff too large (max {MAX_ANALYZE_DIFF_CHARS:,} chars)")
     
     import sys
     import os
@@ -765,7 +856,8 @@ async def sandbox_simulate(request: Request):
         analyzer = StaticAnalyzer()
         outcome = analyzer.analyze(files)
         score, grade = calculate_health_score(outcome.findings)
-        findings_dicts = [f.to_dict() for f in outcome.findings[:50]]
+        findings_dicts = [f.to_dict()
+                          for f in outcome.findings[:MAX_ANALYZE_FINDINGS]]
         return JSONResponse({
             "health_score": score,
             "health_grade": grade,

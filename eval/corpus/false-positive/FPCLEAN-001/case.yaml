@@ -1,0 +1,15 @@
+id: FPCLEAN-001
+layer: false-positive
+title: "Benign refactor plus sibling test file draws no findings"
+provenance: hand-authored   # synthetic only — no real PRs
+diff: pr.diff
+expect:
+  findings: []
+  no_findings:
+    - file: src/config_loader.py
+    - file: tests/test_config_loader.py
+notes: >
+  Precision corpus: a dict-comprehension refactor over json.loads output,
+  with the sibling test added in the same diff (the TEST001 test-gap rule
+  must stay quiet). Anything the engine posts on these files is an
+  unmatched finding and lowers precision.

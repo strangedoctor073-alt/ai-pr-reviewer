@@ -438,6 +438,84 @@ def test_get_pr_still_returns_context_and_diff(monkeypatch):
     assert len(seen) == 2
 
 
+# =========================================================================
+# D1 — PRContext.base_sha population (V3-E01-T01)
+# =========================================================================
+def _pr_api_handler(request):
+    if request.headers["accept"] == "application/vnd.github.v3.diff":
+        return httpx.Response(200, text=COMPARE_MIXED)
+    return httpx.Response(200, json={
+        "title": "Refunds", "user": {"login": "dev"}, "html_url": "https://x/pr/42",
+        "head": {"ref": "feature", "sha": HEAD_SHA}, "base": {"ref": "main", "sha": BASE_SHA}})
+
+
+def test_get_pr_populates_base_sha_from_the_base_side(monkeypatch):
+    """D1: get_pr() must set base_sha from pull_request.base.sha — the
+    fixture goes through the REAL get_pr (fake transport), never a
+    hand-built PRContext, so a regression in population fails here."""
+    gh, _seen = make_client(monkeypatch, _pr_api_handler)
+    ctx, _diff = gh.get_pr(42)
+
+    assert ctx.base_sha == BASE_SHA
+    assert ctx.base_sha != ctx.head_sha      # base, never the PR head
+
+
+def test_get_event_context_populates_base_sha(tmp_path, monkeypatch):
+    """D1: the Actions event payload path populates base_sha the same way."""
+    event = {"pull_request": {
+        "number": 42, "title": "Refunds", "user": {"login": "dev"},
+        "html_url": "https://x/pr/42",
+        "head": {"ref": "feature", "sha": HEAD_SHA},
+        "base": {"ref": "main", "sha": BASE_SHA}}}
+    p = tmp_path / "event.json"
+    p.write_text(json.dumps(event), encoding="utf-8")
+    monkeypatch.setenv("GITHUB_EVENT_PATH", str(p))
+    monkeypatch.setenv("GITHUB_REPOSITORY", "acme/payments")
+
+    ctx = GitHubClient(token="t0ken", repo="acme/payments").get_event_context()
+
+    assert ctx is not None
+    assert ctx.base_sha == BASE_SHA
+    assert ctx.head_sha == HEAD_SHA
+
+
+def test_repo_context_built_through_get_pr_fetches_at_the_base_revision(monkeypatch):
+    """D1 end-to-end: a PRContext produced the way production produces it
+    (real get_pr over the wire) drives repository-context fetches at
+    base_sha — a PR can never choose the text its own review reads."""
+    from ai_pr_reviewer import repo_context as rc
+    from ai_pr_reviewer.config import Config
+
+    gh, _seen = make_client(monkeypatch, _pr_api_handler)
+    ctx, _diff = gh.get_pr(42)               # production path, not hand-built
+
+    diff = (
+        "--- a/app/main.py\n"
+        "+++ b/app/main.py\n"
+        "@@ -1,2 +1,3 @@\n"
+        " import os\n"
+        "+from utils.helpers import run\n"
+        " print(os.getcwd())\n"
+    )
+
+    class _Fetch:
+        def __init__(self):
+            self.calls: list[tuple[str, str]] = []
+
+        def get_file(self, path: str, ref: str) -> str:
+            self.calls.append((path, ref))
+            if path == "utils/helpers.py":
+                return "def run(): ...\n"
+            raise GitHubError("not found", status_code=404)
+
+    fetch = _Fetch()
+    rc.collect_repository_context(fetch, ctx, parse_unified_diff(diff), Config())
+
+    assert fetch.calls, "expected at least one repository-context fetch"
+    assert all(ref == BASE_SHA for _path, ref in fetch.calls)
+    assert ctx.head_sha == HEAD_SHA          # head exists but is never the ref
+
+
 def test_get_pr_error_message_format_is_unchanged(monkeypatch):
     gh, _ = make_client(monkeypatch, lambda r: httpx.Response(404, text="Not Found"))
     with pytest.raises(GitHubError) as exc:

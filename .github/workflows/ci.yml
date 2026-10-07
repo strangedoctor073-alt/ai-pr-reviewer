@@ -15,9 +15,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The Action image and its CI target stay on 3.12; the suite also
-        # has to keep working on the oldest/newest interpreters the engine
-        # supports.
+        # Python support policy (V3-E06-T03; authoritative version: README
+        # §5 "Supported Python versions"). Supported range 3.11-3.13 and
+        # this matrix covers it floor-to-ceiling; the Action runtime and
+        # the lint/evaluation jobs pin 3.12; local dev is best-effort and
+        # also runs on 3.14. The matrix itself is unchanged by V3-E06 —
+        # the policy statement is new, the versions are not.
         python-version: ['3.11', '3.12', '3.13']
     steps:
       - uses: actions/checkout@v7
@@ -35,3 +38,36 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - run: docker build --tag ai-pr-reviewer-action .
+
+  # V3-E03-T03: offline evaluation-harness gate (ADR-016 Tier A —
+  # deterministic corpus, blocking; no network, no API keys). Additive:
+  # the test/action-image jobs above are untouched.
+  evaluation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -r requirements.txt
+      - name: Evaluation harness gate (offline, deterministic)
+        run: python -m eval.harness --gate
+
+  # V3-E06-T02: additive lint gate (D14 first half) — the critical-defect
+  # ruleset already configured in pyproject.toml (E9, F63, F7, F82), with
+  # ruff pinned so the baseline can't drift under us. Existing jobs above
+  # are untouched; runtime is seconds.
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install ruff==0.16.10
+      - name: Ruff (critical-defect baseline)
+        run: python -m ruff check .

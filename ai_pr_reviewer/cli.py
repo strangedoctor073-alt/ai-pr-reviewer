@@ -27,6 +27,7 @@ from .orchestrator import (ReviewOrchestrator, _finding_row,  # noqa: F401
                             _is_excluded, filter_files, validate_findings)
 from .security import redact_secrets  # noqa: F401
 from .storage import resolve_storage
+from .storage_schema import repo_pr_key
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -165,9 +166,13 @@ def _post_and_sync(gh: GitHubClient, cfg: Config, storage, result: ReviewResult,
     # Findings the PR hasn't seen yet get inline comments; a finding that
     # already carries a GitHub comment id is updated below instead of being
     # posted a second time (C5 — no duplicate comments).
+    # D4: ``max_comments`` caps THIS cap — inline GitHub comments only. The
+    # report, health score and findings_count already carry every finding;
+    # ``open_`` arrives severity-sorted (D5), so slicing keeps the most
+    # severe new findings annotated and leaves the rest to the summary.
     to_post = [f for f in open_
                if reporter.finding_state(f) in ("new", "reopened")
-               and not getattr(f, "github_comment_id", None)]
+               and not getattr(f, "github_comment_id", None)][:cfg.max_comments]
 
     posted = 0
     linked = 0
@@ -266,7 +271,7 @@ def _print_console(result: ReviewResult, report_id: str) -> None:
     counts = reporter.severity_counts(open_)
     bits = ", ".join(f"{counts[s]} {s}" for s in ("critical", "high", "medium",
                                                   "low", "info") if counts.get(s))
-    print(f"[ai-pr-reviewer] {result.pr.repo}#{result.pr.pr_number} "
+    print(f"[ai-pr-reviewer] {repo_pr_key(result.pr.repo, result.pr.pr_number)} "
           f"({result.pr.pr_title[:60]}) — {len(open_)} finding(s)"
           f"{': ' + bits if bits else ''}")
     print(f"[ai-pr-reviewer] engine={result.model} mode={result.mode} "

@@ -1,0 +1,16 @@
+id: DEFECT-D6-01
+layer: regression
+title: "D6 — garbage numeric INPUT_* fails as a clean SystemExit, not a traceback"
+provenance: hand-authored   # synthetic only — no real PRs
+diff: pr.diff
+config:
+  max_comments: 20
+  severity_threshold: medium
+expect:
+  config_error: true
+notes: >
+  D6 (raw ValueError on numeric INPUT_*): INPUT_MAX_COMMENTS=abc must
+  surface as a clean string SystemExit (exit 1, message, no traceback).
+  The runner isolates the host INPUT_* environment around this case; a raw
+  ValueError escaping config parsing is the defect and fails the case.
+  Unit pin: tests/test_defect_regressions.py::test_d6_...

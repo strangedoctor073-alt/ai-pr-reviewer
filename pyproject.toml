@@ -12,7 +12,9 @@ testpaths = ["tests"]
 # make local runs disagree with CI.
 
 # ---------------------------------------------------------------- ruff
-# Optional linter (not installed locally and not part of CI). The baseline
+# Linter — enforced by the additive `lint` CI job (V3-E06-T02) with a pinned
+# ruff; run the same check locally with `python -m pip install ruff` then
+# `python -m ruff check .`. The baseline
 # below is "critical defects only": syntax errors, broken tuple/list
 # comparisons, misplaced assertions, and undefined names. Style/formatting
 # rules are deliberately absent — this codebase has no formatter history,

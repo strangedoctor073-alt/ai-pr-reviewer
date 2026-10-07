@@ -8,9 +8,13 @@ import base64
 import json
 import os
 import sys
+from typing import TYPE_CHECKING
 from urllib.parse import quote
 
 from .models import PRContext
+
+if TYPE_CHECKING:  # annotation-only; the runtime import stays lazy in __init__
+    from .retry import RetryPolicy
 
 # GitHub returns at most 100 items per page from /pulls/{n}/files (and 3000 in
 # total). Stop after 10 pages so a pathological PR can't loop us forever.
@@ -86,6 +90,9 @@ class GitHubClient:
             base=(pr.get("base") or {}).get("ref", ""),
             head_sha=(pr.get("head") or {}).get("sha", ""),
             url=pr.get("html_url", ""),
+            # D1 fix: repository context must be fetched at the *base*
+            # revision — a PR must never choose what its own review reads.
+            base_sha=(pr.get("base") or {}).get("sha", ""),
         )
 
         r2 = self._http.get(
@@ -117,6 +124,9 @@ class GitHubClient:
                 base=(pr.get("base") or {}).get("ref", ""),
                 head_sha=(pr.get("head") or {}).get("sha", ""),
                 url=pr.get("html_url", ""),
+                # D1 fix: same base-revision invariant as get_pr() — the
+                # event payload carries base.sha alongside head.sha.
+                base_sha=(pr.get("base") or {}).get("sha", ""),
             )
         except Exception:
             return None

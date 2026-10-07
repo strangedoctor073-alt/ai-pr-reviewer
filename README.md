@@ -170,6 +170,45 @@ and a clear message. Claude defaults to `claude-sonnet-4-6`.
 `health_grade`. A markdown digest is also written to the job's **Step Summary**;
 the example workflow uploads `review-report.json` as an artifact.
 
+### Report JSON
+
+`report_path` points at the review's machine-readable artifact. These fields
+are **required** — frozen by `tests/test_report_schema.py` as the
+machine-checkable half of the compatibility contract (consumers may rely on
+them; a removal or rename is a breaking change, additive fields may be added
+at any time):
+
+- **Top level** — `pr`, `mode`, `model`, `reviewed_at`, `duration_ms`,
+  `summary`, `findings`, `below_threshold`, `stats`, `posted_inline`,
+  `suppressed`, `warnings`, `health_score`, `health_grade`, `telemetry`,
+  `id`, `review_state`, `engine`, `fallback_used`, `new_findings_count`,
+  `resolved_findings_count`, `below_threshold_count`,
+  `active_findings_count`.
+- **Every finding row** — `file`, `line`, `end_line`, `severity`,
+  `category`, `title`, `explanation`, `suggestion`, `confidence`,
+  `rule_id`, `fingerprint`, `state`, `first_seen_sha`, `last_seen_sha`,
+  `resolved_at`, `github_comment_id`, `verification_status`,
+  `verification_reason`, `verified_at`, `provenance_engine`,
+  `provenance_model`, `provenance_agent`, `provenance_origin`.
+
+### Configuration layering
+
+Every setting resolves in one documented order — **CLI argument > `INPUT_*`
+environment variable > plain environment variable > built-in default** —
+implemented once in `ai_pr_reviewer/config.py` and pinned as an 89-row
+precedence matrix in `tests/test_config.py`. Two orthogonal merges sit on
+top of that order:
+
+- **Dashboard rules** (when `dashboard_url` + `dashboard_token` are set):
+  fetched rules only **fill gaps** — a value this run set explicitly
+  (input or environment) is never overridden; an unreachable dashboard is
+  a no-op, never a failed review.
+- **Repository policy** (`.ai-pr-reviewer.yml`, read from the trusted
+  **base** revision): `exclude` and `focus` **union** with the run's
+  lists, and an explicit `severity_threshold` input wins over the
+  policy's. The built-in privacy baseline can only grow — policy can add
+  exclusions, never remove them.
+
 ### Provider failover
 
 `provider_order` names the AI backends to try in order (`claude,openai`).
@@ -518,8 +557,26 @@ no network or API key is needed.
 The run is hermetic: pytest config lives in `pyproject.toml`, and the demo
 PR-diff fixtures are generated into a pytest temp directory (the committed
 `demo/samples/*.diff` files are reference data and are never rewritten), so
-two consecutive runs leave `git status` clean. CI runs the suite on Python
-3.11, 3.12 and 3.13.
+two consecutive runs leave `git status` clean.
+
+### Supported Python versions
+
+The supported range is **3.11 – 3.13**, stated once here and matched
+everywhere else (CI matrix, `action.yml`, `Dockerfile`, `pyproject.toml`):
+
+- **Action runtime: pinned to 3.12** — `setup-python` in `action.yml` and
+  the `python:3.12-slim` Docker base, so every user runs 3.12 regardless of
+  the runner's default.
+- **CI: the whole range, floor to ceiling** — the `test` job matrix is
+  3.11 / 3.12 / 3.13; the `lint` and `evaluation` jobs run on 3.12. The
+  matrix was not changed to state this policy — the versions were already
+  the supported range.
+- **Local: best-effort beyond the range** — the suite also passes on 3.14.
+- **Windows gotcha:** run the suite as `PYTHONUTF8=1 python -m pytest
+  tests/ -q` on a cp1252 checkout — a couple of tests read source files
+  with `Path.read_text()` and hit decoding errors without UTF-8 mode.
+  Always use `python -m pytest` (there is no `pytest` script on `PATH`
+  in some environments, and `-m` puts the repo root on `sys.path`).
 
 ## 6 · Layout
 
@@ -542,8 +599,9 @@ ai_pr_reviewer/          # the engine (run by the composite Action; also buildab
     engine.py              #     StaticEngine: runs the registry, implements AIProvider too
     registry.py             #     RuleRegistry — rule_id/language/category/severity/confidence
     python_rules.py, javascript_rules.py, shell_rules.py, security_rules.py, test_rules.py
-  heuristics.py            #   back-compat facade over static/engine.py (old import path)
-  analyzer.py              #   legacy ClaudeAnalyzer/StaticAnalyzer facade over ai/ + static/
+  heuristics.py            #   DEPRECATED back-compat shim over static/engine.py (removal v4.0.0)
+  analyzer.py              #   DEPRECATED facade — hosts production StaticAnalyzer + AnalysisOutcome
+                           #   re-export; get_analyzer/ClaudeAnalyzer/MockAnalyzer removal v4.0.0
   findings.py              #   fingerprinting, deduplication, lifecycle (new/active/resolved…)
   verification.py          #   resolved / still_present / unable_to_verify for earlier findings (C4)
   review_state.py          #   stable review identity (repo + PR + head SHA)
@@ -565,8 +623,38 @@ action.yml               #   composite GitHub Action (pip install + python -m ai
 Dockerfile               #   optional container build of the same engine (built in CI)
 ```
 
-## 7 · Changelog & license
+## 7 · Versioning, releases & license
 
-See [CHANGELOG.md](CHANGELOG.md).
+**Pinning.** Pin the Action to a major version tag —
+`uses: strangedoctor073-alt/ai-pr-reviewer@v2`, exactly what
+[`example-workflow.yml`](example-workflow.yml) does. Published tags are
+`v1`, `v2` (the *moving* major tag) and `v2.0.0` (an immutable release
+the major tag has since advanced past); a full commit SHA pins one exact
+build. New roadmap stages ship as `@v3`, `@v4`, … — **majors are
+reserved for breaking changes**, and an old major receives security
+fixes for 12 months after a new major ships
+(`docs/planning/MIGRATION_PLAN.md` §6.2).
+
+**Deprecations.** Windows are fixed in `MIGRATION_PLAN.md` §7 and always
+stated in [CHANGELOG.md](CHANGELOG.md). Current: the
+`ai_pr_reviewer.analyzer` / `ai_pr_reviewer.heuristics` import facades
+emit `DeprecationWarning`; their dead entry points (`get_analyzer`,
+`ClaudeAnalyzer`, `MockAnalyzer`) are scheduled for removal in
+**v4.0.0 — no earlier than 2027-04-07** (6-month window).
+
+**Release checklist.** Before tagging a release:
+
+1. `PYTHONUTF8=1 python -m pytest tests/ -q`, `python -m ruff check .`
+   and `python -m eval.harness --gate` all green.
+2. **Contract gates:** `tests/test_action_contract.py` (V3-E05-T03) green
+   — inputs/outputs/defaults unchanged, or its snapshot updated in the
+   same reviewed change; `tests/test_report_schema.py` (V3-E05-T04)
+   green — no required report field removed or renamed;
+   `tests/test_readme_contract.py` (V3-E06-T04) green — this README
+   still matches the contract.
+3. [CHANGELOG.md](CHANGELOG.md): fold the `Unreleased` section into the
+   new version heading — every contract-affecting change since the last
+   tag must appear there.
+4. Tag `vX.Y.Z`, then move the major tag `vX` to the same commit.
 
 [MIT](LICENSE).

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from typing import TYPE_CHECKING
 
 from ..analyzer import AnalysisOutcome, StaticAnalyzer
@@ -9,6 +10,7 @@ from ..diff_parser import FileDiff
 from ..models import Finding
 from ..retry import RetryPolicy
 from ..security import scan_prompt_injection, wrap_untrusted_diff
+from ..telemetry import RunTelemetry, UsageRecord, summarize_calls
 from .claude import (SYSTEM_PROMPT, _batch_with_files, _memory_notes,
                      _repo_context_entries, build_untrusted_memory_block,
                      build_untrusted_repo_context_block)
@@ -38,6 +40,9 @@ class OpenAIProvider:
         self.base_url = base_url
         self.total_input_tokens = 0
         self.total_output_tokens = 0
+        # V3-E02-T01: one shared record per call — counts and durations
+        # only, never prompt content. Absence of usage is a typed state.
+        self.usage_records: list[UsageRecord] = []
         self._retry = retry or RetryPolicy()
         self._static = StaticAnalyzer()
         self.startup_warnings: list[str] = []
@@ -103,7 +108,26 @@ class OpenAIProvider:
         outcome.engine = engine
         outcome.fallback_used = fallback_used
         outcome.batch_count = len(batches)
+        # V3-E02-T02: per-run telemetry rides the outcome. Retry events are
+        # read from the policy (they only exist from V3-E02-T03 on).
+        outcome.telemetry = RunTelemetry(
+            provider=self.backend, model=self.model, batch_count=len(batches),
+            fallback_used=fallback_used, usage=self.usage_summary(),
+            calls=list(self.usage_records),
+            events=list(getattr(self._retry, "events", [])))
         return outcome
+
+    def usage_summary(self) -> UsageRecord:
+        """Run-level aggregate over this provider's per-call records
+        (V3-E02-T01)."""
+        return summarize_calls(self.backend, self.model, self.usage_records)
+
+    @property
+    def telemetry_events(self) -> list[dict]:
+        """Structured events this provider produced (retry attempts —
+        V3-E02-T03). Counts, status classes and exception *type names*
+        only; copied from the retry policy."""
+        return list(getattr(self._retry, "events", []))
 
     def _static_fallback_findings(self, batch_files: list[FileDiff]) -> list[Finding]:
         if not batch_files:
@@ -136,6 +160,7 @@ class OpenAIProvider:
 
         url = f"{self.base_url.rstrip('/')}/chat/completions" if self.base_url else self.API_URL
 
+        started = time.monotonic()
         resp = self._retry.call(
             self._client.post,
             url,
@@ -155,6 +180,14 @@ class OpenAIProvider:
         )
         resp.raise_for_status()
         data = resp.json()
+        # V3-E02-T01: per-call usage into one shared record type. A
+        # response without a usage block is the typed "unavailable"
+        # state — never a fake 0. Counts only; no prompt content is kept.
+        usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+        self.usage_records.append(UsageRecord.for_call(
+            self.backend, self.model, usage.get("prompt_tokens"),
+            usage.get("completion_tokens"),
+            duration_ms=int((time.monotonic() - started) * 1000)))
         self.total_input_tokens += data.get("usage", {}).get("prompt_tokens", 0)
         self.total_output_tokens += data.get("usage", {}).get("completion_tokens", 0)
 

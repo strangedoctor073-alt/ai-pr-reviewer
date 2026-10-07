@@ -1,0 +1,7 @@
+diff --git a/src/x.py b/src/x.py
+--- a/src/x.py
++++ b/src/x.py
+@@ -1,2 +1,2 @@
+ def f():
+-    pass
++    return None

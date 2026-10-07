@@ -5,6 +5,9 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+from .storage_schema import format_review_id
+from .telemetry import RunTelemetry, sanitize_telemetry
+
 SEVERITY_ORDER = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
 SEVERITY_EMOJI = {
     "critical": "\U0001f6a8",  # rotating light
@@ -76,6 +79,10 @@ LIFECYCLE_FIELDS = (
     "fingerprint", "state", "first_seen_sha", "last_seen_sha",
     "resolved_at", "github_comment_id",
     "verification_status", "verification_reason", "verified_at",
+    # V4-E04: provenance is pipeline-owned (set by orchestrator from
+    # AnalysisOutcome, never from model output).
+    "provenance_engine", "provenance_model", "provenance_agent",
+    "provenance_origin",
 )
 
 # Verification statuses (V3 C4). ``None``/"" means "not verified", which is
@@ -132,6 +139,12 @@ class Finding:
     verification_status: str | None = None    # VERIFICATION_* value
     verification_reason: str | None = None    # human-readable explanation
     verified_at: str | None = None            # ISO-8601 timestamp
+    # --- V4-E04 provenance (pipeline-owned; see LIFECYCLE_FIELDS) ---
+    # Set by the orchestrator from AnalysisOutcome; never from model output.
+    provenance_engine: str | None = None     # "claude" | "openai" | "gemini" | "static"
+    provenance_model: str | None = None      # model identifier
+    provenance_agent: str | None = None      # specialist agent name (V5+; None today)
+    provenance_origin: str | None = None     # "ai" | "static" | "rule"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -154,6 +167,10 @@ class Finding:
             "verification_status": self.verification_status,
             "verification_reason": self.verification_reason,
             "verified_at": self.verified_at,
+            "provenance_engine": self.provenance_engine,
+            "provenance_model": self.provenance_model,
+            "provenance_agent": self.provenance_agent,
+            "provenance_origin": self.provenance_origin,
         }
 
     @classmethod
@@ -192,6 +209,10 @@ class Finding:
             verification_status=vstatus if vstatus in VERIFICATION_STATUSES else None,
             verification_reason=_opt_str(d.get("verification_reason")),
             verified_at=_opt_str(d.get("verified_at")),
+            provenance_engine=_opt_str(d.get("provenance_engine")),
+            provenance_model=_opt_str(d.get("provenance_model")),
+            provenance_agent=_opt_str(d.get("provenance_agent")),
+            provenance_origin=_opt_str(d.get("provenance_origin")),
         )
 
 
@@ -234,7 +255,9 @@ class ReviewKey:
     head_sha: str
 
     def as_id(self) -> str:
-        return f"{self.repo}#{self.pr_number}@{self.head_sha[:12]}"
+        # The shared writer for the id parse_review_id reads back
+        # (V3-E04-T03): owner/repo#pr@sha12.
+        return format_review_id(self.repo, self.pr_number, self.head_sha)
 
 
 @dataclass
@@ -250,10 +273,18 @@ class ReviewResult:
     findings: list[Finding] = field(default_factory=list)
     stats: ReviewStats = field(default_factory=ReviewStats)
     posted_inline: int = 0
-    suppressed: int = 0               # findings below threshold / over comment cap
+    suppressed: int = 0               # reported findings over the inline-comment cap
+    below_threshold: list[Finding] = field(default_factory=list)  # D3: anchored
+                                      # findings under the severity threshold —
+                                      # retained in the report, never counted
+                                      # towards findings_count / inline comments
     warnings: list[str] = field(default_factory=list)
     health_score: int = 100
     health_grade: str = "A+"
+    # V3-E02-T02 (append-only): the allowlisted, redacted telemetry row —
+    # already serialized by telemetry.to_telemetry_row (or None when the
+    # backend produced no telemetry, e.g. pre-V3 test doubles).
+    telemetry: dict | None = None
 
     def count_by_severity(self) -> dict[str, int]:
         out = {s: 0 for s in SEVERITY_ORDER}
@@ -279,12 +310,19 @@ class ReviewResult:
             "duration_ms": self.duration_ms,
             "summary": self.summary,
             "findings": [f.to_dict() for f in self.findings],
+            "below_threshold": [f.to_dict() for f in self.below_threshold],
             "stats": self.stats.to_dict(),
             "posted_inline": self.posted_inline,
             "suppressed": self.suppressed,
             "warnings": self.warnings,
             "health_score": self.health_score,
             "health_grade": self.health_grade,
+            # V3-E02-T06: the report boundary re-applies the same
+            # allowlist + redaction sanitizer (idempotent), so report
+            # JSON can only ever carry the approved telemetry structure
+            # even if a caller set the field directly. None stays None.
+            "telemetry": sanitize_telemetry(self.telemetry)
+            if self.telemetry is not None else None,
         }
 
 
@@ -305,3 +343,6 @@ class AnalysisOutcome:
     engine: str = ""                # "claude" | "static" | "claude+static"
     fallback_used: bool = False
     batch_count: int = 0
+    # V3-E02-T02 (append-only): per-run telemetry — tokens/latency/model/
+    # fallback events, serialized exclusively via telemetry.to_telemetry_row.
+    telemetry: RunTelemetry | None = None

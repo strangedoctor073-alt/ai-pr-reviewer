@@ -1,0 +1,9 @@
+diff --git a/src/notes.py b/src/notes.py
+--- a/src/notes.py
++++ b/src/notes.py
+@@ -4,3 +4,5 @@
+ def add_note(body):
+     if body:
++        print("debug value")
++        cur.execute(f"SELECT * FROM notes WHERE body={body}")
+         store(body)

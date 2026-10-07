@@ -1,52 +1,75 @@
-"""Analysis backends — compatibility layer (V2).
+"""Analysis backends — legacy compatibility facade (deprecated).
 
-The real implementations now live elsewhere:
+The composition root is :func:`ai_pr_reviewer.model_router.get_provider`,
+which builds ``ReviewContext``-based providers from
+:mod:`ai_pr_reviewer.ai`; the CLI pipeline runs through
+:mod:`ai_pr_reviewer.orchestrator`. This module is *not* the entry point
+its older docstring claimed.
 
-* Claude-backed review    -> :mod:`ai_pr_reviewer.ai.claude` (``ClaudeProvider``),
-  which implements the new :class:`ai_pr_reviewer.ai.provider.AIProvider`
-  contract: ``analyze(context: ReviewContext) -> AnalysisOutcome``.
-* Provider selection      -> :mod:`ai_pr_reviewer.model_router` (``get_provider``).
+What still lives here (supported until the facade is removed):
 
-This module now exists to keep the OLD, still-in-use entry points working
-completely unchanged:
+* ``StaticAnalyzer`` — the deterministic rule-backed fallback (NOT AI).
+  Still production: ``model_router.StaticProvider`` adapts it, each
+  ``ai/`` provider falls back to it per batch when the vendor call
+  fails, and ``dashboard/app.py``'s analyze endpoint uses it. The rules
+  themselves live in :mod:`ai_pr_reviewer.static`; this class is the
+  adapter over them.
+* ``AnalysisOutcome`` — re-exported from :mod:`ai_pr_reviewer.models`
+  (the planned move landed) so ``from ..analyzer import AnalysisOutcome``
+  in ``ai/`` and ``model_router`` keeps working.
 
-* ``get_analyzer(api_key, model, mock, ...)`` — used today by ``cli.py``,
-  which still calls ``analyzer.analyze(files)`` with a raw ``list[FileDiff]``
-  (the orchestrator that will call the new context-based providers directly
-  hasn't landed yet). ``ClaudeAnalyzer`` below is now a thin adapter around
-  ``ClaudeProvider`` so the retry/per-batch-fallback behavior added there
-  applies here too, without duplicating any logic.
-* ``StaticAnalyzer`` / ``MockAnalyzer`` — unchanged; still the deterministic
-  rule-based fallback (NOT AI). Used directly by ``tests/test_pipeline.py``
-  and by ``get_analyzer`` when no API key is configured. Its rules now
-  live in the registry under ``ai_pr_reviewer/static/``; this file is a
-  compatibility facade over it.
-* ``AnalysisOutcome`` — the shared contract has this moving into
-  ``models.py``, gaining ``engine`` / ``fallback_used`` /
-  ``batch_count``. It stays defined here, with those three fields already
-  added, until that move lands — so nothing importing it from either
-  location breaks during the transition.
+Deprecated — no production callers, removal in ``v4.0.0`` (no earlier
+than 2027-04-07; 6-month window per ``MIGRATION_PLAN.md`` section 7):
+
+* ``get_analyzer(...)`` — superseded by ``model_router.get_provider``;
+  ``cli.py`` never calls it.
+* ``ClaudeAnalyzer`` — adapter over ``ai.claude.ClaudeProvider``; only
+  tests still construct it.
+* ``MockAnalyzer`` — alias of ``StaticAnalyzer``; test-only name.
+
+Importing this module emits a ``DeprecationWarning``; so does calling
+``get_analyzer``. :mod:`ai_pr_reviewer.heuristics` (the rule shim) is
+deprecated the same way.
 """
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 
 from .diff_parser import FileDiff
 from .models import AnalysisOutcome, Finding
 from .security import scan_prompt_injection
+from .telemetry import RunTelemetry, UsageRecord
 
 # AnalysisOutcome lives in models.py (findings/summary/mode/model/warnings plus
 # engine/fallback_used/batch_count). Re-exported here so the existing
 # `from ..analyzer import AnalysisOutcome` in `ai/claude.py` and
 # `model_router.py` keeps working.
 
+# V3-E06-T01 (debt D11): one DeprecationWarning per process, at first import.
+# Python's default filters hide DeprecationWarning raised outside __main__, so
+# CLI/dashboard runs stay quiet while pytest surfaces it once.
+warnings.warn(
+    "ai_pr_reviewer.analyzer is a legacy facade: get_analyzer(), "
+    "ClaudeAnalyzer and MockAnalyzer are deprecated (no production callers) "
+    "and the facade will be removed in v4.0.0 - no earlier than "
+    "2027-04-07 (6-month window, MIGRATION_PLAN.md section 7). "
+    "StaticAnalyzer and AnalysisOutcome remain usable from here until "
+    "that removal.",
+    DeprecationWarning,
+    stacklevel=2,
+)
+
 
 class StaticAnalyzer:
-    """Deterministic rule-based fallback — static analysis, NOT an AI reviewer.
+    """Deterministic rule-backed fallback — static analysis, NOT an AI reviewer.
 
-    Used when no API key is configured or ``--static`` is passed. Produces the
-    same Finding contract so the posting/reporting pipeline can be exercised
-    end-to-end without network access or cost.
+    Still production (unlike the deprecated entry points below): the
+    ``model_router.StaticProvider`` adapter, the per-batch fallback inside
+    every ``ai/`` provider, and the dashboard's analyze endpoint all run
+    this. Also used when no API key is configured or ``--static`` is
+    passed. Produces the same Finding contract so the posting/reporting
+    pipeline can be exercised end-to-end without network access or cost.
     """
 
     def analyze(self, files: list[FileDiff]) -> AnalysisOutcome:
@@ -70,12 +93,20 @@ class StaticAnalyzer:
             f"rule(s): {pretty}. Configure an Anthropic API key for a real "
             f"Claude review."
         )
-        return AnalysisOutcome(findings, summary, mode="static",
-                               model="static-rules-v1", warnings=warnings,
-                               engine="static")
+        outcome = AnalysisOutcome(findings, summary, mode="static",
+                                  model="static-rules-v1", warnings=warnings,
+                                  engine="static")
+        # V3-E02-T02: the rule engine spends no tokens — usage is the
+        # typed "n/a" state (reporting 0 would claim a measured zero),
+        # and there are no provider calls to time.
+        outcome.telemetry = RunTelemetry(
+            provider="static", model="static-rules-v1",
+            usage=UsageRecord.na("static", "static-rules-v1"))
+        return outcome
 
 
-# Backward-compatible alias for existing callers/tests.
+# Backward-compatible alias for existing callers/tests. Deprecated along with
+# this module (test-only name — production uses StaticAnalyzer directly).
 MockAnalyzer = StaticAnalyzer
 
 
@@ -97,13 +128,13 @@ class ClaudeAnalyzer:
     """Backward-compatible adapter over
     :class:`ai_pr_reviewer.ai.claude.ClaudeProvider`.
 
-    Existing callers (currently just ``cli.py``) call ``.analyze(files)``
-    with a raw ``list[FileDiff]``, predating the ``ReviewContext`` contract.
-    Rather than duplicate ``ClaudeProvider``'s retry/fallback logic here,
-    this wraps a minimal stand-in context so old and new call sites share
-    one implementation — meaning the CLI now gets retry/backoff and
-    per-batch static fallback for free, with no change to how it calls this
-    class.
+    Deprecated: no production caller remains (the CLI pipeline goes through
+    ``orchestrator`` + ``model_router.get_provider``); only
+    ``tests/test_ai_provider.py`` still constructs it. It accepts a raw
+    ``list[FileDiff]``, predating the ``ReviewContext`` contract, and wraps a
+    minimal stand-in context so the old and new call shapes share one
+    implementation of ClaudeProvider's retry/backoff and per-batch static
+    fallback. Removal: ``v4.0.0`` (no earlier than 2027-04-07).
     """
 
     def __init__(self, api_key: str, model: str = "claude-sonnet-4-6",
@@ -137,13 +168,20 @@ class ClaudeAnalyzer:
 def get_analyzer(api_key: str | None, model: str, mock: bool,
                  focus_areas: list[str] | None = None,
                  batch_chars: int = 80_000):
-    """Pick the analyzer backend: Claude when a key is available, otherwise
-    the deterministic static-analysis fallback.
+    """Deprecated: pick a backend (Claude when a key is available, else static).
 
-    Kept exactly as before for ``cli.py``. New code (the V2 orchestrator)
-    should use ``model_router.get_provider(cfg, context)`` instead, which
+    No production caller remains — ``cli.py`` goes through
+    ``orchestrator`` and ``model_router.get_provider(cfg, context)``, which
     speaks the ``ReviewContext``-based ``AIProvider`` contract directly.
+    Removal: ``v4.0.0`` (no earlier than 2027-04-07).
     """
+    warnings.warn(
+        "get_analyzer() is deprecated (no production callers) and will be "
+        "removed in v4.0.0 - no earlier than 2027-04-07; use "
+        "model_router.get_provider(cfg, context) instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     if mock or not api_key:
         return StaticAnalyzer()
     return ClaudeAnalyzer(api_key=api_key, model=model, focus_areas=focus_areas,

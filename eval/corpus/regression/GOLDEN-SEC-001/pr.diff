@@ -1,0 +1,9 @@
+diff --git a/src/orders.py b/src/orders.py
+--- a/src/orders.py
++++ b/src/orders.py
+@@ -5,4 +5,5 @@
+ def get_order(db, order_id):
+     cur = db.cursor()
++    cur.execute(f"SELECT * FROM orders WHERE id={order_id}")
+     return cur.fetchone()
+

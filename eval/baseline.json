@@ -1,0 +1,139 @@
+{
+  "corpus_hash": "3ffd7fcc4b512c885a6712146ff9ab159fd6965de2ffcc76899fc8a656b99517",
+  "schema_version": 1,
+  "scorecard": {
+    "cases": [
+      {
+        "below": 2,
+        "failures": [],
+        "false_positives": 0,
+        "id": "DEFECT-D2-01",
+        "labels": 2,
+        "layer": "regression",
+        "matched_labels": 2,
+        "posted": 2,
+        "status": "pass",
+        "true_positives": 2,
+        "violations": []
+      },
+      {
+        "below": 2,
+        "failures": [],
+        "false_positives": 0,
+        "id": "DEFECT-D3-01",
+        "labels": 2,
+        "layer": "regression",
+        "matched_labels": 2,
+        "posted": 1,
+        "status": "pass",
+        "true_positives": 1,
+        "violations": []
+      },
+      {
+        "below": 2,
+        "failures": [],
+        "false_positives": 0,
+        "id": "DEFECT-D4-01",
+        "labels": 4,
+        "layer": "regression",
+        "matched_labels": 4,
+        "posted": 4,
+        "status": "pass",
+        "true_positives": 4,
+        "violations": []
+      },
+      {
+        "below": 2,
+        "failures": [],
+        "false_positives": 0,
+        "id": "DEFECT-D5-01",
+        "labels": 2,
+        "layer": "regression",
+        "matched_labels": 2,
+        "posted": 2,
+        "status": "pass",
+        "true_positives": 2,
+        "violations": []
+      },
+      {
+        "below": 0,
+        "failures": [],
+        "false_positives": 0,
+        "id": "DEFECT-D6-01",
+        "labels": 0,
+        "layer": "regression",
+        "matched_labels": 0,
+        "posted": 0,
+        "status": "pass",
+        "true_positives": 0,
+        "violations": []
+      },
+      {
+        "below": 1,
+        "failures": [],
+        "false_positives": 0,
+        "id": "GOLDEN-SEC-001",
+        "labels": 1,
+        "layer": "regression",
+        "matched_labels": 1,
+        "posted": 1,
+        "status": "pass",
+        "true_positives": 1,
+        "violations": []
+      },
+      {
+        "below": 0,
+        "failures": [],
+        "false_positives": 0,
+        "id": "FPCLEAN-001",
+        "labels": 0,
+        "layer": "false-positive",
+        "matched_labels": 0,
+        "posted": 0,
+        "status": "pass",
+        "true_positives": 0,
+        "violations": []
+      },
+      {
+        "below": 1,
+        "failures": [],
+        "false_positives": 0,
+        "id": "INJ-001",
+        "labels": 1,
+        "layer": "injection",
+        "matched_labels": 1,
+        "posted": 1,
+        "status": "pass",
+        "true_positives": 1,
+        "violations": []
+      }
+    ],
+    "counts": {
+      "cases": 8,
+      "errors": 0,
+      "failed": 0,
+      "findings_below": 10,
+      "findings_posted": 11,
+      "labels_matched": 12,
+      "labels_total": 12,
+      "passed": 8,
+      "skipped": 0,
+      "violations": 0,
+      "xfail": 0,
+      "xpass": 0
+    },
+    "metrics": {
+      "false_positive_rate": 0.0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "recall_critical_high": 1.0
+    },
+    "schema_version": 1
+  },
+  "thresholds": {
+    "false_positive_rate": 0.0,
+    "precision": 0.0,
+    "recall": 0.0,
+    "recall_critical_high": 0.0
+  }
+}

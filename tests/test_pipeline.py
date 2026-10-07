@@ -117,13 +117,67 @@ def test_validate_findings_threshold_and_cap(fixtures):
     findings = MockAnalyzer().analyze(files).findings
     cfg = _cfg(severity_threshold="high", max_comments=2)
 
-    inline, suppressed, dropped = validate_findings(findings, files, cfg)
-    assert all(sev_rank(f.severity) >= sev_rank("high") for f in inline)
+    inline, reported, below, suppressed, dropped = validate_findings(findings, files, cfg)
+    # D4: ``reported`` is the full anchored set at/above the threshold — the
+    # inline cap shrinks only ``inline``, never what the review saw.
+    assert all(sev_rank(f.severity) >= sev_rank("high") for f in reported)
+    assert len(reported) == sum(1 for f in findings
+                                if sev_rank(f.severity) >= sev_rank("high"))
+    # D5: both lists arrive severity-sorted (critical → info), cap picks the
+    # top of that order.
+    assert [sev_rank(f.severity) for f in reported] == sorted(
+        (sev_rank(f.severity) for f in reported), reverse=True)
+    assert inline == reported[:2]
     assert len(inline) <= 2
-    assert suppressed == sum(
-        1 for f in findings
-        if sev_rank(f.severity) >= sev_rank("high")) - len(inline)
+    assert suppressed == len(reported) - len(inline)
+    # D3: below-threshold findings are kept, not dropped.
+    assert below and all(sev_rank(f.severity) < sev_rank("high") for f in below)
     assert not dropped
+
+
+_MULTI_LINE_DIFF = (
+    "--- a/x.py\n"
+    "+++ b/x.py\n"
+    "@@ -1,8 +1,8 @@\n"
+    " l1\n"
+    " l2\n"
+    "-old\n"
+    "+n1\n"
+    "+n2\n"
+    "+n3\n"
+    "+n4\n"
+    "+n5\n"
+    " l8\n"
+)
+
+
+def test_inline_cap_follows_severity_not_provider_order():
+    """D5 (V3-E01-T05): providers are not trusted to arrive sorted — the cap
+    must spend its slots on the most severe findings, deterministically."""
+    files = parse_unified_diff(_MULTI_LINE_DIFF)
+
+    def _f(line, sev, title):
+        return Finding(file="x.py", line=line, severity=sev, title=title,
+                       explanation="e")
+
+    # adversarial provider order: mild findings first, critical buried last
+    adversarial = [_f(7, "info", "i"), _f(6, "low", "l"), _f(3, "critical", "c"),
+                   _f(5, "high", "h"), _f(4, "medium", "m")]
+    cfg = _cfg(severity_threshold="info", max_comments=2)
+
+    inline, reported, below, suppressed, dropped = validate_findings(
+        adversarial, files, cfg)
+
+    assert [f.severity for f in inline] == ["critical", "high"]
+    assert [f.severity for f in reported] == ["critical", "high", "medium",
+                                              "low", "info"]
+    assert below == [] and dropped == []
+    assert suppressed == 3                    # reported minus the inline slots
+
+    # determinism: any other provider ordering yields identical results
+    again = validate_findings(list(reversed(adversarial)), files, cfg)
+    assert [f.title for f in again[1]] == [f.title for f in reported]
+    assert [f.title for f in again[0]] == [f.title for f in inline]
 
 
 def test_exclude_globs_drop_files(fixtures):
@@ -139,8 +193,9 @@ def test_findings_outside_diff_are_dropped_not_snapped():
     fd = parse_unified_diff(
         "--- a/x.py\n+++ b/x.py\n@@ -1,2 +1,3 @@\n context\n+bad = 1\n context2\n")
     f = Finding(file="x.py", line=99, severity="high", title="t", explanation="e")
-    inline, _, dropped = validate_findings([f], fd, _cfg())
+    inline, reported, _below, _suppressed, dropped = validate_findings([f], fd, _cfg())
     assert len(inline) == 0
+    assert len(reported) == 0
     assert len(dropped) == 1
     assert dropped[0].line == 99  # original line preserved, not snapped
 

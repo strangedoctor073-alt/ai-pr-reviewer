@@ -818,3 +818,211 @@ def test_finalize_report_passes_suggestion_metadata_through():
     data = reporter.finalize_report(_result(mode="claude", findings=[f]))
     row = data["findings"][0]
     assert (row["suggestion_type"], row["start_line"], row["end_line"]) == ("replace", 3, 5)
+
+
+# ==================================================================
+# V3-E01 — defect regressions D2 / D3 / D4 (pipeline-level semantics)
+# ==================================================================
+def test_verification_receives_the_uncapped_finding_list(monkeypatch):
+    """D2 (V3-E01-T02): a previous finding that is still reported but sits
+    outside the max_comments top-20 must never close itself — both the
+    lifecycle and verify_findings() must receive the UNCAPPED current set."""
+    from ai_pr_reviewer import verification as ver
+
+    findings = [_finding(title=f"t{i}", severity="high") for i in range(20)]
+    findings.append(_finding(title="still there", severity="low"))   # rank 21
+    previous = [_finding(title="still there", severity="low", state="active")]
+    # stored previous findings carry their fingerprint, as storage rows do;
+    # the Wired lifecycle re-uses this exact fp convention for current ones
+    previous[0].fingerprint = "fp-a.py-still there"
+
+    seen: dict[str, list] = {}
+    real_verify = orch.verify_findings
+
+    def spy(findings_, previous_, current, files):
+        seen["current"] = list(current)
+        return real_verify(findings_, previous_, current, files)
+
+    monkeypatch.setattr(orch, "verify_findings", spy)
+    w = Wired(monkeypatch, findings=findings, previous=previous)
+    w.cfg.max_comments = 20                      # low finding falls outside the cap
+
+    result = w.run()
+
+    # the wiring: lifecycle AND verification both got the uncapped set
+    assert any(f.title == "still there" for f in w.lifecycle_calls[0][1])
+    assert "still there" in [f.title for f in seen["current"]]
+    # the outcome: no cap-induced false "resolved"
+    by_title = {f.title: f for f in result.findings}
+    assert by_title["still there"].state == "active"
+    assert by_title["still there"].verification_status == ver.VERIFICATION_PRESENT
+
+
+def test_below_threshold_findings_stay_visible_in_the_report(monkeypatch):
+    """D3 (V3-E01-T03): findings under the severity threshold are recorded —
+    counted and listed under a distinguishing key — instead of vanishing,
+    while findings_count/open-issue semantics stay threshold-based."""
+    w = Wired(monkeypatch, findings=[_finding(title="real issue", severity="high"),
+                                     _finding(title="minor nit", severity="info")])
+    w.cfg.severity_threshold = "medium"
+
+    result = w.run()
+
+    assert [f.title for f in result.findings] == ["real issue"]
+    assert [f.title for f in result.below_threshold] == ["minor nit"]
+
+    data = reporter.finalize_report(result)
+    assert [f["title"] for f in data["findings"]] == ["real issue"]
+    assert [f["title"] for f in data["below_threshold"]] == ["minor nit"]
+    assert data["below_threshold_count"] == 1
+
+    # below-threshold findings are NOT open issues (findings_count unchanged)
+    assert [f.title for f in reporter.open_findings(result.findings)] == ["real issue"]
+
+    md = reporter.build_summary_markdown(result)
+    assert "below the severity threshold" in md
+
+
+def _thirty_findings():
+    return [_finding(title=f"issue {i}", severity="high") for i in range(30)]
+
+
+def test_report_and_health_ignore_the_inline_comment_cap(monkeypatch):
+    """D4 (V3-E01-T04): max_comments=5 on a 30-finding run still reports all
+    30 and scores exactly like a max_comments=30 run."""
+    w5 = Wired(monkeypatch, findings=_thirty_findings())
+    w5.cfg.max_comments = 5
+    r5 = w5.run()
+
+    w30 = Wired(monkeypatch, findings=_thirty_findings())
+    w30.cfg.max_comments = 30
+    r30 = w30.run()
+
+    assert len(r5.findings) == 30                # report carries every finding
+    assert r5.suppressed == 25                   # only the inline slots are "over cap"
+    assert len(r30.findings) == 30
+    assert r30.suppressed == 0
+    assert r5.health_score == r30.health_score   # cap never moves the score
+
+
+def test_max_comments_caps_inline_posting_but_not_the_report(monkeypatch, tmp_path):
+    """D4 (V3-E01-T04): end-to-end through cli.run — 10 findings with
+    max_comments=5 posts 5 inline comments while the report and
+    findings_count still carry all 10."""
+    n = 10
+
+    def lifecycle(previous, current):
+        return [_finding(title=f"issue {i}", state="new") for i in range(n)]
+
+    w = Wired(monkeypatch, findings=[_finding(title=f"issue {i}") for i in range(n)],
+              lifecycle=lifecycle, with_storage=False)
+    monkeypatch.setattr(cli, "GitHubClient", lambda token, repo: w.gh)
+    out_file = tmp_path / "gh_output.txt"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(out_file))
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    w.cfg.github_token = "t"
+    w.cfg.max_comments = 5
+    w.cfg.output = str(tmp_path / "report.json")
+
+    result = cli.run(w.cfg)
+
+    assert len(w.gh.posted[0]["comments"]) == 5  # inline cap: only 5 annotations
+    assert result.posted_inline == 5
+    report = json.loads(Path(w.cfg.output).read_text(encoding="utf-8"))
+    assert len(report["findings"]) == n          # report: all 10
+    assert "findings_count=10" in out_file.read_text(encoding="utf-8")
+
+
+# ==================================================================
+# V3-E02 — telemetry through the orchestrator (T02 report copy, T04 persist)
+# ==================================================================
+from ai_pr_reviewer.telemetry import RunTelemetry, to_telemetry_row  # noqa: E402
+
+
+class _TelemetryStorage(FakeStorage):
+    """FakeStorage + the optional save_telemetry capability (V3-E02-T04)."""
+
+    def __init__(self, log=None):
+        super().__init__(log or [])
+        self.telemetry_calls = []
+
+    def save_telemetry(self, review_id, telemetry):
+        self.telemetry_calls.append((review_id, telemetry))
+
+
+class _FailingTelemetryStorage(_TelemetryStorage):
+    def save_telemetry(self, review_id, telemetry):
+        raise RuntimeError("telemetry down")
+
+
+def _run_tel():
+    return RunTelemetry(provider="claude", model="claude-test", batch_count=3,
+                        events=[{"type": "retry", "attempt": 1,
+                                 "planted": "DROP ME"}])
+
+
+def test_result_telemetry_is_none_when_the_backend_reports_none(monkeypatch):
+    """T02 (additive): the Wired double carries no telemetry block, so the
+    result and report say null — absence is never invented as numbers."""
+    w = Wired(monkeypatch)
+    result = w.run()
+
+    assert result.telemetry is None
+    assert reporter.finalize_report(result)["telemetry"] is None
+
+
+def test_result_telemetry_is_serialized_through_the_chokepoint(monkeypatch):
+    """T02: the outcome's RunTelemetry reaches the result only as the
+    allowlisted, redacted row — planted event keys are gone."""
+    w = Wired(monkeypatch, outcome_extra={"telemetry": _run_tel()})
+    result = w.run()
+
+    row = result.telemetry
+    assert isinstance(row, dict)
+    assert row["provider"] == "claude" and row["batch_count"] == 3
+    assert list(row["events"][0]) == ["type", "attempt"]
+    assert "DROP ME" not in json.dumps(row)
+    assert set(row) == {"schema", "provider", "model", "batch_count",
+                        "fallback_used", "usage", "calls", "events"}
+
+
+def test_persist_saves_telemetry_when_storage_supports_it(monkeypatch):
+    """T04: the getattr-guarded save_telemetry call rides the same review
+    id as findings."""
+    storage = _TelemetryStorage()
+    w = Wired(monkeypatch, storage=storage,
+              outcome_extra={"telemetry": _run_tel()})
+
+    w.run()
+
+    assert len(storage.telemetry_calls) == 1
+    review_id, row = storage.telemetry_calls[0]
+    assert review_id == "acme/api#7@new222"
+    assert row["provider"] == "claude"
+    assert storage.saved and storage.set_calls                  # review intact
+
+
+def test_persist_skips_telemetry_for_storages_without_the_capability(monkeypatch):
+    """T04: a storage that predates the capability (plain FakeStorage, the
+    dashboard client, …) is simply skipped — no crash, no warning."""
+    w = Wired(monkeypatch)                       # default FakeStorage, no method
+
+    result = w.run()
+
+    assert not any("telemetry" in warning for warning in result.warnings)
+    assert w.storage.saved                      # findings unaffected
+
+
+def test_telemetry_failure_warns_but_never_blocks_the_review(monkeypatch):
+    """T04 (drop-safe): telemetry is best-effort — a failing save warns,
+    while findings persistence and the SHA advance both still happen."""
+    storage = _FailingTelemetryStorage()
+    w = Wired(monkeypatch, storage=storage,
+              outcome_extra={"telemetry": _run_tel()})
+
+    result = w.run()
+
+    assert any("telemetry not saved" in warning for warning in result.warnings)
+    assert storage.saved                        # save_findings still ran
+    assert storage.set_calls                    # SHA still advanced
+    assert result.telemetry is not None         # report keeps its block

@@ -1,0 +1,37 @@
+id: DEFECT-D4-01
+layer: regression
+title: "D4 — max_comments caps inline comments only, never the report"
+provenance: hand-authored   # synthetic only — no real PRs
+diff: pr.diff
+config:
+  max_comments: 2
+  severity_threshold: medium
+expect:
+  findings:
+    - file: src/service.py
+      line_hint: 8
+      category: security
+      severity_min: critical
+      title_match: "TLS certificate"
+    - file: src/service.py
+      line_hint: 7
+      category: security
+      severity_min: high
+      title_match: "Shell command"
+    - file: src/service.py
+      line_hint: 9
+      category: security
+      severity_min: high
+      title_match: "subprocess call"
+    - file: src/service.py
+      line_hint: 10
+      category: resource-leak
+      severity_min: medium
+      title_match: "context manager"
+notes: >
+  D4 (max_comments caps the whole report): four findings sit at/above the
+  medium threshold while max_comments=2 — the report must still contain
+  all four (the cap is a posting limit only; suppressed counts describe
+  the inline slots). If reported is capped again, the two beyond-cap
+  labels go unmatched and recall drops. Unit pin:
+  tests/test_defect_regressions.py::test_d4_...

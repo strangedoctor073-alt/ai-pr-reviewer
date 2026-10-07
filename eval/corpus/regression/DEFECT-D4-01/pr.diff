@@ -1,0 +1,11 @@
+diff --git a/src/service.py b/src/service.py
+--- a/src/service.py
++++ b/src/service.py
+@@ -6,2 +6,7 @@
+ def run(user_cmd, url, path):
++    os.system("ls " + user_cmd)
++    r = requests.get(url, verify=False)
++    subprocess.run(user_cmd, shell=True)
++    handle = open(path)
++    print("debug value")
+     return None

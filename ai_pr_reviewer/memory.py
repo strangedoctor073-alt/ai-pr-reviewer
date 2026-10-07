@@ -25,6 +25,8 @@ from __future__ import annotations
 import fnmatch
 from typing import Any, Iterable
 
+from .storage_schema import MUTE_PREFIX   # single owner of the prefix (V3-E04-T03)
+
 # Human-authored categories. Stored values are dashed (they travel through
 # URLs and JSON); the reviewer prefixes notes with them so the prompt can
 # tell "rule" from "known exception".
@@ -36,7 +38,6 @@ CATEGORIES = (
     "review-preference",
 )
 
-MUTE_PREFIX = "fingerprint:"
 MAX_MEMORY_ENTRIES = 50     # bounded: a repo can't drown the prompt
 MAX_NOTE_CHARS = 1_000      # per note, before the diff budget even applies
 

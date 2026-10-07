@@ -1,7 +1,9 @@
 """SQLAlchemy ORM models for the dashboard storage layer."""
 from __future__ import annotations
 
-from sqlalchemy import JSON, Boolean, Integer, String
+from typing import Optional
+
+from sqlalchemy import JSON, Boolean, Float, Index, Integer, String
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -29,13 +31,20 @@ class ReportRow(Base):
     truncated: Mapped[bool] = mapped_column(Boolean, default=False)
     severity_counts: Mapped[dict] = mapped_column(JSON, default=dict)
     categories: Mapped[dict] = mapped_column(JSON, default=dict)
+    # V3-E04-T05: light metric columns mirrored from payload at upsert, so
+    # metrics() aggregates in SQL without parsing report JSON. Existing
+    # databases gain them additively in DbStorage._add_missing_columns and
+    # get a one-time payload-derived backfill there.
+    engine: Mapped[str] = mapped_column(String(40), default="static")
+    fallback_used: Mapped[int] = mapped_column(Integer, default=0)
+    health_score: Mapped[float] = mapped_column(Float, default=100.0)
     payload: Mapped[dict] = mapped_column(JSON, default=dict)
 
 
 class ReviewStateRow(Base):
     __tablename__ = "review_states"
 
-    id: Mapped[str] = mapped_column(String(220), primary_key=True)  # f"{repo}#{pr_number}"
+    id: Mapped[str] = mapped_column(String(220), primary_key=True)  # repo_pr_key(repo, pr_number)
     repo: Mapped[str] = mapped_column(String(200), default="", index=True)
     pr_number: Mapped[int] = mapped_column(Integer, default=0, index=True)
     last_reviewed_sha: Mapped[str] = mapped_column(String(40), default="")
@@ -45,8 +54,15 @@ class ReviewStateRow(Base):
 
 class FindingHistoryRow(Base):
     __tablename__ = "finding_histories"
+    # V3-E04-T05: composite index for the (repo, pr_number) lookups every
+    # get_previous_findings / list_findings(repo=...) performs; declared on
+    # the model for fresh databases and created idempotently for legacy
+    # databases in DbStorage.init().
+    __table_args__ = (
+        Index("ix_finding_histories_repo_pr", "repo", "pr_number"),
+    )
 
-    id: Mapped[str] = mapped_column(String(300), primary_key=True)  # f"{repo}#{pr_number}#{fingerprint}"
+    id: Mapped[str] = mapped_column(String(300), primary_key=True)  # finding_history_key(repo, pr_number, fingerprint)
     repo: Mapped[str] = mapped_column(String(200), default="", index=True)
     pr_number: Mapped[int] = mapped_column(Integer, default=0, index=True)
     fingerprint: Mapped[str] = mapped_column(String(64), default="", index=True)
@@ -73,4 +89,31 @@ class RepoMemoryRow(Base):
     category: Mapped[str] = mapped_column(String(64), default="project-rule")
     enabled: Mapped[int] = mapped_column(Integer, default=1)
     updated_at: Mapped[str] = mapped_column(String(32), default="")
+
+
+class TelemetryRow(Base):
+    """V3-E02-T04 — one row per review run's telemetry (additive table).
+
+    Scalar columns exist so ``/api/metrics`` can aggregate without
+    walking every payload; ``payload`` keeps the full allowlisted row
+    (``telemetry.to_telemetry_row`` output). Token columns are *NULL*
+    when usage was unavailable — absence stays a typed state, never a
+    measured 0.
+    """
+
+    __tablename__ = "telemetry"
+
+    id: Mapped[str] = mapped_column(String(140), primary_key=True)  # review id
+    repo: Mapped[str] = mapped_column(String(200), default="", index=True)
+    pr_number: Mapped[int] = mapped_column(Integer, default=0)
+    provider: Mapped[str] = mapped_column(String(40), default="")
+    model: Mapped[str] = mapped_column(String(100), default="")
+    input_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    output_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    usage_state: Mapped[str] = mapped_column(String(20), default="n/a")
+    batch_count: Mapped[int] = mapped_column(Integer, default=0)
+    fallback_used: Mapped[int] = mapped_column(Integer, default=0)
+    call_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    updated_at: Mapped[str] = mapped_column(String(32), default="")
+    payload: Mapped[dict] = mapped_column(JSON, default=dict)
 

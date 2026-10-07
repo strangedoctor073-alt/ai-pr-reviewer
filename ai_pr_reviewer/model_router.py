@@ -38,6 +38,7 @@ from .analyzer import AnalysisOutcome, StaticAnalyzer
 from .circuit import (CLOSED, HALF_OPEN, OPEN, CircuitBreaker,
                       DEFAULT_FAILURE_THRESHOLD, DEFAULT_RECOVERY_TIMEOUT)
 from .retry import RetryPolicy
+from .telemetry import RunTelemetry, UsageRecord, event_ts
 
 if TYPE_CHECKING:
     from .config import Config          # provided by config.py
@@ -112,6 +113,11 @@ class StaticProvider:
         if self.startup_warnings:
             outcome.warnings = [*self.startup_warnings, *outcome.warnings]
         return outcome
+
+    def usage_summary(self) -> UsageRecord:
+        """The rule engine spends no tokens: usage is ``n/a``, not ``0``
+        (V3-E02-T01 — there is nothing to count)."""
+        return UsageRecord.na(self.backend, "static-rules-v1")
 
 
 def _review_mode(cfg: Config, context: ReviewContext) -> str:
@@ -350,6 +356,27 @@ def run_analysis(cfg: Config, context: ReviewContext,
     order = provider_order(cfg)
     primary_backend = str(getattr(primary, "backend", "") or "")
     warnings: list[str] = []
+    # V3-E02-T03: structured telemetry events for this run — counts,
+    # backend names, status classes and exception *type names* only
+    # (never an exception message: it could echo a request body or a
+    # key), and never a change to existing logging behavior.
+    run_events: list[dict] = []
+    failed_backend: str | None = None
+    failure_reason = ""
+
+    def _note_failure(backend: str, reason: str) -> None:
+        nonlocal failed_backend, failure_reason
+        failed_backend = backend or "provider"
+        failure_reason = reason
+
+    def _circuit_event(backend: str, before: str | None) -> None:
+        """Record a breaker state transition, if one happened."""
+        if not backend or before is None:
+            return
+        after = breaker_for(backend).state()
+        if after != before:
+            run_events.append({"type": "circuit", "backend": backend,
+                               "from": before, "to": after, "ts": event_ts()})
 
     for backend in order:
         if not breaker_for(backend).can_attempt():
@@ -370,46 +397,97 @@ def run_analysis(cfg: Config, context: ReviewContext,
                 # A *secondary* backend with a bad config is skipped, not fatal.
                 warnings.append(f"{backend}: unavailable ({exc}) — "
                                 f"skipped for this review.")
+                run_events.append({"type": "provider_error", "backend": backend,
+                                   "error": type(exc).__name__,
+                                   "reason": "unusable_config", "ts": event_ts()})
 
     last_static: AnalysisOutcome | None = None
     for backend, provider in candidates():
+        # A previous attempt failed and this is a real next backend: the
+        # handover itself is a first-class telemetry event.
+        if failed_backend and backend:
+            run_events.append({"type": "failover", "from": failed_backend,
+                               "to": backend, "reason": failure_reason,
+                               "ts": event_ts()})
+            failed_backend = None
         is_static = isinstance(provider, StaticProvider)
+        state_before = breaker_for(backend).state() \
+            if (not is_static and backend) else None
         if not is_static and backend:
             if not breaker_for(backend).allow():
                 continue                       # trial already claimed elsewhere
         try:
             outcome = provider.analyze(context)
         except Exception as exc:               # noqa: BLE001 — one provider's bug
+            # Harvest the failed provider's own events first — its outcome
+            # never materialized to carry them.
+            run_events.extend(getattr(provider, "telemetry_events", None) or [])
+            reason = type(exc).__name__
+            run_events.append({"type": "provider_error",
+                               "backend": backend or "provider",
+                               "error": reason, "ts": event_ts()})
             if not is_static and backend:
                 breaker_for(backend).record_failure()
+                _circuit_event(backend, state_before)
             # Type name only: an exception message may echo a request body.
             warnings.append(f"{backend or 'provider'} review failed "
-                            f"({type(exc).__name__}) — trying the next provider.")
+                            f"({reason}) — trying the next provider.")
+            _note_failure(backend, reason)
             continue
 
         if is_static or _ai_completed(outcome):
             if not is_static and backend:
                 breaker_for(backend).record_success()
+                _circuit_event(backend, state_before)
             if warnings:
                 outcome.warnings = [*warnings, *outcome.warnings]
+            _attach_events(outcome, run_events)
             return outcome
 
         # AI provider, but every batch fell back to the rule engine.
+        run_events.append({"type": "provider_error",
+                           "backend": backend or "provider",
+                           "error": "StaticFallback", "ts": event_ts()})
         if backend:
             breaker_for(backend).record_failure()
+            _circuit_event(backend, state_before)
         warnings.append(f"{backend or 'provider'} could not complete an AI review "
                         f"(every batch fell back to static analysis) — trying the "
                         f"next provider.")
+        _note_failure(backend, "StaticFallback")
         last_static = outcome
 
     if last_static is None:
         last_static = StaticProvider().analyze(context)
+    if failed_backend:
+        # No further backend ran — the rule engine stood in.
+        run_events.append({"type": "static_fallback", "from": failed_backend,
+                           "reason": failure_reason, "ts": event_ts()})
     warnings.append("No AI provider completed this review — findings come from the "
                     "deterministic static rule engine, not from an AI review.")
     last_static.warnings = [*warnings, *last_static.warnings]
     last_static.engine = "static"
     last_static.fallback_used = True
+    _attach_events(last_static, run_events)
     return last_static
+
+
+def _attach_events(outcome: AnalysisOutcome, events: list[dict]) -> None:
+    """V3-E02-T03 — merge router-level events into the outcome's telemetry.
+
+    Router events (failed backends' harvested retries, ``provider_error``,
+    ``failover``, ``circuit`` transitions) all happened *before* the
+    successful provider's own events, so they lead the list. Outcomes
+    without a telemetry block (pre-V3 test doubles) gain a minimal one.
+    """
+    if not events:
+        return
+    tel = getattr(outcome, "telemetry", None)
+    if tel is None:
+        tel = RunTelemetry(provider=str(getattr(outcome, "mode", "") or ""),
+                           model=str(getattr(outcome, "model", "") or ""))
+        outcome.telemetry = tel
+    tel.events = [*events, *tel.events]
 
 
 __all__ = [

@@ -29,6 +29,9 @@ NEW_FINDING_FIELDS = [
     "resolved_at", "github_comment_id",
     # V3 C4: fix verification, appended last and pipeline-owned.
     "verification_status", "verification_reason", "verified_at",
+    # V4-E04: provenance, pipeline-owned (set by orchestrator, never model output).
+    "provenance_engine", "provenance_model", "provenance_agent",
+    "provenance_origin",
 ]
 
 
@@ -133,12 +136,17 @@ def test_from_untrusted_dict_drops_pipeline_owned_fields():
         "fingerprint": "forged", "state": "muted", "first_seen_sha": "deadbeef",
         "last_seen_sha": "deadbeef", "resolved_at": "2026-01-01T00:00:00Z",
         "github_comment_id": 1,
+        # V4-E04: model output must not forge provenance either.
+        "provenance_engine": "claude", "provenance_model": "claude-sonnet-4-6",
+        "provenance_agent": "security-reviewer", "provenance_origin": "ai",
     }
     f = Finding.from_untrusted_dict(hostile)
     assert (f.file, f.line, f.severity, f.title) == ("a.py", 7, "high", "Real title")
     assert f.fingerprint is None and f.state == "new"
     assert f.first_seen_sha is None and f.last_seen_sha is None
     assert f.resolved_at is None and f.github_comment_id is None
+    assert f.provenance_engine is None and f.provenance_model is None
+    assert f.provenance_agent is None and f.provenance_origin is None
     assert set(models.LIFECYCLE_FIELDS) == set(NEW_FINDING_FIELDS)
 
 
@@ -174,12 +182,16 @@ def test_review_key_is_deterministic_and_commit_specific():
 # ---------------------------------------------------------- AnalysisOutcome
 
 def test_analysis_outcome_defaults_and_field_order():
+    # Append-only contract: the first five fields are V1's (positional
+    # construction), then each later epic's appends — V2's engine trio,
+    # then V3-E02-T02's telemetry. Any reorder or mid-list insert fails here.
     assert _names(AnalysisOutcome) == [
         "findings", "summary", "mode", "model", "warnings",
-        "engine", "fallback_used", "batch_count"]
+        "engine", "fallback_used", "batch_count", "telemetry"]
     o = AnalysisOutcome([], "s", mode="static", model="static-rules-v1")
     assert o.warnings == [] and o.engine == ""
     assert o.fallback_used is False and o.batch_count == 0
+    assert o.telemetry is None                        # default: absent, not invented
 
 
 def test_analysis_outcome_positional_construction_matches_v1_usage():

@@ -1,0 +1,37 @@
+id: DEFECT-D2-01
+layer: regression
+title: "D2 — still-present finding beyond the comment cap stays active"
+provenance: hand-authored   # synthetic only — no real PRs
+diff: pr.diff
+config:
+  max_comments: 1
+  severity_threshold: medium
+previous:
+  - file: src/aaa_creds.py
+    line: 4
+    severity: high
+    category: security
+    title: "Shell command built from code without escaping"
+    state: active
+    explanation: "Reported by an earlier review of this PR (seeded)."
+expect:
+  findings:
+    - file: src/zzz_orders.py
+      line_hint: 7
+      category: security
+      severity_min: critical
+      title_match: "SQL injection"
+    - file: src/aaa_creds.py
+      line_hint: 4
+      category: security
+      severity_min: high
+      title_match: "Shell command"
+      state: active
+notes: >
+  D2 (cap-induced false resolved): with max_comments=1 only the critical
+  finding gets an inline slot; the high finding is still REPORTED
+  (uncapped, D4) and present in the current set, so lifecycle + C4
+  verification must keep it active. If verification/lifecycle is ever fed
+  the capped list again, the still-present finding looks absent, closes
+  itself as resolved, and the state assertion fails.
+  Unit pin: tests/test_defect_regressions.py::test_d2_...
