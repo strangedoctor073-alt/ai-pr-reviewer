@@ -18,8 +18,8 @@ a re-decision. Epics referenced (`V3-E02`, `V5-E07`, …) live in
 | ADR-001 | Modular monolith over microservices | Accepted (de facto) |
 | ADR-002 | Repository graph as derived deterministic index | Proposed — requires human approval before implementation |
 | ADR-003 | Memory authority model (human > evidence > AI observation) | Proposed — requires human approval before implementation |
-| ADR-004 | Evidence as first-class records with provenance | Proposed — requires human approval before implementation |
-| ADR-005 | Finding identity: v1 fingerprint accepted; identity v2 layered | Accepted (de facto) for v1; Proposed for v2 |
+| ADR-004 | Evidence as first-class records with provenance | Approved — human ratification 2026-10-07 (V4-C0 staged scope) |
+| ADR-005 | Finding identity: v1 fingerprint accepted; identity v2 layered | Accepted (de facto) for v1; **Approved for v2 layered — 2026-10-07** |
 | ADR-006 | Bounded fan-out agent architecture under one orchestrator | Proposed — requires human approval before implementation |
 | ADR-007 | Provider abstraction: structural protocol as the seam | Accepted (de facto) |
 | ADR-008 | In-process pipeline first; events before queues | Accepted (de facto) / Proposed at the queue boundary |
@@ -31,7 +31,8 @@ a re-decision. Epics referenced (`V3-E02`, `V5-E07`, …) live in
 | ADR-014 | Local-first telemetry & cost accounting | Approved — human ratification 2026-10-06 |
 | ADR-015 | Policy evaluation placement (engine, base revision) | Accepted (de facto) / org layer Proposed |
 | ADR-016 | Testing gate strategy (deterministic blocks, AI trends) | Approved — human ratification 2026-10-06 |
-| ADR-022 | Schema migration strategy: hand-rolled additive DDL until the V4 trigger | Proposed — adoption deferred (trigger stated in ADR-022) |
+| ADR-017 | Context retrieval & ranking strategy | Approved — human ratification 2026-10-07 (V4-C0) |
+| ADR-022 | Schema migration strategy: hand-rolled additive DDL until the V4 trigger | Approved — V4 trigger review recorded 2026-10-07 (hand-rolled continues) |
 
 ---
 
@@ -191,7 +192,10 @@ authority row influenced a policy decision (immediate re-decision).
 
 ## ADR-004 — Evidence as first-class records with provenance
 
-**Status:** Proposed — requires human approval before implementation
+**Status:** Approved — human ratification 2026-10-07 (V4-C0, recorded per
+C0-T05). V4 ships the *embedded* subset defined in the staging note below;
+the content-addressed evidence *store* stays Proposed until a consumer needs
+cross-run re-validation (expected V6-E05).
 
 **Context:** Vision §3.1: "Every important claim carries evidence (code, rule,
 test output, history, tool result) with provenance. No unsupported certainty."
@@ -207,6 +211,17 @@ is resolvable (path+SHA+line range, API URL, rule id). Findings and
 verifications *reference* evidence ids; the record itself is content-addressed
 so a claim can be re-validated later. Summaries shown to humans are rendered
 from the record; the record itself holds no secrets (redaction on write).
+
+**V4 staging (recorded 2026-10-07):** `V4-E04` ships evidence as structured
+records **embedded on the finding** — additive `evidence[]` entries
+(`kind`, locator = file + line range, `check_type`, quoted content) alongside
+the pipeline-owned provenance fields already in the code
+(`provenance_engine/model/agent/origin`, `models.py:142-147`) — with
+`redact_secrets()` applied on write and again at the output chokepoint
+(`V4-E08-T05`). The content-addressed store (ids, `content_hash` lookup,
+cross-run retention) is **not** V4 scope; embedded records keep the same
+field discipline so they can be lifted into stored records later without a
+format break.
 
 **Alternatives considered:**
 1. *Free-text citations inside `explanation`* — rejected: unparseable,
@@ -238,8 +253,8 @@ kinds (re-decision required — that would be a trust-model change).
 
 ## ADR-005 — Finding identity: v1 fingerprint accepted; identity v2 layered
 
-**Status:** Accepted (de facto) for v1 · Proposed for v2 — requires human
-approval before implementation
+**Status:** Accepted (de facto) for v1 · **Approved for v2 (layered) — human
+ratification 2026-10-07 (V4-C0, recorded per C0-T02)**
 
 **Context:** Identity today is
 `fingerprint = sha256(category|file|normalized_title)[:16]`
@@ -256,14 +271,21 @@ as the storage, lifecycle, mute, and comment-sync key. Do **not** change the
 hash inputs — every stored `finding_history` row, mute row (`fingerprint:<fp>`
 memory), and GitHub comment binding depends on it.
 
-**Decision (v2, proposed):** layer identity instead of widening it:
+**Decision (v2, approved 2026-10-07):** layer identity instead of widening it:
 1. add **provenance** fields to `Finding` (engine, model, agent, origin) —
-   prerequisite C3/V4-E04/E05;
+   prerequisite C3/V4-E04/E05; *(shipped: `models.py:142-147`, populated by
+   `orchestrator.py`)*
 2. keep `fingerprint` as primary key; add an **occurrence key** for cross-engine
    matching = fingerprint + normalized anchor context, used only for dedup/merge
    decisions, never as storage key;
 3. relations attach to (fingerprint, provenance) pairs, so two engines' renderings
-   of one issue link explicitly instead of colliding.
+   of one issue link explicitly instead of colliding;
+4. **no alias table, no backfill, no cutover** — v1 remains the storage,
+   lifecycle, mute, and comment key indefinitely, so nothing can orphan and no
+   consumer migration is needed. The earlier alias-table/backfill/cutover ticket
+   sketches (`EPIC_BACKLOG.md` old `V4-E05-T03`/`T04`/`T06`) are **rejected
+   under this decision**. Occurrence-key formula for V4:
+   `normalized_path + symbol + semantic gist of the title`, line-tolerant.
 
 **Alternatives considered:**
 1. *Add line/anchor to the hash* — rejected: churn breaks identity exactly as
@@ -894,10 +916,76 @@ budgets) · ADR-005 (corpus identity), ADR-012 (deterministic verification).
 
 ---
 
+## ADR-017 — Context retrieval & ranking strategy
+
+**Status:** Approved — human ratification 2026-10-07 (V4-C0, recorded per
+C0-T03)
+
+**Context:** `context.py` assembles prompt context from the diff plus
+budget-truncated adjacent/whole-file excerpts; selection is implicit in
+`_apply_context_budget` (truncates, never ranks) and `repo_context.py`'s
+bounded probes (≤ 8 context files / 12k chars, D13 caps). Nothing records
+*why* a file was included or excluded, and the harness field
+`case.context.files` exists but is unread — context quality is unmeasured
+today.
+
+**Decision:** Context assembly consumes an explicit, deterministic
+**selection contract** produced over the V4 index (ADR-002, `V4-E01`). Each
+selection result is:
+
+```
+ContextSelection
+ ├── selected_files[]  → {path, reason, rank, relationship, size}
+ ├── excluded_files[]  → {path, reason}
+ ├── budget_state      → ok | truncated | exhausted   (loud, never silent)
+```
+
+Allowed reasons (closed set): `changed`, `adjacent`, `import`, `importer`,
+`test_of`, `config_of`, `manual`. Every exclusion carries a reason. Ordering
+is deterministic: reason priority → rank → path. Retrieval is
+lexical/symbolic over the index — **no vector database, no embeddings, no
+ranking service** at this stage; embeddings, if ever, remain an
+implementation detail behind this contract, not new infrastructure. All
+selected content enters prompts wrapped in untrusted fences
+(`V4-E08-T02`); selection runs under the V4 budgets (`V4-E01-T04`,
+`V4-E08-T03`) and honors the existing `context-budget` input as the outer
+character ceiling (one budget system, not two).
+
+**Alternatives considered:**
+1. *Ranked retrieval with scoring (BM25/embeddings)* — rejected: ranking
+   quality is unmeasurable until relevance@10 exists (`V4-E02-T04`); start
+   with relationship-class selection that is explainable per file, and reopen
+   scoring only if structural selection misses the relevance@10 gate.
+2. *Keep implicit budget truncation* — rejected: unmeasured, unlabeled, and
+   de-selection is silent — exactly the diff-scoped limitation V4 exists to
+   fix.
+
+**Reasoning:** A closed reason set makes selection testable (every file in
+the prompt can answer "why"), makes de-selection auditable, and gives
+relevance@10 a computable definition (`V4-E11-T01`/`V4-E02-T04`).
+
+**Consequences:** + prompt context becomes explainable and measurable;
++ budget exhaustion becomes a controlled state instead of a silent cut;
+− selection must degrade honestly when the index is absent (fall back to
+today's behavior with a warning, never a crash); − reason codes become a
+documented public contract (README).
+
+**Revisit conditions:** relevance@10 < 0.70 on the expanded corpus with
+structural selection (ranking work reopens); index absent in > 20% of runs
+(degradation too frequent); selection overhead > 500 ms p95 (budget breach).
+
+**Links:** `EPIC_BACKLOG.md` (V4 scope record, V4-E01/E02) ·
+`V4_V10_ROADMAP.md` §V4 · `V4_THREAT_MODEL.md` (§1–2) · ADR-002 (index),
+ADR-004 (evidence), ADR-012 (verification).
+
+---
+
 ## ADR-022 — Schema migrations: hand-rolled additive DDL now, real tool at the V4 trigger
 
-**Status:** Proposed — adoption deferred; the trigger review below is itself a
-human-approval checkpoint (V3-E04-T06 is proposal-only, no code changed).
+**Status:** Approved — human ratification 2026-10-07. The scheduled V4
+trigger review (trigger #2, "first V4 storage addition") was performed at
+V4-C0 (C0-T01): **outcome — one more stage of hand-rolled additive DDL**; no
+migration tool adopted. See "V4 trigger review" below.
 
 **Context:** Every schema change today is hand-rolled, additive-only, and
 spread over two sites with no shared ledger:
@@ -940,6 +1028,20 @@ real migration tool selected against the criteria below.
 3. **Review also when** the inventory reaches a third hand-rolled site, or a
    hand-rolled migration needs a second corrective fix — either means the
    pattern is carrying more than inspection can prove.
+
+**V4 trigger review (recorded 2026-10-07, V4-C0-T01):** The first V4 storage
+additions are two dashboard-side tables (`feedback_events`,
+`suppression_rules` — `V4-E09`), both additive, plus additive report fields;
+the V4 repository index is **ephemeral per-run** (optional gitignored cache
+file, **no `repo_index` table** — this corrects the assumption in trigger #2
+above, which anticipated a persistent index). Trigger #1 (first non-additive
+change) does **not** fire — no drop/retype/rename is planned. Trigger #2
+fired; its review outcome is **continue hand-rolled additive DDL for V4**:
+two tables do not justify a migration dependency, authoring workflow, or CI
+surface, and `MIGRATION_PLAN.md` §3.2's additive policy plus parity tests
+remains sufficient. Trigger #2's requirement ("either outcome recorded as an
+ADR status change") is satisfied by this paragraph and the status change
+above.
 
 **Tool evaluation criteria** (applied at the trigger):
 
@@ -998,14 +1100,6 @@ non-additive step.
 ## Planned ADRs (not yet written)
 
 The following decisions have been identified as requiring ADRs but have not yet been written. They are marked **planned ADR** per the remediation instruction "do not create full ADR documents unless the existing planning structure explicitly requires them."
-
-### ADR-017 (planned) — Context retrieval & ranking strategy
-
-- **Status:** Planned ADR — not yet written
-- **Decision needed:** How the context engine v2 (V4-E02) retrieves, ranks, and budgets repository content. Hybrid deterministic index lookup + ranked retrieval. No vector database at this stage.
-- **Depends on:** V4-E01 (index), V4-E03 (impact analysis for ranking)
-- **Consumed by:** V5-E01 (planner context), V6-E01 (security context)
-- **Related:** ADR-002 (repository graph), ADR-011 (storage evolution)
 
 ### ADR-018 (planned) — Adaptive review depth
 

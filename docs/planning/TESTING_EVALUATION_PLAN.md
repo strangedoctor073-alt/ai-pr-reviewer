@@ -587,6 +587,36 @@ documented owner for its thresholds.
 
 ---
 
+## 8. V4 metrics (approved — C0-T04, 2026-10-07)
+
+Frozen for V4. This section **extends** §4, does not replace it. Every V4
+feature maps to ≥ 1 metric here; a feature whose metric cannot be named does
+not start.
+
+| # | Metric | Definition (V4 delta vs §4) | Source | Gate |
+|---|---|---|---|---|
+| 1 | Precision | §4 unchanged | harness | **≥ 0.90 at V4 release** |
+| 2 | Recall | §4; **re-baseline when the corpus grows 8 → ≥ 16** — 1.000 is an 8-case number; record the new baseline explicitly instead of silently requiring it forever | harness | no material regression vs the recorded new baseline |
+| 3 | False-positive rate | §4 project definition (classic FP/TN stays undefined) | harness + dashboard feedback | reported + trended |
+| 4 | Severity accuracy | predicted severity == labeled severity ÷ findings with severity labels | new corpus labels | reported only — **never auto-regrades severity** (debt 14) |
+| 5 | **relevance@10** | relevant files inside the selection contract's top 10 ÷ labeled relevant files (`case.context.files` finally read) | harness (`V4-E02-T04`/`V4-E11-T01`) | **≥ 0.70** |
+| 6 | Verification accuracy | §4 plus explicit **misverify** (wrongly confirmed) and **missverify** (missed) counters | harness replay | **0 known misverification** |
+| 7 | Fix usefulness | posted findings carrying an applicable `suggestion` ÷ cases labeled fix-expected | harness labels | reported |
+| 8 | Latency p50/p95 | index build, per-provider call, end-to-end duration | telemetry (`V4-E11-T06`) | budgets reported; index p95 < 2 s on fixture repos |
+| 9 | Index build time/size | wall-clock + bytes per build; budget-exhaustion counts | telemetry | budgets enforced — exhaustion is a loud state, never a crash |
+| 10 | Cost estimate | price table × usage → estimated cost band per review (**display only**, debt 9) | `V4-E11-T07` | present in every report; no cost-based routing |
+| 11 | Feedback effectiveness | repeat-FP rate of adjudicated findings before vs after suppression rules (`feedback.enabled=false` ⇒ no data, stated as such) | dashboard feedback + report | reported at release; no automatic success claim |
+
+Also frozen at C0: Tier-B provider precision floor **≥ 0.80** at release —
+reporting-only until a provider environment is available; never a hard CI
+dependency for offline contributors. Coverage **≥ 70%** is a quality signal,
+not a substitute for behavioral tests (ADR-016 still governs).
+
+Feature → metric mapping of record lives in the V4 ticket manifest
+(`EPIC_BACKLOG.md`, V4 scope record).
+
+---
+
 ### Cross-references
 Cost of running all this: `COST_TOKEN_ARCHITECTURE.md` (§6 stage budgets) ·
 Decisions: `ADR_INDEX.md` (ADR-016 gate strategy, ADR-014 telemetry) ·

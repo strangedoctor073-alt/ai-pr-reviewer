@@ -183,6 +183,18 @@ and report schema only gain fields, never lose or repurpose any.
 
 ## V4 — Deep repository intelligence
 
+> **Status note (2026-10-07, V4-C0-T01):** this section's V4 sketch is
+> superseded on these material points by the approved V4 plan — the index is
+> **ephemeral per-run** (no `repo_index` SQLite tables, no cross-run
+> hash-sealed cache in V4); evidence ships **embedded on findings** (no
+> `evidence`/`finding_provenance` tables in V4); **V4-E06 (twin) and V4-E07
+> (read contracts) are deferred** (IDs reserved); the context-quality gate is
+> **relevance@10 ≥ 0.70** on the expanded corpus (the 0.8 figure in the exit
+> criteria re-baselines when the corpus grows from 8 to ≥ 16 cases). Epic
+> order, security-per-stage, and the must-not-build list stand. Authority:
+> `EPIC_BACKLOG.md` V4 scope record + `ADR_INDEX.md` (ADR-004/005/017/022,
+> ratified 2026-10-07) + `V4_THREAT_MODEL.md`.
+
 ### Objective
 Give the engine a deterministic, queryable understanding of the repository: a
 base-revision repo index, a context engine that retrieves/ranks/budgets with

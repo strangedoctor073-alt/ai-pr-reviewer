@@ -141,6 +141,55 @@ provider; `soft` = strongly improves odds / avoids rework, but work can proceed.
 
 ### V4 — Deep repository intelligence
 
+> **V4 scope record — approved 2026-10-07 (C0-T01).** The V4 execution plan
+> (charter: 14 hard rules; evaluation-first; additive-only; no V3 breaking
+> changes) supersedes the *ticket outlines* in this file where they conflict;
+> epic IDs are unchanged and are never renumbered. Active epics:
+> **P0 — E01, E02, E04, E05, E08 · P1 — E03, E09, E10, E11**.
+> **Deferred: E06 (digital twin seed), E07 (read contracts)** — IDs reserved,
+> outlines below are dormant; do not work them. Rejected for V4: autonomous
+> fixes, multi-agent/critic loops, embeddings/RAG, cost-based routing,
+> provider specialization, local models, Checks API, enterprise SSO/RBAC,
+> microservices, auto-reseverity, auto-mute, votes-in-prompt, dashboard
+> config editing. Compatibility: report schema, Action inputs/outputs, config,
+> and storage are **additive-only**; `@v3.0.0` remains valid forever; V4 ships
+> as a new immutable tag.
+>
+> **Supersession — material deltas from the outlines below:**
+> 1. **The index is ephemeral** (per-run, budgeted, optional gitignored
+>    cache): old `V4-E01-T01` (persistent storage schema) and `V4-E01-T03`
+>    (incremental refresh) are **out of V4 scope**; no `repo_index` table
+>    (ADR-022 trigger review recorded 2026-10-07).
+> 2. **Evidence ships embedded on findings** (additive `evidence[]` +
+>    pipeline-owned provenance already at `models.py:142-147`): old
+>    `V4-E04-T02`'s separate persistent evidence store is deferred with the
+>    content-addressed part of ADR-004 (V4 staging note, 2026-10-07).
+> 3. **Identity is layered with no cutover** (ADR-005 approved 2026-10-07):
+>    old `V4-E05-T03` (alias table), `V4-E05-T04` (backfill) and
+>    `V4-E05-T06` (cutover to v2 authority) are **rejected** — v1 stays the
+>    storage key; the occurrence key is computed, never authoritative.
+> 4. **E06/E07 are deferred**: their outlines below are dormant; minimal
+>    read needs fold into E01/E02.
+>
+> **Approved V4 ticket manifest** — this table is the ID/title authority;
+> per-ticket detail is issued batch-by-batch:
+>
+> | Epic | Tickets |
+> |---|---|
+> | C0 | T01 adoption checkpoint (ADR-022 review) · T02 ADR-005 reconciliation · T03 context contract (ADR-017) · T04 evaluation metrics · T05 ADR-004 approval |
+> | V4-E01 | T01 file inventory · T02 symbol-lite extraction · T03 import graph · T04 context budgets · T05 pipeline wiring (no prompt change) · T06 index tests |
+> | V4-E02 | T01 selection result model · T02 selection algorithm · T03 provider prompt wiring · T04 relevance@10 · T05 context documentation |
+> | V4-E03 | T01 impact specification · T02 bounded traversal · T03 impact prompt section · T04 evaluation case |
+> | V4-E04 | T01 provenance design (DONE in code) · T02 finding evidence · T03 multi-source provenance extension (additive) · T04 D10 report surfacing · T05 static evidence normalization |
+> | V4-E05 | T01 identity specification · T02 occurrence-key implementation · T03 cross-engine dedup · T04 continuity tests · T05 static floor (P2, optional) |
+> | V4-E08 | T01 threat model · T02 untrusted repo-context fencing · T03 index security limits · T04 provider warning sanitization (debt 11) · T05 output redaction chokepoint · T06 feedback poisoning protection · T07 security regression suite |
+> | V4-E09 | T01 feedback schema · T02 persist votes · T03 suppression rules · T04 staging application · T05 disable+expiry · T06 isolation/security · T07 effectiveness evaluation |
+> | V4-E10 | T01 comment fingerprints · T02 sticky summary · T03 lifecycle sync · T04 lifecycle safety tests · T05 additive outputs |
+> | V4-E11 | T01 corpus expansion · T02 precision/recall gate · T03 relevance gate · T04 severity/finding/fix metrics · T05 verification metric · T06 latency (+ telemetry ingestion route, debt 15) · T07 cost table (debt 9) · T08 Tier-B providers · T09 CI quality gates |
+>
+> Threats: `V4_THREAT_MODEL.md` (E08-T01) · Metrics: `TESTING_EVALUATION_PLAN.md`
+> §8 · Contracts: `ADR_INDEX.md` (ADR-004/005/017/022, ratified 2026-10-07).
+
 #### V4-E01 · repository index
 - **Purpose**: Build the deterministic repository index (files, symbols, imports, structure) that every later intelligence capability reads instead of the current 8-file bounded fetch.
 - **User value**: Reviews understand cross-file references, real import chains, and project layout rather than guessing from the diff alone.
