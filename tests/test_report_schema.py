@@ -47,6 +47,9 @@ REQUIRED_FINDING_KEYS = {
     "github_comment_id", "verification_status", "verification_reason",
     "verified_at", "provenance_engine", "provenance_model",
     "provenance_agent", "provenance_origin",
+    # V4-E04 (T02/T03): frozen the same way provenance was in V3 — once a
+    # field ships in every report, removing it is a breaking change.
+    "provenance_sources", "evidence", "merged_fingerprints",
 }
 
 

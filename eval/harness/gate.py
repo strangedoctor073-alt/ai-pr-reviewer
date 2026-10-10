@@ -55,9 +55,22 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     "recall": 0.0,
     "recall_critical_high": 0.0,
     "false_positive_rate": 0.0,
+    # V4 (E02-T04): no regression vs the baseline's recorded relevance.
+    "relevance_at_10": 0.0,
 }
 # Metrics where a *higher* value is worse (allowed rise, not drop).
 _INVERTED = ("false_positive_rate",)
+
+# V4 release floors (TESTING_EVALUATION_PLAN §8, E11-T02 / E11-T03):
+# absolute floors, independent of the baseline. A regression is relative
+# to what we recorded; a *floor* is absolute quality we refuse to ship
+# below. Enforced whenever the metric has data — a metric with no data
+# stays null and is skipped here (the drop check above already fails a
+# metric that had baseline data and now has none).
+FLOORS: dict[str, float] = {
+    "precision": 0.90,          # §8 #1 — ">= 0.90 at V4 release"
+    "relevance_at_10": 0.70,    # §8 #5 — ">= 0.70"
+}
 
 
 def corpus_hash(root: Path | str) -> str:
@@ -161,6 +174,18 @@ def check_gate(current: dict, baseline: dict,
             failures.append(
                 f"{metric} regressed {base_value} -> {cur_value} "
                 f"(allowed drop {allowed})")
+
+    # V4 absolute release floors (§8) — checked independently of the
+    # baseline so a floor breach fails even if the baseline was moved.
+    for metric, floor in sorted(FLOORS.items()):
+        value = cur_metrics.get(metric)
+        if value is None:
+            continue                      # no data — nothing to hold
+        if value < floor - 1e-12:
+            failures.append(
+                f"{metric}={value:.3f} is below the V4 release floor "
+                f"{floor:.2f} (TESTING_EVALUATION_PLAN §8) — improve the "
+                f"engine or the corpus labels; floors are not baselinable")
 
     cur_counts = (current.get("scorecard") or {}).get("counts", {})
     for key, message in (

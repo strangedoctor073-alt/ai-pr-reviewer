@@ -54,6 +54,9 @@ _FINDING_PASSTHROUGH = (
     "verification_status", "verification_reason", "verified_at",
     "provenance_engine", "provenance_model", "provenance_agent",
     "provenance_origin",
+    # V4-E04 (T02/T03): multi-source provenance, embedded evidence and the
+    # dedup merge trail, carried for the same reason as the fields above.
+    "provenance_sources", "evidence", "merged_fingerprints",
 )
 
 # How each verification outcome is appended to a resolved finding in the
@@ -219,7 +222,35 @@ def _finding_line_md(result: ReviewResult, f) -> str:
         fence = "```suggestion\n" + f.suggestion + "\n```"
         sug = "\n\n" + fence
     return (f"{SEVERITY_EMOJI.get(f.severity, _UNKNOWN_SEVERITY_EMOJI)} **[{f.severity.upper()}]** "
-            f"**{f.title}** ({f.category}) — {link}\n\n{f.explanation}{sug}")
+            f"**{f.title}** ({f.category}) — {link}\n\n{f.explanation}{sug}"
+            f"{_provenance_suffix(f)}")
+
+
+def _provenance_suffix(f) -> str:
+    """V4-E04-T04: one compact, deterministic `<sub>` line answering
+    "why was I told this?" -- which engine produced the finding, and which
+    evidence records back it (locators only; evidence *content* is never
+    rendered here, only cited).
+
+    Returns "" when a finding carries neither provenance nor evidence, so
+    pre-V4 reports and hand-built results render byte-identically.
+    """
+    bits: list[str] = []
+    engine = getattr(f, "provenance_engine", None)
+    if engine:
+        model = getattr(f, "provenance_model", None)
+        bits.append(f"source: {engine}" + (f" ({model})" if model else ""))
+    evidence = tuple(getattr(f, "evidence", ()) or ())
+    if evidence:
+        cites = " · ".join(f"{e.kind} `{e.locator}`" for e in evidence[:3])
+        more = f" · +{len(evidence) - 3} more" if len(evidence) > 3 else ""
+        bits.append(f"evidence: {cites}{more}")
+    merged = tuple(getattr(f, "merged_fingerprints", ()) or ())
+    if merged:
+        bits.append(f"merged {len(merged)} duplicate(s)")
+    if not bits:
+        return ""
+    return "\n\n<sub>_" + " · ".join(bits) + "_</sub>"
 
 
 def _risk_row(result: ReviewResult) -> list[str]:

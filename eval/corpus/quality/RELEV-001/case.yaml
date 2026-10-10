@@ -1,0 +1,28 @@
+id: RELEV-001
+layer: quality
+title: "Hardcoded API key in billing; its importer and test must reach the prompt"
+provenance: hand-authored   # synthetic only — no real PRs
+diff: pr.diff
+expect:
+  findings:
+    - file: app/billing.py
+      line_hint: 1
+      category: security
+      severity_min: critical
+      title_match: "Hardcoded credential"
+context:
+  files:
+    - checkout/app/gateway.py
+    - checkout/tests/test_billing.py
+  impact:
+    - app/gateway.py
+    - tests/test_billing.py
+notes: >
+  V4 E02-T04/E03-T04 fixture: the diff touches only app/billing.py, but a
+  reviewer cannot judge a billing change without its importer
+  (app/gateway.py, direct dependent) and its test (tests/test_billing.py).
+  Both are labeled relevant files inside the selection contract's top 10
+  and labeled impact entries (both import the changed file directly).
+  TEST001 may fire below the posting threshold (no test in the diff) —
+  it is not declared here because below-threshold findings are not scored
+  as posted findings.

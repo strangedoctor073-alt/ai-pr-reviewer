@@ -126,6 +126,13 @@ class Case:
     notes: str = ""
     config: CaseConfig = field(default_factory=CaseConfig)
     previous_findings: tuple[dict, ...] = ()
+    # V4 (E02-T04/E03-T04): a case may ship a base-revision fixture
+    # checkout (``<case_dir>/checkout/``). The runner copies it to a temp
+    # dir (never writing inside the corpus), builds the production index
+    # over it, and scores the selection contract against these labels.
+    checkout_dir: Path | None = None
+    context_relevant: tuple[str, ...] = ()   # repo-relative relevance labels
+    context_impact: tuple[str, ...] = ()     # expected impact-set labels
 
 
 # ---------------------------------------------------------------- helpers
@@ -354,13 +361,24 @@ def load_case(case_dir: Path) -> Case:
         raise CorpusError(f"{manifest}: diff file not found: {data['diff']!r}")
 
     context_files: list[Path] = []
+    context_relevant: tuple[str, ...] = ()
+    context_impact: tuple[str, ...] = ()
+    checkout_dir = case_dir / "checkout"
+    if not checkout_dir.is_dir():
+        checkout_dir = None
+    checkout_resolved = checkout_dir.resolve() if checkout_dir else None
     context = data.get("context")
     if context is not None:
         ctx = _require_dict(context, f"{manifest}: context")
-        unknown_ctx = set(ctx) - {"files"}
+        unknown_ctx = set(ctx) - {"files", "impact"}
         if unknown_ctx:
             raise CorpusError(f"{manifest}: context: unknown field(s) "
                               f"{sorted(unknown_ctx)}")
+        if checkout_dir is None:
+            raise CorpusError(
+                f"{manifest}: context: relevance/impact labels require a "
+                f"checkout/ fixture directory (they are repo paths the "
+                f"selection contract is scored against)")
         files = ctx.get("files", [])
         if not isinstance(files, list):
             raise CorpusError(f"{manifest}: context.files must be a list")
@@ -371,6 +389,34 @@ def load_case(case_dir: Path) -> Case:
                 raise CorpusError(f"{manifest}: context file not found: "
                                   f"{value!r}")
             context_files.append(path)
+        # Relevance labels are repo-relative paths (what the selection
+        # contract ranks); each must be a file inside the fixture checkout,
+        # otherwise it could never be selected and the metric would be a
+        # lie rather than a measurement.
+        labels: list[str] = []
+        for i, p in enumerate(context_files):
+            try:
+                labels.append(
+                    str(p.relative_to(checkout_resolved)).replace("\\", "/"))
+            except ValueError:
+                raise CorpusError(
+                    f"{manifest}: context.files[{i}] must live inside "
+                    f"checkout/ (it is a relevance label scored against "
+                    f"the selection contract): {p.name!r}") from None
+        context_relevant = tuple(labels)
+
+        impact = ctx.get("impact", [])
+        if not isinstance(impact, list) or not all(
+                isinstance(x, str) and x.strip() for x in impact):
+            raise CorpusError(f"{manifest}: context.impact must be a list "
+                              f"of non-empty repo-relative paths")
+        for value in impact:
+            target = (checkout_resolved / value).resolve()
+            if not target.is_relative_to(checkout_resolved) \
+                    or not target.is_file():
+                raise CorpusError(f"{manifest}: context.impact target not "
+                                  f"in checkout/: {value!r}")
+        context_impact = tuple(str(v).replace("\\", "/") for v in impact)
 
     matrix = data.get("engine_matrix", ["static"])
     if (not isinstance(matrix, list) or not matrix
@@ -391,6 +437,9 @@ def load_case(case_dir: Path) -> Case:
         engine_matrix=tuple(matrix), xfail=xfail, notes=notes,
         config=_config(data.get("config")),
         previous_findings=_previous(data.get("previous")),
+        checkout_dir=checkout_resolved,
+        context_relevant=context_relevant,
+        context_impact=context_impact,
     )
 
 

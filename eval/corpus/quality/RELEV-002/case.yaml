@@ -1,0 +1,25 @@
+id: RELEV-002
+layer: quality
+title: "Benign parser refactor; its importer and the importer's importer are relevant"
+provenance: hand-authored   # synthetic only — no real PRs
+diff: pr.diff
+expect:
+  findings: []
+  no_findings:
+    - file: lib/core/parser.py
+    - file: tests/test_parser.py
+context:
+  files:
+    - checkout/lib/api/handler.py
+    - checkout/app/server.py
+  impact:
+    - lib/api/handler.py
+    - app/server.py
+notes: >
+  V4 E03-T02/E02-T04 fixture: a two-hop chain app/server.py ->
+  lib/api/handler.py -> lib/core/parser.py. The diff touches the leaf and
+  its test only; impact must still name the direct importer (hop 1,
+  direct) and the transitive dependent (hop 2, indirect), and both must
+  land inside the selection contract's top 10. The diff is benign so the
+  engine must post nothing — no_findings traps pin that over posted and
+  below-threshold findings alike.

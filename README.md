@@ -189,7 +189,15 @@ at any time):
   `rule_id`, `fingerprint`, `state`, `first_seen_sha`, `last_seen_sha`,
   `resolved_at`, `github_comment_id`, `verification_status`,
   `verification_reason`, `verified_at`, `provenance_engine`,
-  `provenance_model`, `provenance_agent`, `provenance_origin`.
+  `provenance_model`, `provenance_agent`, `provenance_origin`,
+  `evidence`, `provenance_sources`, `merged_fingerprints`.
+  `evidence` records *why the engine believes this* (rule reference and
+  diff hunk, secret-redacted and size-bounded); `provenance_sources` lists
+  which pipeline stages contributed to the finding; `merged_fingerprints`
+  names earlier finding identities folded into this one during
+  deduplication. All three are additive V4 fields: `null`/empty on
+  findings produced by older state, and stripped from provider prompts by
+  the lifecycle-field allowlist (the model never sees them).
 
 ### Configuration layering
 
@@ -267,6 +275,33 @@ nonce-fenced as untrusted data** exactly like the diff, in its own block whose
 surrounding prose tells the model it is reference material, never instructions.
 A missing file, a rate limit or an unreachable GitHub API means "no repository
 context, plus a warning" — never a failed review.
+
+**V4 context selection (ADR-017)** — when the runner checks out the PR **base**
+as a git repository, an ephemeral index of that tree is built (no `git` process
+is executed; only file walking and import parsing, with file-count, depth and
+byte caps). The index then *ranks* the candidates above through a deterministic
+selection contract, so every selected file answers "why is this here?" with one
+of a fixed set of relationships:
+
+1. **changed** — the files the diff touches;
+2. **import / importer** — direct dependencies and dependents of the changed
+   files, from the index's resolved import graph;
+3. **impact** — transitive dependents up to a bounded number of hops
+   (default 2, hard cap 4; default 50 nodes, hard cap 200), labelled `direct`
+   or `indirect` and never guessing a symbol the index could not resolve;
+4. **test-of / config-of** — tests of changed modules and project
+   configuration files;
+5. **adjacent** — same-directory neighbours, weakest signal, first to be
+   dropped under the cap.
+
+Ordering is total and reproducible (reason → rank → path), the file cap is
+24, and anything excluded carries an explicit reason — nothing is dropped
+silently. Without an index (no checkout, origin mismatch, or any failure in
+the index/selection step) the reviewer falls back to the diff-scoped
+discovery above, unchanged, with a warning — never a failed review. Selection
+metadata is recorded in the report JSON and never shown to providers
+directly; providers only see the already-fetched, redacted, fenced files it
+chose.
 
 ### Fix verification
 

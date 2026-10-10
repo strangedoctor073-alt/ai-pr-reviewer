@@ -32,6 +32,9 @@ NEW_FINDING_FIELDS = [
     # V4-E04: provenance, pipeline-owned (set by orchestrator, never model output).
     "provenance_engine", "provenance_model", "provenance_agent",
     "provenance_origin",
+    # V4-E04 (T02/T03): embedded evidence, multi-source provenance and the
+    # dedup merge trail — appended, pipeline-owned, never model output.
+    "provenance_sources", "evidence", "merged_fingerprints",
 ]
 
 

@@ -32,6 +32,13 @@ code" per V3-E03-T02):
     the blocking guard the CI gate uses (T03). Null when no such label
     exists.
 
+``relevance_at_10``
+    = V4 (E02-T04, TESTING_EVALUATION_PLAN §8 #5): for cases that declare
+    labeled relevant files over a ``checkout/`` fixture, the fraction of
+    those labels that appear inside the production selection contract's
+    **top 10** files, micro-averaged over labeled cases. Null when no
+    corpus case ships relevance labels — no data beats an invented ratio.
+
 Rules that keep the numbers honest:
 
 * **Zero-input ratios are null**, never ``0.0``/``1.0`` invented from an
@@ -74,6 +81,7 @@ _EMPTY_COUNTS = (
     "cases", "passed", "failed", "errors", "skipped", "xfail", "xpass",
     "violations", "labels_total", "labels_matched",
     "findings_posted", "findings_below",
+    "relevance_labels", "relevance_hits",
 )
 
 
@@ -88,6 +96,8 @@ class CaseScore:
     below: int = 0                  # below-threshold bucket findings
     true_positives: int = 0         # matched posted-bucket labels
     false_positives: int = 0        # unmatched posted findings
+    relevance_labels: int = 0       # labeled relevant files (V4 E02-T04)
+    relevance_hits: int = 0         # of those, inside the selection top-10
     violations: list[dict] = field(default_factory=list)
     failures: list[str] = field(default_factory=list)
 
@@ -124,6 +134,18 @@ def score_case(case: Case, run: CaseRun) -> CaseScore:
 
     cs.posted = len(run.findings)
     cs.below = len(run.below)
+
+    # Deterministic contract assertions from the runner itself (V4 E03-T04:
+    # an expected impact set that no longer matches is a golden regression,
+    # scored exactly like an unmatched finding label).
+    cs.failures.extend(run.failures)
+
+    # V4 E02-T04: relevance@10 over cases with labeled relevant files.
+    if case.context_relevant:
+        top10 = set(run.context_top10)
+        cs.relevance_labels = len(case.context_relevant)
+        cs.relevance_hits = sum(1 for p in case.context_relevant
+                                if p in top10)
 
     if case.expect.config_error:
         # The clean string-SystemExit path is the only "ran" outcome.
@@ -206,6 +228,7 @@ class Scorecard:
     recall: float | None
     false_positive_rate: float | None
     recall_critical_high: float | None
+    relevance_at_10: float | None
     counts: dict[str, int]
 
 
@@ -252,6 +275,8 @@ def score_corpus(cases: tuple[Case, ...],
     counts["labels_matched"] = matched
     counts["findings_posted"] = posted
     counts["findings_below"] = sum(s.below for s in scored)
+    counts["relevance_labels"] = sum(s.relevance_labels for s in scored)
+    counts["relevance_hits"] = sum(s.relevance_hits for s in scored)
 
     return Scorecard(
         cases=scores,
@@ -259,6 +284,8 @@ def score_corpus(cases: tuple[Case, ...],
         recall=_ratio(matched, labels),
         false_positive_rate=_ratio(fp, posted),
         recall_critical_high=_ratio(guard_matched, guard_total),
+        relevance_at_10=_ratio(counts["relevance_hits"],
+                               counts["relevance_labels"]),
         counts=counts,
     )
 
@@ -274,6 +301,7 @@ def scorecard_to_dict(card: Scorecard) -> dict:
             "recall": card.recall,
             "false_positive_rate": card.false_positive_rate,
             "recall_critical_high": card.recall_critical_high,
+            "relevance_at_10": card.relevance_at_10,
         },
         "counts": dict(sorted(card.counts.items())),
         "cases": [
@@ -287,6 +315,11 @@ def scorecard_to_dict(card: Scorecard) -> dict:
                 "below": s.below,
                 "true_positives": s.true_positives,
                 "false_positives": s.false_positives,
+                # null when the case declares no relevance labels (V4
+                # E02-T04) — absent data is never rendered as a ratio.
+                "relevance_at_10": (
+                    {"hits": s.relevance_hits, "labels": s.relevance_labels}
+                    if s.relevance_labels else None),
                 "violations": list(s.violations),
                 "failures": list(s.failures),
             }

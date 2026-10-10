@@ -34,6 +34,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ai_pr_reviewer.config import Config, load_config
+from ai_pr_reviewer.diff_parser import parse_unified_diff
 from ai_pr_reviewer.models import Finding, PRContext
 from ai_pr_reviewer.orchestrator import ReviewOrchestrator
 from ai_pr_reviewer.security import redact_secrets
@@ -73,6 +74,13 @@ class CaseRun:
     warnings: list[str] = field(default_factory=list)
     error: str | None = None
     skipped_reason: str | None = None
+    # V4 (E02-T04/E03-T04): for cases shipping a checkout/ fixture, the
+    # production selection contract's top-10 paths and the computed impact
+    # set; ``failures`` carries deterministic contract assertions (e.g. an
+    # expected impact set that no longer matches) into the scorer.
+    context_top10: list[str] = field(default_factory=list)
+    impact_paths: list[str] = field(default_factory=list)
+    failures: list[str] = field(default_factory=list)
 
 
 def _finding_dict(f: Finding, bucket: str) -> dict:
@@ -104,6 +112,62 @@ def _previous_finding(data: dict) -> Finding:
 
 def _redact_error(exc: Exception) -> str:
     return redact_secrets(f"{type(exc).__name__}: {exc}")[:_MAX_ERROR_CHARS]
+
+
+def _selection_over_fixture(case: Case, diff_text: str,
+                            workdir: Path) -> tuple[list[str], list[str],
+                                                    list[str]]:
+    """V4-E02-T04/E03-T04 — score the *production* selection and impact
+    code over a base-revision fixture checkout, fully offline.
+
+    The fixture is copied into ``workdir`` (never written inside the
+    corpus, so ``corpus_hash`` stays a pure function of committed files)
+    and marked with an empty ``.git`` directory — the index build reads
+    ``.git`` as *data* and never executes git, so the copy needs nothing
+    more. Returns ``(top10, impact_paths, failures)``; ``failures`` are
+    deterministic contract assertions the scorer folds into the case
+    verdict (an expected impact set is a golden regression, not a hint).
+    """
+    import shutil
+
+    from ai_pr_reviewer.impact import compute_impact
+    from ai_pr_reviewer.index import build_index
+    from ai_pr_reviewer.selection import select_context
+
+    fixture = workdir / f"{case.id}.checkout"
+    if fixture.exists():
+        shutil.rmtree(fixture)
+    shutil.copytree(case.checkout_dir, fixture)
+    (fixture / ".git").mkdir(exist_ok=True)   # availability marker only
+
+    changed = [fd.path for fd in parse_unified_diff(diff_text)]
+    index = build_index(str(fixture), expected_repo="", changed_paths=changed)
+    if index is None:
+        return [], [], ["fixture index was not built (availability check "
+                        "declined a committed fixture — fixture bug)"]
+
+    failures: list[str] = []
+    impact = compute_impact(index, changed)
+    impact_paths = list(impact.paths)
+    if set(impact_paths) != set(case.context_impact):
+        missing = sorted(set(case.context_impact) - set(impact_paths))
+        extra = sorted(set(impact_paths) - set(case.context_impact))
+        if missing:
+            failures.append(f"impact recall: expected but not found {missing}")
+        if extra:
+            failures.append(
+                f"impact precision: unexpected impact entries {extra}")
+
+    selection = select_context(index, changed, impact=impact)
+    if selection is None:
+        return [], impact_paths, failures + [
+            "selection returned None over a built fixture index"]
+    if selection.budget_state != "ok":
+        failures.append(f"selection budget_state="
+                        f"{selection.budget_state!r} on a tiny fixture "
+                        f"(expected 'ok')")
+    top10 = [f.path for f in selection.selected_files[:10]]
+    return top10, impact_paths, failures
 
 
 def _run_config_error_case(case: Case) -> CaseRun:
@@ -206,6 +270,13 @@ def run_case(case: Case, workdir: Path | str) -> CaseRun:
         # after a run, so this only matters for harness/fixture lifetimes.)
         gc.collect()
 
+    top10: list[str] = []
+    impact_paths: list[str] = []
+    selection_failures: list[str] = []
+    if case.checkout_dir is not None:
+        top10, impact_paths, selection_failures = _selection_over_fixture(
+            case, diff_text, workdir)
+
     return CaseRun(
         case.id, case.layer, "ran",
         engine=getattr(result, "engine", "") or "",
@@ -213,4 +284,7 @@ def run_case(case: Case, workdir: Path | str) -> CaseRun:
         below=[_finding_dict(f, "below_threshold")
                for f in result.below_threshold],
         warnings=list(result.warnings),
+        context_top10=top10,
+        impact_paths=impact_paths,
+        failures=selection_failures,
     )

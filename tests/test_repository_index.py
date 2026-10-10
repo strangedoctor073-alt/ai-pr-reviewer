@@ -610,11 +610,13 @@ def test_index_budgets_operate_beneath_the_outer_ceiling(tmp_path,
 
 
 def test_no_provider_reads_the_index(tmp_path):
-    """Pin for "no prompt change" (E01-T05): the AI providers never
-    reference ``repo_index`` — selection that consumes it is E02's
-    contract, not E01's."""
+    """Pin for V4-E02-T03: the AI providers never reference ``repo_index``
+    or ``context_selection`` — selection is pipeline metadata consumed in
+    ``context.py``; providers only ever see the already-fetched, redacted,
+    fenced ``repo_context`` entries it produced."""
     from ai_pr_reviewer.ai import claude, gemini, openai
 
     for module in (claude, openai, gemini):
         source = Path(module.__file__).read_text(encoding="utf-8")
         assert "repo_index" not in source, module.__name__
+        assert "context_selection" not in source, module.__name__

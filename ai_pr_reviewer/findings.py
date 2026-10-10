@@ -17,7 +17,12 @@ import re
 from dataclasses import replace
 from datetime import datetime, timezone
 
-from ai_pr_reviewer.models import Finding  # provided by models.py
+from ai_pr_reviewer.models import (  # provided by models.py
+    MAX_EVIDENCE_PER_FINDING,
+    MAX_PROVENANCE_SOURCES,
+    Finding,
+    ProvenanceSource,
+)
 
 _WHITESPACE_RE = re.compile(r"\s+")
 
@@ -54,6 +59,11 @@ def fingerprint_finding(finding: Finding) -> str:
     (64 bits) is short enough to be a friendly id in GitHub comments and
     dashboard URLs while keeping collision risk negligible at the scale of
     findings a single repo will ever accumulate.
+
+    V4-E05 (ADR-005): this v1 fingerprint remains the storage, lifecycle,
+    mute and GitHub-comment key indefinitely -- the layered occurrence key
+    below never replaces it. The hash inputs are frozen; changing them is
+    an identity-affecting decision requiring a new ADR.
     """
     basis = "|".join([
         finding.category or "",
@@ -63,35 +73,210 @@ def fingerprint_finding(finding: Finding) -> str:
     return hashlib.sha256(basis.encode("utf-8")).hexdigest()[:16]
 
 
+# ---------------------------------------------------------------------------
+# V4-E05 · layered identity (ADR-005, approved 2026-10-07)
+#
+# v1 (fingerprint_finding) stays the storage, lifecycle, mute and comment
+# key forever -- nothing here changes it. The occurrence key is a second,
+# *advisory* identity used only for cross-engine dedup/merge decisions.
+# It is computed, never persisted as an authority, and never a storage key.
+#
+# Occurrence-key formula (ADR-005): normalized_path + symbol + semantic
+# gist of the title, line-tolerant.
+#
+# Worked examples (same issue, different engines/wordings => same key):
+#   static: "Possible SQL injection in 'users' table"   @ db/queries.py
+#   ai:     'Possible SQL injection in "users" table'   @ db/queries.py
+#   -> v1 fingerprints DIFFER (quote characters survive v1 normalization),
+#      but the occurrence key strips quote style (keeping the literal) and
+#      anchors on the code-like token "SQL": identical keys => merged.
+#   Different issues (different file, symbol or gist) => different keys:
+#   "…in 'users' table" vs "…in 'orders' table" keep distinct gists.
+#
+# Failure modes (deliberate, documented):
+#   * No code-like symbol in the title => occurrence key degrades to ""
+#     and cross-engine merging is *refused* (v1-only dedup). A conservative
+#     miss beats a wrong merge: v1 identity is never destabilized.
+#   * Re-wording that changes the gist (not just phrasing) will not merge.
+#     That is the documented C4 limitation surface, honest by construction:
+#     we never claim fuzzy/semantic matching (principle: deterministic).
+#   * Across runs, the merged winner is the first occurrence in input
+#     order; a run-to-run engine switch can change which v1 fingerprint
+#     survives -- identical to today's single-engine behavior (each engine
+#     has its own v1 fingerprints anyway).
+# ---------------------------------------------------------------------------
+
+_IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_NUMBER_RE = re.compile(r"\b\d+\b")
+# A "code-like" token: snake_case, contains '_', or followed by '(' in the
+# original title -- cheap, deterministic heuristics for "this word names a
+# program entity" without a word list or a model.
+_CODEISH_RE = re.compile(
+    r"([A-Za-z_][A-Za-z0-9_]*(?:_[A-Za-z0-9_]+)+"   # snake_case
+    r"|[A-Za-z_][A-Za-z0-9_]*\()"                    # call-like
+)
+
+
+def _normalize_path(path: str) -> str:
+    """Path normalization for identity: separators only. Case is preserved
+    (POSIX paths are case-sensitive) and no basename munging -- the same
+    file must hash the same on every platform."""
+    return (path or "").replace("\\", "/").strip()
+
+
+def _title_gist(title: str) -> str:
+    """Semantic gist of a title: quote-style and numbers normalized away.
+
+    Quote *characters* are stripped while the literal content is kept:
+    engines describing one issue may quote it differently ("in 'users'
+    table" vs 'in "users" table') and must share a gist -- but two
+    genuinely different targets ("users" vs "orders") must NOT merge.
+    Standalone numbers collapse to ``<n>`` because incidental counts and
+    line references differ across engines ("at line 40" vs "at line 42").
+    """
+    t = _NUMBER_RE.sub("<n>", title or "")
+    t = t.lower()
+    t = re.sub(r"[^a-z0-9_<>.]+", " ", t)
+    return _WHITESPACE_RE.sub(" ", t).strip()
+
+
+def _title_symbol(title: str) -> str:
+    """Best-effort code-like symbol anchor from a title ("" when none).
+
+    Deterministic, no word list, no model: snake_case or call-like tokens
+    win first; otherwise the first token with an *internal* capital or
+    digit (SQL, API, findById, md5) reads as a program entity. A
+    sentence-initial capitalized word ("The logic ...") deliberately does
+    NOT qualify -- ordinary English must never anchor a merge.
+    """
+    m = _CODEISH_RE.search(title or "")
+    if m:
+        return m.group(1).rstrip("(").lower()
+    for tok in _IDENTIFIER_RE.findall(title or ""):
+        if any(c.isdigit() for c in tok[1:]) or any(c.isupper() for c in tok[1:]):
+            return tok.lower()
+    return ""
+
+
+def occurrence_key(finding: Finding) -> str:
+    """Advisory cross-engine identity (V4-E05, ADR-005) -- 16 hex chars.
+
+    Layered on top of :func:`fingerprint_finding`: v1 stays the storage,
+    lifecycle, mute and comment key; this key is used *only* by dedup to
+    merge two engines' renderings of one issue. Returns ``""`` when no
+    symbol anchor exists (see the failure-mode note above) -- callers must
+    treat "" as "no cross-engine identity", never as a merge group.
+    """
+    symbol = _title_symbol(finding.title)
+    gist = _title_gist(finding.title)
+    if not symbol:
+        return ""
+    basis = "|".join([_normalize_path(finding.file), symbol, gist])
+    return hashlib.sha256(basis.encode("utf-8")).hexdigest()[:16]
+
+
+def _provenance_sources(f: Finding) -> list[ProvenanceSource]:
+    """The effective provenance list of a finding: the explicit list when
+    present, else a single source synthesized from the scalar fields."""
+    if f.provenance_sources:
+        return list(f.provenance_sources)
+    if f.provenance_engine or f.provenance_model or f.provenance_origin:
+        return [ProvenanceSource(
+            engine=f.provenance_engine, model=f.provenance_model,
+            origin=f.provenance_origin, agent=f.provenance_agent)]
+    return []
+
+
+def _merge_duplicate(winner: Finding, loser: Finding,
+                     merged_fp: str | None = None) -> Finding:
+    """Fold ``loser`` into ``winner`` (V4-E04-T03 + V4-E05-T03).
+
+    Keeps the winner's identity and content untouched; merges what dedup
+    used to destroy: attribution (provenance sources, de-duplicated by
+    engine/model/origin/agent) and evidence records (de-duplicated by
+    kind+locator, bounded). When the merge crosses v1 fingerprints (the
+    cross-engine case), the loser's fingerprint is recorded on the winner
+    so the merge is auditable, never silent. Bounded on every list.
+    """
+    merged = winner
+    # --- attribution (fixes C3: "dedup destroys attribution") ---
+    sources = _provenance_sources(winner)
+    seen = {s.key() for s in sources}
+    for s in _provenance_sources(loser):
+        if s.key() not in seen:
+            sources.append(s)
+            seen.add(s.key())
+    # --- evidence ---
+    ev = list(winner.evidence)
+    ev_keys = {(e.kind, e.locator) for e in ev}
+    for e in loser.evidence:
+        if (e.kind, e.locator) not in ev_keys:
+            ev.append(e)
+            ev_keys.add((e.kind, e.locator))
+    # --- merge trail ---
+    trail = list(winner.merged_fingerprints)
+    for fp in ((merged_fp,) if merged_fp else ()) + loser.merged_fingerprints:
+        if fp and fp != fingerprint_finding(winner) and fp not in trail:
+            trail.append(fp)
+    return replace(
+        merged,
+        provenance_sources=tuple(sources[:MAX_PROVENANCE_SOURCES]),
+        evidence=tuple(ev[:MAX_EVIDENCE_PER_FINDING]),
+        merged_fingerprints=tuple(trail[:16]),
+    )
+
+
 def deduplicate(findings: list[Finding]) -> list[Finding]:
-    """Collapse findings that share a fingerprint, keeping the first
-    occurrence (in input order) of each one.
+    """Collapse duplicate findings, keeping the first occurrence (in input
+    order) of each one, and merging what duplicates carry (V4-E04-T03).
+
+    Two passes, both deterministic:
+
+    1. **v1 fingerprint pass** (unchanged identity): findings sharing a
+       ``fingerprint_finding`` collapse to the first occurrence; the loser's
+       provenance sources and evidence are merged into the winner instead of
+       being destroyed (C3 fix).
+    2. **occurrence-key pass** (V4-E05-T03, new): two findings with
+       *different* v1 fingerprints but the *same* :func:`occurrence_key`
+       are the same issue seen by two engines (C4 gap); the first wins, its
+       v1 fingerprint remains the storage/comment/mute key, and the loser's
+       fingerprint is recorded in ``merged_fingerprints``. Findings with no
+       symbol anchor (occurrence key ``""``) are never merged here -- a
+       conservative miss beats a wrong merge.
 
     Callers should pass findings ordered highest-severity/best-worded
-    first (e.g. Claude output before a weaker static-rule echo of the same
-    issue) so the surviving copy is the most useful one. This works across
-    batches and across providers being merged into one list, since it
-    operates purely on the fingerprint, not on where the finding came
-    from.
-
-    Known limitation, accepted for v2: fingerprinting is
-    title-based, so Claude's wording of an issue and the static analyzer's
-    wording of the *same* underlying issue will usually normalize to
-    different strings and therefore different fingerprints -- they will
-    NOT be deduplicated against each other. Solving that needs fuzzy /
-    semantic title matching, which is explicitly out of scope here; v2
-    only guarantees dedup for near-identical wording (e.g. exact repeats
-    across batches of the same engine).
+    first so the surviving copy (and surviving v1 fingerprint) is the most
+    useful one. Nothing else about identity changes: ``fingerprint_finding``
+    is byte-for-byte the v1 formula, and every v1 consumer (lifecycle,
+    mutes, comment sync) is untouched.
     """
-    seen: set[str] = set()
-    deduped: list[Finding] = []
+    order: list[str] = []
+    by_fp: dict[str, Finding] = {}
     for f in findings:
         fp = fingerprint_finding(f)
-        if fp in seen:
+        if fp in by_fp:
+            by_fp[fp] = _merge_duplicate(by_fp[fp], f)
+        else:
+            by_fp[fp] = f
+            order.append(fp)
+
+    # Pass 2: cross-engine occurrence merge. Iterate in the original
+    # (severity-ordered) winner order so the survivor is deterministic.
+    survivors: list[Finding] = []
+    by_occ: dict[str, int] = {}
+    for fp in order:
+        f = by_fp[fp]
+        occ = occurrence_key(f)
+        if not occ:
+            survivors.append(f)
             continue
-        seen.add(fp)
-        deduped.append(f)
-    return deduped
+        if occ in by_occ:
+            idx = by_occ[occ]
+            survivors[idx] = _merge_duplicate(survivors[idx], f, merged_fp=fp)
+        else:
+            by_occ[occ] = len(survivors)
+            survivors.append(f)
+    return survivors
 
 
 def apply_lifecycle(previous: list[Finding], current: list[Finding]) -> list[Finding]:

@@ -23,11 +23,13 @@ from dataclasses import dataclass, field
 from . import memory as memory_rules
 from .config import Config
 from .diff_parser import FileDiff
+from .impact import compute_impact                    # V4-E03
 from .index import IndexLimits, RepoIndex, build_index
 from .models import Finding, PRContext
 from .repo_context import RepoContextEntry, collect_repository_context
 from .rules import ReviewPolicy, load_project_rules
 from .security import redact_secrets
+from .selection import ContextSelection, select_context  # V4-E02 (ADR-017)
 from .storage import has_capability
 from .storage_schema import (CAP_LIST_REPO_MEMORY, CAP_PREVIOUS_FINDINGS,
                              CAP_REPO_MEMORY)
@@ -59,9 +61,16 @@ class ReviewContext:
     context_warnings: list[str] = field(default_factory=list)
     # V4-E01-T05: the ephemeral repository index for this run (files,
     # symbols, import graph). Built beneath the outer ``repo_context_chars``
-    # ceiling, never persisted, and deliberately NOT read by any provider in
-    # V4-E01 (prompt output is unchanged; E02 selects from it later).
+    # ceiling, never persisted, and deliberately NOT read by any provider --
+    # selection consumes it here (V4-E02) and the providers only ever see
+    # the already-fenced ``repo_context`` entries it produced.
     repo_index: RepoIndex | None = None
+    # V4-E02-T01 (ADR-017): the selection contract for this run -- which
+    # files were chosen for the prompt, why (closed reason set), and the
+    # budget state. Like ``repo_index`` it is pipeline metadata, never read
+    # directly by a provider; the fetched, redacted, fenced content lives in
+    # ``repo_context``.
+    context_selection: ContextSelection | None = None
 
 
 # --------------------------------------------------------------------------- ContextBudget
@@ -153,16 +162,52 @@ def _load_memory_entries(storage, repo: str, paths: list[str]) -> list[dict]:
 
 
 def _collect_repo_context(gh, pr: PRContext, files: list[FileDiff],
-                          cfg: Config) -> tuple[list[RepoContextEntry], list[str]]:
-    """Bounded repository context; never raises, never blocks a review."""
+                          cfg: Config,
+                          candidates=None) -> tuple[list[RepoContextEntry], list[str]]:
+    """Bounded repository context; never raises, never blocks a review.
+
+    ``candidates`` (V4-E02-T03) is the index-backed selection ordering when
+    one exists; ``None`` keeps the original diff-scoped ordering.
+    """
     if gh is None:
         return [], []
     try:
-        return collect_repository_context(gh, pr, files, cfg)
+        return collect_repository_context(gh, pr, files, cfg,
+                                          candidates=candidates)
     except Exception as exc:  # noqa: BLE001 — context is a bonus, not a dependency
         log.warning("repository context collection failed: %s", exc)
         return [], ["repository context unavailable "
                     f"({type(exc).__name__}); continuing the review without it"]
+
+
+def _select_repository_context(files: list[FileDiff], repo_index):
+    """V4-E02-T03/T04: rank *which* files reach the prompt, deterministically.
+
+    Returns ``(candidates, selection)``. When there is no index this returns
+    ``(None, None)`` so collection falls back to the original diff-scoped
+    ordering and review output stays byte-identical (ADR-017: "fall back to
+    today's behavior with a warning, never a crash").
+
+    Impact analysis (V4-E03) runs over the index here and folds into the
+    selection at a weaker rank, so blast-radius files are pulled in on
+    purpose rather than by luck. A selection failure degrades to no
+    selection (warning only) -- it never breaks a review.
+    """
+    if repo_index is None:
+        return None, None
+    try:
+        changed = [f.path for f in files]
+        impact = compute_impact(repo_index, changed)
+        selection = select_context(repo_index, changed, impact=impact)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("context selection failed: %s", exc)
+        return None, None
+    if selection is None or selection.is_empty:
+        return None, selection
+    # Only paths the index actually inventoried are fetched (never a raw
+    # PR-supplied string); reasons carry the ADR-017 closed set.
+    return [(f.path, f.relationship or f.reason)
+            for f in selection.selected_files], selection
 
 
 def _build_repo_index(pr: PRContext, files: list[FileDiff], cfg: Config,
@@ -250,10 +295,19 @@ def build_context(pr: PRContext, files: list[FileDiff], cfg: Config,
         if entry.get("note")
     ]
 
-    repo_entries, repo_warnings = _collect_repo_context(gh, pr, files, cfg)
+    repo_entries, repo_warnings = [], []
     # V4-E01-T05: the ephemeral index rides along on the context. It is
-    # never prompt-visible in E01 — this is the seam E02 selects from.
+    # built first so V4-E02 can select (rank) *which* files reach the
+    # prompt; with no index the selection is None and collection keeps the
+    # original diff-scoped ordering, byte-for-byte (ADR-017).
     repo_index = _build_repo_index(pr, files, cfg, project_rules)
+    try:
+        candidates, selection = _select_repository_context(files, repo_index)
+    except Exception as exc:  # noqa: BLE001 — selection is a bonus, never fatal
+        log.warning("context selection failed: %s", exc)
+        candidates, selection = None, None
+    repo_entries, repo_warnings = _collect_repo_context(gh, pr, files, cfg,
+                                                        candidates=candidates)
 
     focus_areas: list[str] = []
     for area in list(getattr(cfg, "focus_areas", None) or []) + list(project_rules.focus):
@@ -275,4 +329,5 @@ def build_context(pr: PRContext, files: list[FileDiff], cfg: Config,
         repo_context=repo_entries,
         context_warnings=repo_warnings,
         repo_index=repo_index,
+        context_selection=selection,
     )

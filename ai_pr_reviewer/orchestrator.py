@@ -24,7 +24,9 @@ from . import reporter
 from .config import Config, sev_rank
 from .diff_parser import FileDiff, parse_unified_diff
 from .github_client import GitHubClient, GitHubError
-from .models import Finding, PRContext, ReviewKey, ReviewResult, ReviewStats
+from .models import (LIFECYCLE_FIELDS as _MODEL_LIFECYCLE_FIELDS,  # models.py
+                     EvidenceRecord, Finding, PRContext,
+                     ProvenanceSource, ReviewKey, ReviewResult, ReviewStats)
 from .rules import DEFAULT_SEVERITY, load_project_rules
 from .storage import has_capability
 from .storage_schema import (CAP_DISMISSED_FINGERPRINTS,
@@ -40,10 +42,10 @@ from .telemetry import to_telemetry_row                 # V3-E02-T02/T04
 from .verification import verification_counts, verify_findings  # C4
 
 # Lifecycle fields persisted with each finding (Finding.to_dict() may or may
-# not emit them yet — see _finding_row).
-_LIFECYCLE_FIELDS = ("fingerprint", "state", "first_seen_sha", "last_seen_sha",
-                     "resolved_at", "github_comment_id",
-                     "verification_status", "verification_reason", "verified_at")
+# not emit them yet — see _finding_row). V4-E04: derived from the single
+# models.LIFECYCLE_FIELDS definition so the two can never drift apart again
+# (the old hardcoded copy was missing the provenance fields).
+_LIFECYCLE_FIELDS = _MODEL_LIFECYCLE_FIELDS
 
 log = logging.getLogger(__name__)
 
@@ -214,19 +216,14 @@ class ReviewOrchestrator:
         outcome = run_analysis(cfg, context, provider)
         warnings.extend(_scrub(w, cfg) for w in outcome.warnings)
 
-        # f. dedupe (before the cap, so duplicates can't eat the comment
-        #    budget), then anchor / threshold / cap
+        # f. provenance + evidence first (V4-E04-T03: attribution must be
+        #    recorded *before* dedup so merging two engines' renderings of
+        #    one issue keeps both attributions instead of destroying them),
+        #    then dedupe (before the cap, so duplicates can't eat the
+        #    comment budget), then anchor / threshold / cap.
+        _stamp_provenance(outcome.findings, outcome)
+        _attach_diff_evidence(outcome.findings, files)
         findings = deduplicate(outcome.findings)
-        # V4-E04: populate provenance on surviving findings (pipeline-owned,
-        # from AnalysisOutcome — never from model output).
-        _engine = getattr(outcome, "engine", "") or ""
-        _model = getattr(outcome, "model", "") or ""
-        _origin = "static" if _engine == "static" else "ai"
-        for f in findings:
-            f.provenance_engine = _engine or None
-            f.provenance_model = _model or None
-            f.provenance_agent = None  # V5+ specialist agents
-            f.provenance_origin = _origin
         # D4: ``max_comments`` is a *posting* limit only. ``reported`` is
         # every anchored finding this review found — the report, the health
         # score, the lifecycle and the verification must all see the full
@@ -526,3 +523,58 @@ def _finding_row(f: Finding) -> dict:
             value = getattr(f, key)
             row[key] = getattr(value, "value", value)
     return row
+
+
+def _stamp_provenance(findings: list[Finding], outcome) -> None:
+    """V4-E04: populate provenance on every finding *before* dedup.
+
+    Pipeline-owned, from AnalysisOutcome -- never from model output (these
+    fields are in LIFECYCLE_FIELDS, so from_untrusted_dict strips any
+    model-supplied value). Both the scalar fields (authoritative first
+    source, backward compatible) and the additive provenance_sources list
+    are set, so a later merge can preserve every engine's attribution.
+    """
+    engine = getattr(outcome, "engine", "") or ""
+    model = getattr(outcome, "model", "") or ""
+    origin = "static" if engine == "static" else "ai"
+    source = ProvenanceSource(engine=engine or None, model=model or None,
+                              origin=origin, agent=None)
+    for f in findings:
+        f.provenance_engine = engine or None
+        f.provenance_model = model or None
+        f.provenance_agent = None  # V5+ specialist agents
+        f.provenance_origin = origin
+        if not f.provenance_sources:
+            f.provenance_sources = (source,)
+
+
+def _attach_diff_evidence(findings: list[Finding],
+                          files: list[FileDiff]) -> None:
+    """V4-E04: attach diff-hunk evidence to findings that don't already
+    carry records (the static engine attaches its own rule_ref/diff_hunk
+    evidence at the engine, V4-E04-T05).
+
+    The record quotes the exact added line the finding is anchored to --
+    the machine-checkable "here is the code we flagged" backing ADR-004's
+    "no unsupported certainty". Construction goes through
+    EvidenceRecord.create, so quoted code is redacted and bounded inside
+    the write path, not at callers. Unanchored (file-level) findings
+    honestly carry no evidence rather than a fabricated one.
+    """
+    by_path = {fd.path: fd for fd in files if not fd.is_binary}
+    for f in findings:
+        if f.evidence or f.line is None:
+            continue
+        fd = by_path.get(f.file)
+        if fd is None:
+            continue
+        for line_no, text in fd.added_lines():
+            if line_no == f.line:
+                end = f.end_line or f.line
+                f.evidence = (EvidenceRecord.create(
+                    kind="diff_hunk",
+                    locator=f"{fd.path}:{f.line}-{end}",
+                    summary=text,
+                    check_type=f.category,
+                ),)
+                break

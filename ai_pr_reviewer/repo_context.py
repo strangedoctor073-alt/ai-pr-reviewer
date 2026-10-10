@@ -220,12 +220,21 @@ def select_candidates(files: list[FileDiff]) -> list[tuple[str, str]]:
 
 def collect_repository_context(gh, pr: PRContext, files: list[FileDiff],
                                cfg: Config | None = None,
-                               budget: int | None = None) -> tuple[list[RepoContextEntry], list[str]]:
+                               budget: int | None = None,
+                               candidates: list[tuple[str, str]] | None = None
+                               ) -> tuple[list[RepoContextEntry], list[str]]:
     """Fetch the bounded repository context for one review.
 
     Returns ``(entries, warnings)``. Never raises: a failed GitHub call
     yields whatever was collected so far plus a warning, and a review
     without repository context is still a review.
+
+    ``candidates`` (V4-E02-T03) optionally overrides the ``(path, reason)``
+    list -- the context engine passes its index-backed ``ContextSelection``
+    here so retrieval is relevance-ranked instead of diff-scoped. When it is
+    ``None`` (every pre-V4 caller) the original ``select_candidates``
+    ordering is used, byte-for-byte. The caller is responsible for passing
+    only paths it derived from trusted index data (never PR content).
     """
     if budget is None:
         budget = int(getattr(cfg, "repo_context_chars", DEFAULT_REPO_CONTEXT_CHARS)
@@ -236,7 +245,8 @@ def collect_repository_context(gh, pr: PRContext, files: list[FileDiff],
         return [], []      # client without the contents API: nothing to read
 
     ref = (getattr(pr, "base_sha", "") or getattr(pr, "head_sha", "") or "").strip()
-    candidates = select_candidates(files)
+    if candidates is None:
+        candidates = select_candidates(files)
     if not candidates:
         return [], []
 

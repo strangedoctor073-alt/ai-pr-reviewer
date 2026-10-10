@@ -96,6 +96,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"score: precision={_fmt(card.precision)} recall={_fmt(card.recall)} "
           f"fp_rate={_fmt(card.false_positive_rate)} "
           f"recall_critical_high={_fmt(card.recall_critical_high)} "
+          f"relevance@10={_fmt(card.relevance_at_10)} "
           f"labels={card.counts['labels_total']}/"
           f"{card.counts['labels_matched']} "
           f"posted={card.counts['findings_posted']}")

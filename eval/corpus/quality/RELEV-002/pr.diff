@@ -1,0 +1,20 @@
+diff --git a/lib/core/parser.py b/lib/core/parser.py
+--- a/lib/core/parser.py
++++ b/lib/core/parser.py
+@@ -1,5 +1,6 @@
+ import json
+
+
+ def parse(raw):
++    """Parse a JSON document into a dict."""
+     return json.loads(raw)
+diff --git a/tests/test_parser.py b/tests/test_parser.py
+--- a/tests/test_parser.py
++++ b/tests/test_parser.py
+@@ -1,5 +1,6 @@
+ from lib.core.parser import parse
+
+
+ def test_parse():
+     assert parse("{}") == {}
++    assert parse('{"a": 1}') == {"a": 1}

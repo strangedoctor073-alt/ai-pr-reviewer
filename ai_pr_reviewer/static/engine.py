@@ -25,7 +25,7 @@ import re
 from typing import TYPE_CHECKING, Any
 
 from ..diff_parser import FileDiff
-from ..models import SEVERITY_ORDER, Finding
+from ..models import MAX_EVIDENCE_PER_FINDING, SEVERITY_ORDER, EvidenceRecord, Finding
 from ..security import scan_prompt_injection
 from . import javascript_rules, python_rules, security_rules, shell_rules, test_rules
 from .registry import RuleRegistry, lang_of
@@ -70,7 +70,47 @@ class StaticEngine:
         for diff_rule in self.registry.diff_rules:
             findings.extend(diff_rule(files))
         findings.sort(key=lambda f: -SEVERITY_ORDER[f.severity])
+        self._attach_evidence(findings, files)
         return findings
+
+    def _attach_evidence(self, findings: list[Finding],
+                         files: list[FileDiff]) -> None:
+        """V4-E04-T05: normalize every static finding onto the embedded
+        evidence contract (ADR-004) -- one chokepoint for line, file and
+        diff rules, at the engine, before anything is merged or posted.
+
+        Each finding gets a ``rule_ref`` record (which rule fired, with the
+        rule id as a resolvable locator) and -- when the finding is anchored
+        to an added line -- a ``diff_hunk`` record quoting that exact line.
+        Construction goes through ``EvidenceRecord.create``, so quoted code
+        is redacted and bounded here, inside the write path (E04-T05), not
+        at callers. Findings from rules that supply neither a rule id nor an
+        anchor simply carry no evidence -- absence is honest, never faked.
+        """
+        by_path = {fd.path: fd for fd in files if not fd.is_binary}
+        for f in findings:
+            records: list[EvidenceRecord] = []
+            if f.rule_id:
+                records.append(EvidenceRecord.create(
+                    kind="rule_ref",
+                    locator=f"rule:{f.rule_id}",
+                    summary=f"{f.rule_id}: {f.title}",
+                    check_type=f.category,
+                ))
+            fd = by_path.get(f.file)
+            if fd is not None and f.line is not None:
+                for line_no, text in fd.added_lines():
+                    if line_no == f.line:
+                        end = f.end_line or f.line
+                        records.append(EvidenceRecord.create(
+                            kind="diff_hunk",
+                            locator=f"{fd.path}:{f.line}-{end}",
+                            summary=text,
+                            check_type=f.category,
+                        ))
+                        break
+            if records:
+                f.evidence = tuple(records[:MAX_EVIDENCE_PER_FINDING])
 
     def _run_line_rules(self, fd: FileDiff) -> list[Finding]:
         lang = lang_of(fd.path)

@@ -106,10 +106,12 @@ class TestLoaderSchema:
         # Layer order follows VALID_LAYERS, ids sorted within a layer.
         assert [c.id for c in cases] == [
             "DEFECT-D2-01", "DEFECT-D3-01", "DEFECT-D4-01", "DEFECT-D5-01",
-            "DEFECT-D6-01", "GOLDEN-SEC-001", "FPCLEAN-001", "INJ-001"]
+            "DEFECT-D6-01", "GOLDEN-SEC-001", "FPCLEAN-001", "INJ-001",
+            "RELEV-001", "RELEV-002"]
         assert [c.layer for c in cases] == [
             "regression", "regression", "regression", "regression",
-            "regression", "regression", "false-positive", "injection"]
+            "regression", "regression", "false-positive", "injection",
+            "quality", "quality"]
         assert all(c.provenance in ("hand-authored", "synthetic")
                    for c in cases)
         assert all(c.engine_matrix == ("static",) for c in cases)
@@ -323,8 +325,10 @@ class TestCliOneCommand:
         assert "injection/INJ-001" in proc.stdout
         assert "regression/DEFECT-D2-01" in proc.stdout
         assert "regression/DEFECT-D6-01" in proc.stdout
+        assert "quality/RELEV-001" in proc.stdout
+        assert "quality/RELEV-002" in proc.stdout
         assert "engine=static" in proc.stdout
-        assert "cases=8 ran=8 errors=0" in proc.stdout
+        assert "cases=10 ran=10 errors=0" in proc.stdout
 
     def test_cli_runs_with_credentials_stripped_from_the_environment(self):
         proc = self._run(env=_offline_env())
@@ -575,9 +579,82 @@ class TestMetricMath:
     def test_metric_definitions_are_documented_in_code(self):
         doc = __import__("eval.harness.score", fromlist=["x"]).__doc__
         for name in ("precision", "recall", "false_positive_rate",
-                     "recall_critical_high"):
+                     "recall_critical_high", "relevance_at_10"):
             assert name in doc
         assert "Null" in doc      # zero-denominator honesty is written down
+
+
+# ============================================ V4 (E02-T04/E03-T04) — relevance
+class TestRelevanceAt10:
+    """relevance_at_10: labeled relevant files inside the selection top-10."""
+
+    def _labeled(self, labels, top10, *, case_id="REL-1"):
+        case = Case(id=case_id, layer="regression", title="unit case",
+                    provenance="hand-authored", diff_path=Path("pr.diff"),
+                    expect=Expect(findings=()), case_dir=Path("."),
+                    context_relevant=tuple(labels))
+        run = _run(findings=[], below=[], context_top10=list(top10))
+        return case, run
+
+    def test_hits_are_micro_averaged_over_labeled_cases(self):
+        case_a, run_a = self._labeled(("app/api.py", "tests/test_api.py"),
+                                      ["app/api.py", "src/other.py"],
+                                      case_id="A")
+        case_b, run_b = self._labeled(("lib/parser.py",),
+                                      ["lib/parser.py"], case_id="B")
+        card = score_corpus((case_a, case_b), [run_a, run_b])
+        # hits 1 + 1 over labels 2 + 1 -> 2/3, not a mean of ratios
+        assert card.relevance_at_10 == pytest.approx(2 / 3)
+        assert card.counts["relevance_labels"] == 3
+        assert card.counts["relevance_hits"] == 2
+
+    def test_null_when_no_case_declares_relevance_labels(self):
+        case = _case(Expect(findings=()))
+        card = score_corpus((case,), [_run(findings=[], below=[])])
+        assert card.relevance_at_10 is None       # no data, never 0.0
+        assert scorecard_to_dict(card)["metrics"]["relevance_at_10"] is None
+
+    def test_per_case_entry_is_null_without_labels_and_shaped_with(self):
+        labeled, run_labeled = self._labeled(("a.py", "b.py"),
+                                             ["a.py", "b.py"])
+        plain = _case(Expect(findings=()), case_id="PLAIN")
+        data = scorecard_to_dict(score_corpus(
+            (labeled, plain), [run_labeled, _run(findings=[], below=[])]))
+        entries = {c["id"]: c["relevance_at_10"] for c in data["cases"]}
+        assert entries["REL-1"] == {"hits": 2, "labels": 2}
+        assert entries["PLAIN"] is None
+
+    def test_only_selection_top10_counts_not_the_whole_selection(self):
+        # 11 labeled files, only 10 can fit in the top-10 by definition
+        labels = tuple(f"pkg/file{i}.py" for i in range(11))
+        top10 = list(labels[:10]) + ["unrelated.py"]
+        case, run = self._labeled(labels, top10)
+        card = score_corpus((case,), [run])
+        assert card.relevance_at_10 == pytest.approx(10 / 11)
+
+    def test_runner_failures_are_folded_into_the_case_verdict(self):
+        case = _case(Expect(findings=()))
+        bad_run = _run(findings=[], below=[],
+                       failures=["impact recall: expected but not found "
+                                 "['app/dependents.py']"])
+        score = score_case(case, bad_run)
+        assert score.status == "fail"
+        assert any("impact recall" in f for f in score.failures)
+        # and the gate sees it through counts.failed > 0
+        card = score_corpus((case,), [bad_run])
+        assert card.counts["failed"] == 1
+
+    def test_real_relevance_cases_score_full_hits(self):
+        cases = load_corpus(CORPUS, ["quality"])
+        assert [c.id for c in cases] == ["RELEV-001", "RELEV-002"]
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = [run_case(c, Path(tmp) / c.id) for c in cases]
+        for run in runs:
+            assert run.failures == []            # impact sets matched
+        card = score_corpus(cases, runs)
+        assert card.relevance_at_10 == 1.0
+        assert card.precision == 1.0
 
 
 # ==================================================== T02 — determinism
@@ -613,7 +690,8 @@ class TestDeterminism:
         assert set(data) == {"schema_version", "metrics", "counts", "cases"}
         assert set(data["metrics"]) == {"precision", "recall",
                                         "false_positive_rate",
-                                        "recall_critical_high"}
+                                        "recall_critical_high",
+                                        "relevance_at_10"}
         assert [c["id"] for c in data["cases"]] == \
             [c.id for c in cases]
 
@@ -728,6 +806,45 @@ class TestGateLogic:
         assert not result.ok
         assert any("no data" in f for f in result.failures)
 
+    # ------------------------------------- V4 release floors (E11-T02/T03)
+    def test_precision_floor_breach_fails_even_at_the_baseline(self):
+        # a moved baseline cannot normalize a floor breach: precision at
+        # 0.88 (below the V4 floor of 0.90) fails even when current ==
+        # baseline, so no --update-baseline run can bless it.
+        metrics = {"precision": 0.88, "recall": 1.0,
+                   "false_positive_rate": 0.12, "recall_critical_high": 1.0,
+                   "relevance_at_10": 1.0}
+        current, baseline = _baseline(metrics)     # baseline == current
+        result = check_gate(current, baseline, "h" * 64)
+        assert not result.ok
+        assert any("precision" in f and "floor" in f
+                   for f in result.failures), result.failures
+
+    def test_relevance_floor_breach_fails(self):
+        metrics = {"precision": 1.0, "recall": 1.0,
+                   "false_positive_rate": 0.0, "recall_critical_high": 1.0,
+                   "relevance_at_10": 0.5}
+        current, baseline = _baseline(metrics)
+        result = check_gate(current, baseline, "h" * 64)
+        assert not result.ok
+        assert any("relevance_at_10" in f and "floor" in f
+                   for f in result.failures), result.failures
+
+    def test_floors_hold_exactly_at_the_boundary(self):
+        metrics = {"precision": 0.90, "recall": 1.0,
+                   "false_positive_rate": 0.10, "recall_critical_high": 1.0,
+                   "relevance_at_10": 0.70}
+        current, baseline = _baseline(metrics)
+        assert check_gate(current, baseline, "h" * 64).ok
+
+    def test_floor_is_skipped_when_the_metric_has_no_data(self):
+        # a corpus with no relevance labels yet -> null -> nothing to hold
+        metrics = {"precision": 1.0, "recall": 1.0,
+                   "false_positive_rate": 0.0, "recall_critical_high": 1.0,
+                   "relevance_at_10": None}
+        current, baseline = _baseline(metrics)
+        assert check_gate(current, baseline, "h" * 64).ok
+
     def test_corpus_drift_fails_even_when_every_metric_is_identical(self):
         current, baseline = _baseline(
             {"precision": 1.0, "recall": 1.0,
@@ -770,7 +887,8 @@ class TestBaselineFile:
         # thresholds are documented in the file itself (proposed, strict)
         assert baseline["thresholds"] == {
             "precision": 0.0, "recall": 0.0,
-            "recall_critical_high": 0.0, "false_positive_rate": 0.0}
+            "recall_critical_high": 0.0, "false_positive_rate": 0.0,
+            "relevance_at_10": 0.0}
         assert baseline["corpus_hash"] == corpus_hash(CORPUS)
         # not stale: matches a fresh evaluation of today's corpus
         cases = load_corpus(CORPUS)
@@ -1132,12 +1250,12 @@ class TestJsonReport:
             assert re.fullmatch(r"[0-9a-f]{40}", run["git_commit"])
         assert isinstance(run["git_dirty"], (bool, type(None)))
         assert run["corpus_hash"] == corpus_hash(CORPUS)
-        assert run["case_count"] == 8                # case count
+        assert run["case_count"] == 10               # case count
 
         scorecard = report["scorecard"]               # score + per-case
         assert scorecard["metrics"]["precision"] == 1.0
         assert scorecard["metrics"]["recall"] == 1.0
-        assert scorecard["counts"]["cases"] == 8
+        assert scorecard["counts"]["cases"] == 10
         assert [c["id"] for c in scorecard["cases"]] == \
             [c.id for c in load_corpus(CORPUS)]
         assert all(c["status"] == "pass"

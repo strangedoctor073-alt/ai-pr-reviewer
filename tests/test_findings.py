@@ -13,7 +13,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from ai_pr_reviewer.findings import (apply_lifecycle, deduplicate,
-                                      fingerprint_finding, mark_dismissed)
+                                     fingerprint_finding, mark_dismissed,
+                                     occurrence_key)
 from ai_pr_reviewer.models import Finding
 
 
@@ -194,3 +195,92 @@ def test_mark_dismissed_never_rewrites_a_resolved_finding():
 
     assert by_file["payments.py"].state == "resolved"   # untouched
     assert by_file["refunds.py"].state == "muted"
+
+
+# ---------------------------------------------------------------------------
+# V4-E05-T04 · layered-identity continuity (ADR-005)
+#
+# v1 fingerprints are the storage/lifecycle/mute/comment key forever; the
+# occurrence key is additive. These tests pin the continuity guarantees:
+# the v1 formula is frozen, the occurrence key is churn-tolerant, and every
+# v1 consumer keeps working across a cross-engine merge.
+# ---------------------------------------------------------------------------
+
+def _v4_finding(file="app/payments.py", line=10, title="Possible SQL injection in 'users' table",
+                category="security", severity="high"):
+    return Finding(file=file, line=line, title=title, category=category,
+                   severity=severity)
+
+
+def test_v1_fingerprint_formula_is_frozen():
+    """The v1 hash inputs are an identity-affecting contract (ADR-005):
+    changing them orphans every stored row, mute and comment binding."""
+    assert fingerprint_finding(_v4_finding()) == "0dc303916d0ea3ea"
+
+
+def test_v1_fingerprint_survives_line_churn():
+    """'line 42 moved to line 48' must hash identically."""
+    a = _v4_finding(line=42)
+    b = _v4_finding(line=48)
+    assert fingerprint_finding(a) == fingerprint_finding(b)
+
+
+def test_occurrence_key_is_line_tolerant_and_quote_tolerant():
+    """The occurrence key abstracts literals and ignores lines, so two
+    engines' renderings of one issue share a key while their v1
+    fingerprints legitimately differ (the C4 gap it exists to close)."""
+    a = _v4_finding(title="Possible SQL injection in 'users' table")
+    b = _v4_finding(title='Possible SQL injection in "users" table', line=99)
+    assert fingerprint_finding(a) != fingerprint_finding(b)
+    assert occurrence_key(a) == occurrence_key(b) != ""
+
+
+def test_occurrence_key_differs_for_different_issues():
+    a = _v4_finding(title="Possible SQL injection in 'users' table")
+    b = _v4_finding(title="Possible SQL injection in 'orders' table")
+    # Same file + same symbol; the gist still separates the targets.
+    assert occurrence_key(a) != occurrence_key(b)
+
+
+def test_merged_finding_keeps_full_lifecycle_continuity():
+    """E05-T04: after a cross-engine merge, the survivor's v1 fingerprint
+    drives lifecycle, mutes and resolution exactly as before."""
+    from ai_pr_reviewer.models import ProvenanceSource
+
+    ai = _v4_finding()
+    ai.provenance_engine, ai.provenance_origin = "claude", "ai"
+    ai.provenance_sources = (ProvenanceSource(
+        engine="claude", model="m1", origin="ai"),)
+    static = _v4_finding(title='Possible SQL injection in "users" table')
+    static.provenance_engine, static.provenance_origin = "static", "static"
+    static.provenance_sources = (ProvenanceSource(
+        engine="static", model="static-rules-v1", origin="static"),)
+
+    merged = deduplicate([ai, static])
+    assert len(merged) == 1
+    survivor = merged[0]
+    # The survivor's identity is the AI finding's v1 fingerprint; a stored
+    # mute row keyed by it still applies, and lifecycle still resolves it.
+    fp = fingerprint_finding(survivor)
+    assert fp == fingerprint_finding(ai)
+    muted = mark_dismissed([survivor], {fp})
+    assert muted[0].state == "muted"
+    prev = [Finding.from_dict({**survivor.to_dict(), "state": "resolved"})]
+    reopened = apply_lifecycle(prev, [survivor])
+    assert {f.state for f in reopened} == {"reopened"}
+
+
+def test_merged_finding_carries_both_attributions_into_report_rows():
+    """The merge trail is auditable in the serialized report row."""
+    from ai_pr_reviewer.models import ProvenanceSource
+
+    a = _v4_finding()
+    a.provenance_sources = (ProvenanceSource(engine="claude", model="m1",
+                                             origin="ai"),)
+    b = _v4_finding(title='Possible SQL injection in "users" table')
+    b.provenance_sources = (ProvenanceSource(engine="static",
+                                             model="static-rules-v1",
+                                             origin="static"),)
+    row = deduplicate([a, b])[0].to_dict()
+    assert {s["engine"] for s in row["provenance_sources"]} == {"claude", "static"}
+    assert row["merged_fingerprints"] == [fingerprint_finding(b)]
