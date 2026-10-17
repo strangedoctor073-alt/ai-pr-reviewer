@@ -4,7 +4,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import Any, Callable
 
 from .security import redact_secrets
 from .storage_schema import format_review_id
@@ -50,6 +50,15 @@ VALID_CATEGORIES = {
     "bug", "security", "logic", "error-handling", "performance",
     "race-condition", "resource-leak", "style", "maintainability", "testing",
 }
+
+# V3 field contract for Finding.confidence (the dataclass comment and every
+# provider prompt document exactly these): a closed low|medium|high set,
+# validated at the deserialization boundary like severity and category.
+VALID_CONFIDENCES = ("low", "medium", "high")
+DEFAULT_CONFIDENCE = "medium"
+# rule_id is a short machine identifier ("SEC001", "AST004"); bound the
+# length so a tampered row or model output cannot inflate report rows.
+MAX_RULE_ID_CHARS = 200
 
 
 class ReviewState(str, Enum):
@@ -135,17 +144,30 @@ class EvidenceRecord:
         locator: str,
         summary: str,
         check_type: str | None = None,
+        scrub: Callable[[str], str] | None = None,
     ) -> "EvidenceRecord":
         """Validated, redacted, bounded constructor -- the only sanctioned
-        way pipeline code creates evidence."""
+        way pipeline code creates evidence.
+
+        ``scrub`` (V4-E08-T05 follow-up) layers a caller-supplied redaction
+        policy — the orchestrator passes its configured-credential scrub so
+        evidence quoting a diff line can never carry THIS run's credentials.
+        It applies after the built-in pattern redaction and *before* the
+        bounds and the content hash, so the hash always commits to the final
+        stored text: integrity semantics are unchanged.
+        """
         k = str(_enum_value(kind)).strip().lower()
         if k not in EVIDENCE_KINDS:
             raise ValueError(
                 f"unknown evidence kind {kind!r}; allowed: {EVIDENCE_KINDS}")
-        loc = redact_secrets(str(locator))[:MAX_EVIDENCE_LOCATOR_CHARS].strip()
+        loc = redact_secrets(str(locator))
+        text = redact_secrets(str(summary))
+        if scrub is not None:
+            loc, text = scrub(loc), scrub(text)
+        loc = loc[:MAX_EVIDENCE_LOCATOR_CHARS].strip()
         if not loc:
             raise ValueError("evidence locator must be non-empty")
-        text = redact_secrets(str(summary))[:MAX_EVIDENCE_SUMMARY_CHARS]
+        text = text[:MAX_EVIDENCE_SUMMARY_CHARS]
         digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
         return cls(kind=k, locator=loc, summary=text, content_hash=digest,
                    check_type=_opt_str(check_type))
@@ -169,22 +191,31 @@ class EvidenceRecord:
     def from_dict(cls, d: dict[str, Any]) -> "EvidenceRecord | None":
         """Lenient reader for data we wrote ourselves (storage/report
         round-trips). Never raises: malformed entries return None so a bad
-        row degrades instead of crashing a review. Summary is re-redacted
-        (idempotent defense-in-depth); the stored hash is preserved so
-        tampering surfaces via ``integrity_ok`` instead of being papered
-        over."""
+        row degrades instead of crashing a review. Summary *and* locator
+        are re-redacted (idempotent defense-in-depth, V4-E08-T05) and an
+        unsupported kind is rejected (the kind set is a closed contract,
+        exactly like ``create`` enforces it), so a tampered row cannot
+        smuggle credential text or a forged kind past the write path. The
+        stored hash is preserved so tampering surfaces via
+        ``integrity_ok`` instead of being papered over."""
         if not isinstance(d, dict):
             return None
         kind = _opt_str(d.get("kind"))
         locator = _opt_str(d.get("locator"))
         if kind is None or locator is None:
             return None
+        kind = str(_enum_value(kind)).strip().lower()
+        if kind not in EVIDENCE_KINDS:
+            return None
         summary = redact_secrets(str(d.get("summary") or ""))
+        locator = redact_secrets(locator)[:MAX_EVIDENCE_LOCATOR_CHARS].strip()
+        if not locator:
+            return None
         digest = _opt_str(d.get("content_hash")) or hashlib.sha256(
             summary.encode("utf-8")).hexdigest()[:16]
         return cls(
             kind=kind,
-            locator=locator[:MAX_EVIDENCE_LOCATOR_CHARS],
+            locator=locator,
             summary=summary[:MAX_EVIDENCE_SUMMARY_CHARS],
             content_hash=digest,
             check_type=_opt_str(d.get("check_type")),
@@ -237,7 +268,12 @@ def _evidence_from_any(v: Any) -> tuple[EvidenceRecord, ...]:
 
 
 def _sources_from_any(v: Any) -> tuple[ProvenanceSource, ...]:
-    """Lenient parse of a provenance-sources list (report/storage input)."""
+    """Lenient parse of a provenance-sources list (report/storage input).
+
+    Bounded like every other embedded list: capped at
+    ``MAX_PROVENANCE_SOURCES`` (V4-E08-T05, same bound the merge path
+    enforces) so a tampered row cannot flood a report or a prompt.
+    """
     if not isinstance(v, (list, tuple)):
         return ()
     out: list[ProvenanceSource] = []
@@ -245,7 +281,7 @@ def _sources_from_any(v: Any) -> tuple[ProvenanceSource, ...]:
         rec = ProvenanceSource.from_dict(item) if isinstance(item, dict) else None
         if rec is not None:
             out.append(rec)
-    return tuple(out)
+    return tuple(out[:MAX_PROVENANCE_SOURCES])
 
 
 def _str_tuple(v: Any) -> tuple[str, ...]:
@@ -279,6 +315,20 @@ def _normalize_state(v: Any) -> str:
     """Coerce a stored/incoming finding state to a valid value ("new" if unknown)."""
     s = str(_enum_value(v)).strip().lower() if v is not None else ""
     return s if s in VALID_FINDING_STATES else FindingState.NEW.value
+
+
+def _opt_rule_id(v: Any) -> str | None:
+    """Coerce an incoming ``rule_id`` to the V3 contract (str | None).
+
+    Model output and tampered storage rows are attacker-steerable: strings
+    are stripped and bounded, plain JSON numbers become their decimal
+    string, and anything else (nested objects/arrays, booleans) is dropped
+    to None rather than stringified into a report row.
+    """
+    if v is None or isinstance(v, (bool, dict, list, tuple, set)):
+        return None
+    s = str(v).strip()[:MAX_RULE_ID_CHARS]
+    return s or None
 
 
 @dataclass
@@ -358,6 +408,31 @@ class Finding:
             "merged_fingerprints": list(self.merged_fingerprints),
         }
 
+    def redact_text(self, scrub=None) -> None:
+        """V4-E08-T05: redact credential-looking text in the finding's
+        user-visible fields, in place.
+
+        Field-level half of the output redaction chokepoint: the
+        orchestrator calls this at the single point where engine output
+        crosses into the pipeline, so every sink that later reads
+        ``title`` / ``explanation`` / ``suggestion`` -- inline comment
+        bodies, the markdown summary comment, JSON/markdown report
+        artifacts, GitHub step summaries, dashboard uploads and persisted
+        finding rows -- consumes already-redacted fields instead of each
+        sink re-implementing the policy. ``scrub`` lets the caller layer a
+        stronger replacement (the orchestrator adds exact
+        configured-credential removal on top of ``redact_secrets``).
+        Idempotent, never raises, and only rewrites *text values* -- no
+        schema or field-type change.
+        """
+        fn = scrub if scrub is not None else redact_secrets
+        if isinstance(self.title, str):
+            self.title = fn(self.title)
+        if isinstance(self.explanation, str):
+            self.explanation = fn(self.explanation)
+        if isinstance(self.suggestion, str):
+            self.suggestion = fn(self.suggestion)
+
     @classmethod
     def from_untrusted_dict(cls, d: dict[str, Any]) -> "Finding":
         """Like :meth:`from_dict`, but discards pipeline-owned lifecycle fields.
@@ -371,20 +446,38 @@ class Finding:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "Finding":
+        """Lenient reader for data we wrote ourselves (storage, dashboard
+        payloads) and, via :meth:`from_untrusted_dict`, for model output.
+
+        Lenient: malformed values degrade to defaults, never raise — a bad
+        row must not lose a review. Neutral with respect to redaction and
+        lifecycle: those belong to the output chokepoint and the load
+        boundaries, not here. The enum-shaped fields ARE validated here
+        (severity, category, confidence) because they are rendered and
+        serialized verbatim and both model output and tampered rows are
+        attacker-steerable; ``suggestion``/``rule_id`` are coerced to the
+        frozen V3 field types (str|None) so nested junk can neither
+        smuggle text past redact_text nor violate the report contract.
+        """
         sev = str(d.get("severity", "medium")).lower()
+        cat = str(d.get("category", "bug")).lower()
+        conf = str(d.get("confidence", DEFAULT_CONFIDENCE)).lower()
         comment_id = d.get("github_comment_id")
         vstatus = str(d.get("verification_status") or "").strip().lower()
+        suggestion = d.get("suggestion")
+        if suggestion is not None and not isinstance(suggestion, str):
+            suggestion = None
         return cls(
             file=str(d.get("file", "")),
             line=int(d["line"]) if d.get("line") is not None else None,
             end_line=int(d["end_line"]) if d.get("end_line") is not None else None,
             severity=sev if sev in SEVERITY_ORDER else "medium",
-            category=str(d.get("category", "bug")).lower(),
+            category=cat if cat in VALID_CATEGORIES else "bug",
             title=str(d.get("title", "Issue")).strip() or "Issue",
             explanation=str(d.get("explanation", "")).strip(),
-            suggestion=d.get("suggestion"),
-            confidence=str(d.get("confidence", "medium")).lower(),
-            rule_id=d.get("rule_id"),
+            suggestion=suggestion,
+            confidence=conf if conf in VALID_CONFIDENCES else DEFAULT_CONFIDENCE,
+            rule_id=_opt_rule_id(d.get("rule_id")),
             fingerprint=_opt_str(d.get("fingerprint")),
             state=_normalize_state(d.get("state")),
             first_seen_sha=_opt_str(d.get("first_seen_sha")),

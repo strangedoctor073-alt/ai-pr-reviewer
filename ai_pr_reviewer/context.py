@@ -28,7 +28,7 @@ from .index import IndexLimits, RepoIndex, build_index
 from .models import Finding, PRContext
 from .repo_context import RepoContextEntry, collect_repository_context
 from .rules import ReviewPolicy, load_project_rules
-from .security import redact_secrets
+from .security import redact_secrets, scrub_with_config
 from .selection import ContextSelection, select_context  # V4-E02 (ADR-017)
 from .storage import has_capability
 from .storage_schema import (CAP_LIST_REPO_MEMORY, CAP_PREVIOUS_FINDINGS,
@@ -180,6 +180,30 @@ def _collect_repo_context(gh, pr: PRContext, files: list[FileDiff],
                     f"({type(exc).__name__}); continuing the review without it"]
 
 
+def _surface_selection_budget(selection) -> None:
+    """V4 audit P2 (E08-T05): a non-OK ``budget_state`` is surfaced, never
+    silent.
+
+    Log-only by design: a healthy selection (``budget_state == "ok"``,
+    which by construction carries no exclusions) logs nothing, so normal
+    runs stay quiet; a degraded one logs one line with exclusion *counts*
+    by reason (not paths) — bounded, and with the report schema and its
+    warnings untouched.
+    """
+    if selection is None or selection.budget_state == "ok":
+        return
+    counts: dict[str, int] = {}
+    for excluded in selection.excluded_files:
+        counts[excluded.reason] = counts.get(excluded.reason, 0) + 1
+    breakdown = ", ".join(f"{reason}={counts[reason]}" for reason in sorted(counts))
+    log.warning(
+        "context selection budget_state=%s: selected=%d, excluded=%d%s",
+        selection.budget_state, len(selection.selected_files),
+        len(selection.excluded_files),
+        f" ({breakdown})" if breakdown else "",
+    )
+
+
 def _select_repository_context(files: list[FileDiff], repo_index):
     """V4-E02-T03/T04: rank *which* files reach the prompt, deterministically.
 
@@ -202,10 +226,16 @@ def _select_repository_context(files: list[FileDiff], repo_index):
     except Exception as exc:  # noqa: BLE001
         log.warning("context selection failed: %s", exc)
         return None, None
+    _surface_selection_budget(selection)
     if selection is None or selection.is_empty:
         return None, selection
-    # Only paths the index actually inventoried are fetched (never a raw
-    # PR-supplied string); reasons carry the ADR-017 closed set.
+    # Candidates are the selection contract's (path, reason) pairs:
+    # indexed paths *plus* the diff's changed files, which are kept even
+    # when the index never inventoried them (select_context). The old
+    # claim that only index-inventoried paths are fetched was wrong —
+    # path safety is enforced at the read boundary
+    # (github_client._safe_repo_path), not here. Reasons carry the
+    # ADR-017 closed set.
     return [(f.path, f.relationship or f.reason)
             for f in selection.selected_files], selection
 
@@ -284,6 +314,15 @@ def build_context(pr: PRContext, files: list[FileDiff], cfg: Config,
                 f if isinstance(f, Finding) else Finding.from_dict(f)
                 for f in raw_findings
             ]
+            # V4-E08-T05 follow-up (audit P2-1): rows stored by pre-
+            # chokepoint releases can carry raw credential-shaped text.
+            # Re-redact at the load boundary — this context copy is the
+            # fallback the orchestrator uses when a storage backend lacks
+            # the previous-findings capability. Idempotent; the
+            # orchestrator redacts again on its own load path.
+            for f in previous_findings:
+                if isinstance(f, Finding):
+                    f.redact_text(lambda t: scrub_with_config(t, cfg))
         except Exception as exc:
             log.warning("get_previous_findings(%s, %s) failed: %s",
                         pr.repo, pr.pr_number, exc)

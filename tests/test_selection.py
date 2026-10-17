@@ -10,6 +10,7 @@ Pins the contract guarantees:
 """
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
 
@@ -373,3 +374,77 @@ class TestCollectorCandidatesParameter:
             _FakeGH(files=dict(_TREE)), pr, files, None, candidates=None)
         key = lambda e: (e.path, e.content, e.reason)  # noqa: E731
         assert [key(e) for e in default] == [key(e) for e in explicit]
+
+
+# ---------------------------------------------------------------------------
+# V4-E08-T05 (audit P2): a non-OK ContextSelection.budget_state is surfaced
+# through the existing logging mechanism — one bounded warning line with
+# exclusion counts by reason — while a healthy selection stays silent
+# (no report-schema change, no noise for normal selection).
+# ---------------------------------------------------------------------------
+
+class TestBudgetStateIsSurfaced:
+    """audit P2: selection drops/budgets must reach the log, never vanish."""
+
+    @staticmethod
+    def _surfaced(caplog) -> list[str]:
+        return [r.getMessage() for r in caplog.records
+                if r.name == "ai_pr_reviewer.context"
+                and "budget_state=" in r.getMessage()]
+
+    def test_truncated_selection_is_surfaced_with_exclusion_counts(self, caplog):
+        from ai_pr_reviewer.context import _select_repository_context
+
+        # 1 changed file + 25 indexed imports = 26 candidates > the
+        # DEFAULT_MAX_SELECTED=24 cap => over_cap exclusions => truncated.
+        entries = [_entry("app/main.py", changed=True)]
+        edges = []
+        for i in range(25):
+            entries.append(_entry(f"src/dep{i}.py"))
+            edges.append(("app/main.py", f"src/dep{i}.py"))
+        idx = _index(entries, edges)
+
+        with caplog.at_level(logging.WARNING, logger="ai_pr_reviewer.context"):
+            candidates, selection = _select_repository_context(
+                parse_unified_diff(_DIFF), idx)
+
+        assert selection is not None
+        assert selection.budget_state == "truncated"
+        surf = self._surfaced(caplog)
+        assert len(surf) == 1, f"expected exactly one surfacing line: {surf!r}"
+        assert "budget_state=truncated" in surf[0]
+        assert "selected=24" in surf[0]        # DEFAULT_MAX_SELECTED
+        assert "excluded=2" in surf[0]         # 26 candidates - 24 cap
+        assert "over_cap=2" in surf[0]         # counts, not paths (bounded)
+        # and the degraded selection still returns the capped candidates
+        assert candidates is not None and len(candidates) == 24
+
+    def test_exhausted_state_is_surfaced_even_without_exclusions(self, caplog):
+        from ai_pr_reviewer.context import _select_repository_context
+
+        idx = _index([_entry("app/main.py", changed=True)],
+                     budget_state="exhausted")
+        with caplog.at_level(logging.WARNING, logger="ai_pr_reviewer.context"):
+            _, selection = _select_repository_context(
+                parse_unified_diff(_DIFF), idx)
+
+        assert selection is not None
+        assert selection.budget_state == "exhausted"
+        surf = self._surfaced(caplog)
+        assert len(surf) == 1
+        assert "budget_state=exhausted" in surf[0]
+        assert "selected=1" in surf[0]
+        assert "excluded=0" in surf[0]
+
+    def test_healthy_selection_logs_nothing(self, caplog):
+        """Normal path: budget_state ok and no exclusions => total silence."""
+        from ai_pr_reviewer.context import _select_repository_context
+
+        with caplog.at_level(logging.WARNING, logger="ai_pr_reviewer.context"):
+            _, selection = _select_repository_context(
+                parse_unified_diff(_DIFF), _demo_index())
+
+        assert selection is not None
+        assert selection.budget_state == "ok"
+        assert selection.excluded_files == ()
+        assert self._surfaced(caplog) == []

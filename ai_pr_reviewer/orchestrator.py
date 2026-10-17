@@ -19,6 +19,7 @@ from __future__ import annotations
 import fnmatch
 import logging
 import time
+from typing import Callable
 
 from . import reporter
 from .config import Config, sev_rank
@@ -135,16 +136,101 @@ def validate_findings(findings, files: list[FileDiff], cfg: Config,
 def _scrub(text: str, cfg: Config) -> str:
     """Remove pattern-matched secrets AND the exact credentials this run was
     configured with, so no provider/HTTP error can echo them into a report,
-    step summary, console line or PR comment."""
-    from .security import redact_secrets
+    step summary, console line or PR comment.
 
-    text = redact_secrets(text)
-    for name in ("github_token", "anthropic_api_key", "openai_api_key",
-                 "gemini_api_key", "dashboard_token"):
-        secret = getattr(cfg, name, "") or ""
-        if len(secret) >= 6:
-            text = text.replace(secret, "[REDACTED]")
-    return text
+    Thin delegate to :func:`ai_pr_reviewer.security.scrub_with_config` —
+    the shared policy every redaction boundary uses (kept under this name
+    because tests and internal callers import ``orchestrator._scrub``)."""
+    from .security import scrub_with_config
+
+    return scrub_with_config(text, cfg)
+
+
+def _scrub_evidence_records(records, scrub) -> tuple:
+    """Re-create evidence records through ``EvidenceRecord.create`` with an
+    extra scrub layer (V4-E08-T05 follow-up).
+
+    ``create`` re-applies pattern redaction (idempotent), re-bounds (already
+    bounded on read) and recomputes ``content_hash`` over the FINAL stored
+    text — so a clean record round-trips byte-identically (same hash), a
+    tainted one is rewritten text+hash together (``integrity_ok`` stays
+    True), and no stored hash is ever invalidated without its text moving
+    with it. Records that cannot be re-created (shouldn't happen: every
+    record here came through ``create`` or the validating ``from_dict``)
+    are kept as-is rather than dropped — evidence is a bonus, never fatal.
+    """
+    out = []
+    for e in records:
+        try:
+            out.append(EvidenceRecord.create(
+                kind=e.kind, locator=scrub(e.locator), summary=scrub(e.summary),
+                check_type=e.check_type))
+        except (AttributeError, TypeError, ValueError):
+            out.append(e)
+    return tuple(out)
+
+
+def _redact_previous_findings(findings: list, cfg: Config) -> list:
+    """V4-E08-T05 follow-up (audit P2-1): findings loaded from storage were
+    written by releases *before* the output redaction chokepoint and can
+    carry raw credential-shaped text. Redact them at the load boundary —
+    before lifecycle processing, fingerprint matching, verification or any
+    sink (comments, PATCH sync, report rows, warnings, re-persisted rows)
+    can see them.
+
+    Evidence records are rewritten ONLY when the scrub actually changes
+    their text (text and ``content_hash`` move together — see
+    ``_scrub_evidence_records``); untouched records keep their stored hash
+    bytes so the tamper-detection contract survives. Idempotent; a
+    non-Finding entry is skipped rather than losing the whole review.
+    """
+    def scrub(text: str) -> str:
+        return _scrub(text, cfg)
+
+    for f in findings:
+        if not isinstance(f, Finding):
+            continue
+        f.redact_text(scrub)
+        if f.evidence:
+            f.evidence = _scrub_evidence_records(f.evidence, scrub)
+    return findings
+
+
+def _redact_engine_output(outcome, cfg: Config) -> None:
+    """V4-E08-T05 — THE output redaction chokepoint.
+
+    Engine text (every finding's ``title``/``explanation``/``suggestion``
+    and the review ``summary``) is redacted here, at the single point
+    where model output crosses from the provider into the pipeline —
+    before provenance stamping, evidence attachment, dedup, lifecycle or
+    any sink. Everything downstream (inline comment bodies, the markdown
+    summary comment, JSON/markdown report artifacts, GitHub step
+    summaries, dashboard uploads and persisted finding rows) reads these
+    same fields, so one boundary covers all of them instead of each sink
+    re-implementing the policy (AGENTS.md security invariant: "the
+    finding→comment/report chokepoint").
+
+    ``_scrub`` layers exact configured-credential removal on top of the
+    pattern redaction: the model never sees those values, but a quoted
+    diff might contain one. Idempotent; only text values change — the
+    report schema and field types are untouched.
+    """
+
+    def scrub(text: str) -> str:
+        return _scrub(text, cfg)
+
+    for f in getattr(outcome, "findings", None) or ():
+        f.redact_text(scrub)          # Finding-like or it fails loudly here
+        # V4-E08-T05 follow-up: engine-attached evidence (the static
+        # engine quotes diff lines at the engine, before this chokepoint)
+        # gets the same configured-credential layer, re-created through
+        # ``create`` so the content hash keeps committing to the stored
+        # text. Clean records round-trip byte-identically.
+        if getattr(f, "evidence", None):
+            f.evidence = _scrub_evidence_records(f.evidence, scrub)
+    summary = getattr(outcome, "summary", None)
+    if isinstance(summary, str) and summary:
+        outcome.summary = scrub(summary)
 
 
 def _project_policy(cfg: Config):
@@ -215,6 +301,12 @@ class ReviewOrchestrator:
         provider = get_provider(cfg, context)
         outcome = run_analysis(cfg, context, provider)
         warnings.extend(_scrub(w, cfg) for w in outcome.warnings)
+        # V4-E08-T05: THE output redaction chokepoint. Engine text crosses
+        # from the provider into the pipeline right here — before
+        # provenance, dedup, lifecycle or any sink — so every downstream
+        # consumer (comments, reports, step summaries, dashboard uploads,
+        # stored rows) reads already-redacted fields.
+        _redact_engine_output(outcome, cfg)
 
         # f. provenance + evidence first (V4-E04-T03: attribution must be
         #    recorded *before* dedup so merging two engines' renderings of
@@ -222,7 +314,9 @@ class ReviewOrchestrator:
         #    then dedupe (before the cap, so duplicates can't eat the
         #    comment budget), then anchor / threshold / cap.
         _stamp_provenance(outcome.findings, outcome)
-        _attach_diff_evidence(outcome.findings, files)
+        _attach_diff_evidence(
+            outcome.findings, files,
+            scrub=lambda t: _scrub(t, cfg))
         findings = deduplicate(outcome.findings)
         # D4: ``max_comments`` is a *posting* limit only. ``reported`` is
         # every anchored finding this review found — the report, the health
@@ -373,9 +467,17 @@ class ReviewOrchestrator:
         # Declared-capability branch (V3-E04-T04): a backend without the
         # previous-findings capability falls back to what build_context
         # loaded — same behavior as the old getattr guard, no probing.
+        # Both branches pass through the legacy-redaction boundary first
+        # (V4-E08-T05 follow-up, audit P2-1): stored rows from the
+        # pre-chokepoint era are re-redacted before lifecycle or any sink
+        # sees them. (The context branch is already redacted at its own
+        # load site; redaction is idempotent.)
         if has_capability(self.storage, CAP_PREVIOUS_FINDINGS):
-            return list(self.storage.get_previous_findings(repo, pr.pr_number) or [])
-        return list(getattr(context, "previous_findings", None) or [])
+            return _redact_previous_findings(
+                list(self.storage.get_previous_findings(repo, pr.pr_number) or []),
+                self.cfg)
+        return _redact_previous_findings(
+            list(getattr(context, "previous_findings", None) or []), self.cfg)
 
     @staticmethod
     def _apply_lifecycle(previous: list[Finding], current: list[Finding],
@@ -549,7 +651,8 @@ def _stamp_provenance(findings: list[Finding], outcome) -> None:
 
 
 def _attach_diff_evidence(findings: list[Finding],
-                          files: list[FileDiff]) -> None:
+                          files: list[FileDiff],
+                          scrub: Callable[[str], str] | None = None) -> None:
     """V4-E04: attach diff-hunk evidence to findings that don't already
     carry records (the static engine attaches its own rule_ref/diff_hunk
     evidence at the engine, V4-E04-T05).
@@ -558,8 +661,10 @@ def _attach_diff_evidence(findings: list[Finding],
     the machine-checkable "here is the code we flagged" backing ADR-004's
     "no unsupported certainty". Construction goes through
     EvidenceRecord.create, so quoted code is redacted and bounded inside
-    the write path, not at callers. Unanchored (file-level) findings
-    honestly carry no evidence rather than a fabricated one.
+    the write path, not at callers. ``scrub`` (V4-E08-T05 follow-up) adds
+    the run's configured-credential removal on top: the quoted line comes
+    from the untrusted diff and might contain one. Unanchored (file-level)
+    findings honestly carry no evidence rather than a fabricated one.
     """
     by_path = {fd.path: fd for fd in files if not fd.is_binary}
     for f in findings:
@@ -576,5 +681,6 @@ def _attach_diff_evidence(findings: list[Finding],
                     locator=f"{fd.path}:{f.line}-{end}",
                     summary=text,
                     check_type=f.category,
+                    scrub=scrub,
                 ),)
                 break

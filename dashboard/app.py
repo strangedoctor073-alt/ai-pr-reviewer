@@ -61,6 +61,12 @@ from ai_pr_reviewer.config import DEFAULT_MAX_COMMENTS
 # V3-E05-T02 (D13): memory-note bound shared with the engine — the dashboard
 # must truncate writes at exactly the cap the engine applies on read/write.
 from ai_pr_reviewer.memory import MAX_NOTE_CHARS
+# V4-E08-T05 follow-up (audit P2-1): read endpoints re-redact stored finding
+# text on the way out (the engine's pattern redaction is the layer the
+# dashboard can apply — it does not know the reviewing run's configured
+# credentials; those are scrubbed in the engine before upload).
+from ai_pr_reviewer.models import Finding
+from ai_pr_reviewer.security import redact_secrets
 
 BASE = Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ.get("DASHBOARD_DATA_DIR", str(BASE / "data")))
@@ -455,6 +461,34 @@ def health():
     }
 
 
+# V4-E08-T05 follow-up (audit P2-1): finding rows written by pre-chokepoint
+# releases can carry raw credential-shaped text in storage. Every read
+# endpoint that serves stored finding text re-redacts on the way out —
+# same keys, same types, same schema, only the text values change.
+_FINDING_TEXT_FIELDS = ("title", "explanation", "suggestion")
+
+
+def _redact_finding_payload(row):
+    """Redact credential-looking text in one stored finding row, in place.
+
+    Accepts both shapes the backends return (plain dict rows from the
+    SQLAlchemy/JSON stores and Finding objects from the legacy local
+    store). Idempotent; a malformed row degrades to itself rather than
+    failing a read — this is a display-layer defense, not a write path.
+    """
+    try:
+        if isinstance(row, Finding):
+            row.redact_text(redact_secrets)
+        elif isinstance(row, dict):
+            for key in _FINDING_TEXT_FIELDS:
+                value = row.get(key)
+                if isinstance(value, str) and value:
+                    row[key] = redact_secrets(value)
+    except Exception:  # noqa: BLE001 — a read must never 500 on redaction
+        pass
+    return row
+
+
 # --------------------------------------------------------------------- reports
 @app.get("/api/reports")
 def list_reports(request: Request, limit: int = 50, offset: int = 0):
@@ -470,8 +504,10 @@ def get_report(rid: str, request: Request):
     payload = get_storage().get(_safe(rid))
     if payload is None:
         raise HTTPException(404, "report not found")
+    if isinstance(payload.get("summary"), str) and payload["summary"]:
+        payload["summary"] = redact_secrets(payload["summary"])
     payload["findings"] = sorted(
-        payload.get("findings", []),
+        (_redact_finding_payload(f) for f in payload.get("findings", [])),
         key=lambda f: (SEV_ORDER.get(f.get("severity"), 9), f.get("file", ""),
                        f.get("line") or 0))
     return payload
@@ -589,7 +625,8 @@ def get_review_findings(repo_owner: str, repo_name: str, pr_number: int, request
     _check_reads(request)
     repo = f"{repo_owner}/{repo_name}"
     findings = get_storage().get_previous_findings(repo, pr_number)
-    return {"repo": repo, "pr_number": pr_number, "findings": findings}
+    return {"repo": repo, "pr_number": pr_number,
+            "findings": [_redact_finding_payload(f) for f in findings]}
 
 
 @app.post("/api/reviews/{repo_owner}/{repo_name}/{pr_number}/findings")
@@ -741,7 +778,7 @@ async def get_findings(
         state=state, severity=severity, repo=repo,
         limit=min(limit, 500), offset=max(0, offset)
     )
-    return JSONResponse(findings)
+    return JSONResponse([_redact_finding_payload(f) for f in findings])
 
 
 @app.get("/api/metrics")

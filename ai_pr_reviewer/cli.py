@@ -25,7 +25,7 @@ from . import reporter
 # keeps working.
 from .orchestrator import (ReviewOrchestrator, _finding_row,  # noqa: F401
                             _is_excluded, filter_files, validate_findings)
-from .security import redact_secrets  # noqa: F401
+from .security import redact_secrets, scrub_with_config  # noqa: F401
 from .storage import resolve_storage
 from .storage_schema import repo_pr_key
 
@@ -183,7 +183,13 @@ def _post_and_sync(gh: GitHubClient, cfg: Config, storage, result: ReviewResult,
             n_linked, link_warnings = link_comment_ids(
                 gh, result.pr.pr_number, to_post, result.pr.head_sha)
             linked += n_linked
-            result.warnings.extend(link_warnings)
+            # V4-E08-T05 follow-up: sync warnings can embed finding titles
+            # (github_sync quotes them on 404s); findings loaded from
+            # pre-chokepoint storage were raw until the load-boundary
+            # redaction, so scrub here too — warnings cross into the
+            # report, the step summary and the console.
+            result.warnings.extend(scrub_with_config(w, cfg)
+                                   for w in link_warnings)
     else:
         print("[ai-pr-reviewer] nothing changed since the previous review — "
               "skipping a duplicate review comment.")
@@ -192,7 +198,7 @@ def _post_and_sync(gh: GitHubClient, cfg: Config, storage, result: ReviewResult,
     # the PR. Deletions, rate limits and missing permissions all degrade to
     # warnings; the report has already been produced and is unaffected.
     _updated, sync_warnings = sync_finding_states(gh, result.findings)
-    result.warnings.extend(sync_warnings)
+    result.warnings.extend(scrub_with_config(w, cfg) for w in sync_warnings)
 
     if linked:
         _persist_comment_ids(storage, result)

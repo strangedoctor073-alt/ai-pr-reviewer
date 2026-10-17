@@ -10,7 +10,9 @@ import pytest
 from ai_pr_reviewer.models import (
     LIFECYCLE_FIELDS,
     MAX_EVIDENCE_PER_FINDING,
+    MAX_EVIDENCE_LOCATOR_CHARS,
     MAX_EVIDENCE_SUMMARY_CHARS,
+    MAX_PROVENANCE_SOURCES,
     EvidenceRecord,
     Finding,
     ProvenanceSource,
@@ -231,6 +233,41 @@ class TestProvenanceBackwardCompatibility:
         assert f.provenance_engine is None
         assert f.provenance_model is None
 
+    # -- V4-E08-T05: the deserialize path enforces the same bound as the
+    #    merge path — an over-long stored list is capped, never trusted.
+
+    @staticmethod
+    def _sources(n):
+        return [{"engine": f"eng-{i}", "model": "m", "origin": "ai",
+                 "agent": None} for i in range(n)]
+
+    def test_provenance_sources_are_capped_on_deserialize(self):
+        f = Finding.from_dict({"file": "x.py", "line": 1,
+                               "provenance_sources": self._sources(12)})
+        assert len(f.provenance_sources) == MAX_PROVENANCE_SOURCES
+
+    def test_provenance_sources_cap_boundary(self):
+        """Exactly at the cap is kept in full; one under stays untouched."""
+        at = Finding.from_dict({"file": "x.py", "line": 1,
+                                "provenance_sources": self._sources(
+                                    MAX_PROVENANCE_SOURCES)})
+        under = Finding.from_dict({"file": "x.py", "line": 1,
+                                   "provenance_sources": self._sources(
+                                       MAX_PROVENANCE_SOURCES - 1)})
+        assert len(at.provenance_sources) == MAX_PROVENANCE_SOURCES
+        assert len(under.provenance_sources) == MAX_PROVENANCE_SOURCES - 1
+        # none of the kept records are malformed
+        assert all(s.engine for s in at.provenance_sources)
+
+    def test_provenance_sources_lenient_on_malformed_input(self):
+        assert Finding.from_dict({"file": "x.py", "line": 1,
+                                  "provenance_sources": "not-a-list"}
+                                 ).provenance_sources == ()
+        mixed = Finding.from_dict({
+            "file": "x.py", "line": 1,
+            "provenance_sources": ["junk", {"engine": "claude"}]}).provenance_sources
+        assert len(mixed) == 1 and mixed[0].engine == "claude"
+
 
 # ---------------------------------------------------------------------------
 # V4-E04-T02 · embedded evidence records (ADR-004)
@@ -310,6 +347,39 @@ class TestEvidenceRecord:
         # stored hash is preserved so tampering surfaces via integrity_ok
         assert e.content_hash == "deadbeefdeadbeef"
         assert not e.integrity_ok
+
+    def test_from_dict_re_redacts_the_locator(self):
+        """V4-E08-T05: the reader applies the write path's redaction to the
+        locator too, not just the summary — a tampered row cannot smuggle
+        a credential past ``create``."""
+        secret = "sk-aBcD1234eFgH5678iJkL9012mNoP"     # synthetic, ≥20-char tail
+        e = EvidenceRecord.from_dict({
+            "kind": "diff_hunk", "locator": f"audit/{secret}:1",
+            "summary": "clean", "content_hash": "cafecafecafecafe",
+        })
+        assert e is not None
+        assert secret not in e.locator
+        assert "[REDACTED]" in e.locator
+
+    def test_from_dict_bounds_the_locator(self):
+        e = EvidenceRecord.from_dict({
+            "kind": "diff_hunk", "locator": "a" * 500,
+            "summary": "x", "content_hash": "cafecafecafecafe",
+        })
+        assert e is not None
+        assert len(e.locator) <= MAX_EVIDENCE_LOCATOR_CHARS
+
+    def test_from_dict_rejects_unknown_kind(self):
+        """Closed kind set on read, exactly like on write (V4-E08-T05)."""
+        assert EvidenceRecord.from_dict({
+            "kind": "made_up", "locator": "x:1", "summary": "y",
+        }) is None
+        # a supported kind still round-trips (no regression for real rows)
+        ok = EvidenceRecord.from_dict({
+            "kind": "diff_hunk", "locator": "x:1", "summary": "y",
+        })
+        assert ok is not None
+        assert ok.kind == "diff_hunk"
 
 
 class TestEvidenceOnFinding:

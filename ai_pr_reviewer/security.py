@@ -156,3 +156,25 @@ def redact_secrets(text: str) -> str:
         else:
             text = pattern.sub(_REDACTED, text)
     return text
+
+
+def scrub_with_config(text: str, cfg) -> str:
+    """``redact_secrets`` PLUS the exact credentials this run was configured
+    with, so no engine output, stored row or HTTP error can echo them into
+    a comment, report, step summary or log line.
+
+    Lives here (not in the orchestrator) so every redaction boundary —
+    output chokepoint, previous-findings load, GitHub-sync warnings,
+    dashboard reads — shares one policy without import cycles: this module
+    imports nothing from the package. Configured credentials are removed by
+    exact match (multiline-safe), which also catches values that match no
+    pattern above. Values shorter than 6 chars are ignored — too likely to
+    be ordinary words.
+    """
+    text = redact_secrets(text)
+    for name in ("github_token", "anthropic_api_key", "openai_api_key",
+                 "gemini_api_key", "dashboard_token"):
+        secret = getattr(cfg, name, "") or ""
+        if len(secret) >= 6:
+            text = text.replace(secret, "[REDACTED]")
+    return text
