@@ -37,3 +37,9 @@ build/
 .idea/
 .vscode/
 .DS_Store
+
+# Private local agent/engineering artifacts — never commit or publish (the
+# repo is public). Narrow rules only: root AGENTS.md and docs/private/.
+# README/CHANGELOG/CONTRIBUTING/SECURITY/CODE_OF_CONDUCT and docs/planning/ stay public.
+/AGENTS.md
+/docs/private/
