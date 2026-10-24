@@ -21,6 +21,8 @@ import threading
 from collections import Counter
 from pathlib import Path
 
+from .feedback_store import DbFeedbackMixin, JsonFeedbackMixin
+
 log = logging.getLogger(__name__)
 
 SEV_KEYS = ("critical", "high", "medium", "low", "info")
@@ -80,13 +82,22 @@ def _max_note_chars() -> int:
 
 def _telemetry_assemble(runs: int, in_sum: int, out_sum: int,
                         call_sum: int, call_n: int, state_counts,
-                        by_repo: dict) -> dict:
+                        by_repo: dict, cost_states=None,
+                        cost_low: float = 0.0,
+                        cost_high: float = 0.0) -> dict:
     """Assemble the telemetry summary from raw aggregates (V3-E04-T05).
 
     Single owner of the output shape: ``_telemetry_summary`` computes the
     aggregates row-by-row (JSON backend), DbStorage.metrics computes them
     in SQL, and both call this — so the two paths cannot drift apart.
+
+    V4-E11-T07 (debt 9): the additive display-only cost block. Its state
+    vocab is fixed to ``telemetry.COST_STATES`` so both backends shape
+    identically; rows whose payload carried no cost block contribute to no
+    state (they are not fake zeros — absence stays absence).
     """
+    from ai_pr_reviewer.telemetry import COST_STATES
+
     return {
         "runs": runs,
         "tokens": {"input": in_sum, "output": out_sum},
@@ -94,6 +105,10 @@ def _telemetry_assemble(runs: int, in_sum: int, out_sum: int,
                          for s in ("ok", "unavailable", "n/a")},
         "avg_call_ms": round(call_sum / call_n, 1) if call_n else 0.0,
         "by_repo": by_repo,
+        "cost": {"states": {s: (cost_states or {}).get(s, 0)
+                            for s in COST_STATES},
+                 "low_total": round(float(cost_low or 0.0), 6),
+                 "high_total": round(float(cost_high or 0.0), 6)},
     }
 
 
@@ -101,18 +116,23 @@ def _telemetry_summary(rows: list[dict]) -> dict:
     """Aggregate normalized telemetry rows for ``/api/metrics`` (V3-E02-T05).
 
     ``rows`` are ``{"repo", "usage_state", "input_tokens", "output_tokens",
-    "call_ms"}`` — token fields ``None`` unless the run's usage state was
+    "call_ms", "cost"}`` — token fields ``None`` unless the run's usage
+    state was
     ``ok``, so an unavailable count never inflates a sum as a fake 0.
     Additive block: both backends return it beside the unchanged legacy
     metric keys. V3-E04-T05: the assembly moved to
     ``_telemetry_assemble`` so the SQL path shares this exact logic; the
-    row-loop below is unchanged.
+    row-loop below is unchanged. V4-E11-T07: the loop also sums the
+    display-only cost band (numeric bounds only; non-estimated states
+    carry ``None`` bounds and contribute nothing).
     """
     runs = len(rows)
     in_sum = out_sum = 0
     call_sum = call_n = 0
     states: Counter = Counter()
     by_repo: dict[str, dict] = {}
+    cost_states: Counter = Counter()
+    cost_low = cost_high = 0.0
     for row in rows:
         state = str(row.get("usage_state") or "n/a")
         states[state] += 1
@@ -134,8 +154,21 @@ def _telemetry_summary(rows: list[dict]) -> dict:
             call_sum += call_ms
             entry["call_ms"] += call_ms
             call_n += 1
+        # V4-E11-T07: cost block (present only when the row carried one).
+        cost = row.get("cost")
+        if isinstance(cost, dict):
+            cstate = cost.get("state")
+            if isinstance(cstate, str) and cstate:
+                cost_states[cstate] += 1
+            low = cost.get("low")
+            high = cost.get("high")
+            if type(low) in (int, float):
+                cost_low += float(low)
+            if type(high) in (int, float):
+                cost_high += float(high)
     return _telemetry_assemble(runs, in_sum, out_sum, call_sum, call_n,
-                               states, by_repo)
+                               states, by_repo, cost_states,
+                               cost_low, cost_high)
 
 
 def _top_counter(pairs, n: int | None = None) -> dict:
@@ -217,7 +250,7 @@ def summarize(report: dict) -> dict:
     }
 
 
-class DbStorage:
+class DbStorage(DbFeedbackMixin):
     """SQLAlchemy-backed storage (PostgreSQL / SQLite)."""
 
     def __init__(self, dsn: str, json_dir: Path | None = None):
@@ -242,6 +275,9 @@ class DbStorage:
             schema.CAP_DISMISSED_FINGERPRINTS,
             schema.CAP_TELEMETRY,
             schema.CAP_PRUNE,
+            # V4-E09: rule reads + (dashboard-only) rule authoring.
+            schema.CAP_SUPPRESSION_RULES,
+            schema.CAP_FEEDBACK_ADMIN,
         }
 
     def init(self) -> None:
@@ -574,7 +610,9 @@ class DbStorage:
         Scalar sums over the light metric columns, one ``GROUP BY`` per
         distribution and a server-side JSON expansion for severities —
         no report payload is ever parsed in Python. The telemetry block
-        is likewise computed from scalar ``telemetry`` columns; the
+        is likewise computed from scalar ``telemetry`` columns (cost from
+        a server-side JSON path expansion over ``payload``, V4-E11-T07);
+        the
         values are asserted equal to the row-loop path by the backend
         parity tests.
         """
@@ -627,6 +665,25 @@ class DbStorage:
                 select(state_expr, func.count())
                 .group_by(state_expr)).all())
 
+            # V4-E11-T07: cost rides the payload JSON — no scalar column,
+            # no schema change — as a server-side JSON path expansion
+            # (dialect-portable: JSON_EXTRACT on SQLite, ->> on Postgres).
+            # Rows without a cost block yield NULL and contribute nothing
+            # (absence stays absence, never a measured 0).
+            cost_state = TelemetryRow.payload["cost"]["state"].as_string()
+            cost_counts = dict(session.execute(
+                select(cost_state, func.count())
+                .where(cost_state.is_not(None))
+                .group_by(cost_state)).all())
+            cost_low_sum, cost_high_sum = session.execute(
+                select(func.coalesce(func.sum(
+                           TelemetryRow.payload["cost"]["low"].as_float()),
+                       0.0),
+                       func.coalesce(func.sum(
+                           TelemetryRow.payload["cost"]["high"].as_float()),
+                       0.0))
+                .select_from(TelemetryRow)).one()
+
             by_repo: dict[str, dict] = {}
             for rrepo, n, tin, tout, tcall in session.execute(
                     select(func.coalesce(TelemetryRow.repo, ""),
@@ -649,7 +706,8 @@ class DbStorage:
             "engine_distribution": engine_counts,
             "telemetry": _telemetry_assemble(
                 runs, int(in_sum), int(out_sum), int(call_sum), call_n,
-                state_counts, by_repo),
+                state_counts, by_repo, cost_counts,
+                float(cost_low_sum or 0.0), float(cost_high_sum or 0.0)),
         }
 
     def record_feedback(self, fingerprint: str, kind: str, repo: str = "", note: str = "") -> dict:
@@ -657,7 +715,10 @@ class DbStorage:
         ``fingerprint:<fp>`` row the reviewer reads back as a dismissal);
         'up'/'down' are votes, not a request to stop reporting."""
         from .models_db import RepoMemoryRow
-        
+        from ai_pr_reviewer.security import FeedbackLimits, sanitize_feedback_text
+
+        # V4-E08 (merge pass): free text is redacted + bounded at persistence.
+        note = sanitize_feedback_text(note)
         entry = {
             "fingerprint": fingerprint,
             "kind": kind,
@@ -681,6 +742,14 @@ class DbStorage:
                                                 RepoMemoryRow.path_pattern == pattern)
                 ).scalars().first()
                 if mem_row is None:
+                    from sqlalchemy import func
+                    n_mutes = session.execute(
+                        select(func.count()).select_from(RepoMemoryRow).where(
+                            RepoMemoryRow.repo == repo,
+                            RepoMemoryRow.path_pattern.like(
+                                _schema().mute_pattern("") + "%"))).scalar() or 0
+                    if n_mutes >= FeedbackLimits().max_rules_per_repo:
+                        raise ValueError("mute cap reached for this repository")
                     mem_row = RepoMemoryRow(id=_schema().memory_row_key(repo),
                                             repo=repo, path_pattern=pattern,
                                             note=note or f"Muted finding {fingerprint}")
@@ -1041,7 +1110,7 @@ class DbStorage:
             f"at {os.environ.get('MIGRATED_AT', '')}\n", encoding="utf-8")
 
 
-class JsonStorage:
+class JsonStorage(JsonFeedbackMixin):
     """Prototype JSON-file storage — zero dependencies, demo only.
 
     Writes are atomic (tmp file + os.replace) and serialized by a process-wide
@@ -1062,6 +1131,9 @@ class JsonStorage:
             schema.CAP_DISMISSED_FINGERPRINTS,
             schema.CAP_TELEMETRY,
             schema.CAP_PRUNE,
+            # V4-E09: rule reads + (dashboard-only) rule authoring.
+            schema.CAP_SUPPRESSION_RULES,
+            schema.CAP_FEEDBACK_ADMIN,
         }
 
     def _path(self, rid: str) -> Path:
@@ -1237,6 +1309,9 @@ class JsonStorage:
                 "input_tokens": usage.get("input_tokens") if reported else None,
                 "output_tokens": usage.get("output_tokens") if reported else None,
                 "call_ms": duration if type(duration) is int else None,
+                # V4-E11-T07: display-only cost block, absent on legacy rows.
+                "cost": item.get("cost") if isinstance(item.get("cost"), dict)
+                        else None,
             })
 
         return {
@@ -1252,6 +1327,10 @@ class JsonStorage:
         }
 
     def record_feedback(self, fingerprint: str, kind: str, repo: str = "", note: str = "") -> dict:
+        from ai_pr_reviewer.security import FeedbackLimits, sanitize_feedback_text
+
+        # V4-E08 (merge pass): free text is redacted + bounded at persistence.
+        note = sanitize_feedback_text(note)
         entry = {
             "fingerprint": fingerprint,
             "kind": kind,
@@ -1278,6 +1357,10 @@ class JsonStorage:
                                  if r.get("repo") == repo
                                  and r.get("path_pattern") == pattern), None)
                 if existing is None:
+                    n_mutes = sum(1 for r in items if r.get("repo") == repo
+                                  and _schema().is_mute_pattern(r.get("path_pattern")))
+                    if n_mutes >= FeedbackLimits().max_rules_per_repo:
+                        raise ValueError("mute cap reached for this repository")
                     items.append({
                         "id": _schema().memory_row_key(repo),
                         "repo": repo,

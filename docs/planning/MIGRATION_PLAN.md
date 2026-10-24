@@ -220,11 +220,18 @@ All new inputs are optional with defaults that preserve current behavior. No inp
 
 ### 5.2 Migration steps
 
-1. Add provenance columns to `finding_history` (additive, nullable).
-2. Backfill provenance where determinable (from `payload` JSON).
-3. Add occurrence key computation to `findings.py`.
-4. Update dedup to use occurrence key for cross-engine matching (v1 still primary).
-5. Update dashboard feedback/mute routes to work on v1 (unchanged).
+1. Provenance fields ride `Finding` and the report `payload` JSON
+   (pipeline-owned) — **no new `finding_history` columns and no backfill**
+   (ADR-005 §4: no alias table, no backfill, no cutover).
+2. Add occurrence key computation to `findings.py` (advisory, computed per
+   run, never persisted, never a storage key).
+3. Update dedup to use the occurrence key for cross-engine matching within
+   a run (v1 still primary; cross-run identity stays v1-only — ADR-005
+   decision 4).
+4. Dashboard feedback/mute routes stay on v1 (unchanged — they already are).
+5. Rollback = stop consulting the occurrence key (identity spec in
+   `ai_pr_reviewer/findings.py`): no migration in either direction, v1
+   fingerprints byte-identical throughout.
 
 ### 5.3 Continuity guarantees
 

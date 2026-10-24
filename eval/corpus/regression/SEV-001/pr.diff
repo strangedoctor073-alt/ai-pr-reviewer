@@ -1,0 +1,12 @@
+diff --git a/src/payments.py b/src/payments.py
+--- a/src/payments.py
++++ b/src/payments.py
+@@ -1,4 +1,8 @@
+ import os
+ 
+ def run(db, oid, cmd, path):
++    cur = db.cursor()
++    cur.execute(f"SELECT * FROM pay WHERE id={oid}")
++    os.system("ls " + cmd)
++    os.chmod(path, 0o777)
+     return cur.fetchone()

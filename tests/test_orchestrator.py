@@ -983,7 +983,8 @@ def test_result_telemetry_is_serialized_through_the_chokepoint(monkeypatch):
     assert list(row["events"][0]) == ["type", "attempt"]
     assert "DROP ME" not in json.dumps(row)
     assert set(row) == {"schema", "provider", "model", "batch_count",
-                        "fallback_used", "usage", "calls", "events"}
+                        "fallback_used", "usage", "calls", "events",
+                        "cost"}          # V4-E11-T07 (additive, display-only)
 
 
 def test_persist_saves_telemetry_when_storage_supports_it(monkeypatch):

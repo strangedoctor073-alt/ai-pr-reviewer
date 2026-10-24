@@ -1,0 +1,12 @@
+id: FPCLEAN-002
+layer: false-positive
+title: Benign JS reduce refactor with its sibling test draws no findings
+provenance: hand-authored
+diff: pr.diff
+expect:
+  findings: []
+  no_findings:
+  - file: web/cart.js
+  - file: web/cart.test.js
+notes: "Precision corpus (JS): idiomatic reduce, strict style, test added alongside \u2014\
+  \ anything posted is an unmatched finding."

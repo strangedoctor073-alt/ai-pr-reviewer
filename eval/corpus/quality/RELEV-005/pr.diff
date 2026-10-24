@@ -1,0 +1,7 @@
+diff --git a/core/money.py b/core/money.py
+--- a/core/money.py
++++ b/core/money.py
+@@ -1,2 +1,2 @@
+ def cents(amount):
+-    return int(amount * 100)
++    return int(round(amount * 100))

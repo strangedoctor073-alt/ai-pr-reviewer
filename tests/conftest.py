@@ -34,3 +34,13 @@ def fixtures(tmp_path_factory: pytest.TempPathFactory) -> dict:
     """
     out_dir = tmp_path_factory.mktemp("pr_fixtures")
     return {fx["name"]: fx for fx in build_all(out_dir=out_dir)}
+
+
+@pytest.fixture(autouse=True)
+def _fresh_github_ownership_ledger():
+    """V4-E10 keeps ONE process-global ownership ledger (one review per
+    process in production). Tests must not inherit an engine identity another
+    test learned, or fail-closed behaviour becomes order-dependent."""
+    from ai_pr_reviewer.github_sync import reset_process_ledger
+    reset_process_ledger()
+    yield

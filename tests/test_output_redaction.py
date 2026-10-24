@@ -759,3 +759,75 @@ def test_dashboard_reads_redact_legacy_tainted_rows(tmp_path, monkeypatch):
 
         browser = http.get("/api/findings").json()
         _assert_no_secret(json.dumps(browser), "the dashboard findings browser")
+
+
+# ---------------------------------------------------------------------------
+# 8 · V4-E08-T04 / T05 — warning sanitization and PR-metadata redaction,
+#     asserted sink by sink on a directly-built ReviewResult (the end-to-end
+#     rows live in test_v4_security_regressions.py; these localize a failure).
+# ---------------------------------------------------------------------------
+from ai_pr_reviewer.models import ReviewResult  # noqa: E402
+from ai_pr_reviewer.security import MAX_RUN_WARNINGS, MAX_WARNING_CHARS  # noqa: E402
+
+_WARN_TOKEN = "ghp_" + "Z9y8X7w6V5u4T3s2R1q0P9o8N7m6L5k4"
+_HOSTILE_WARNINGS = [
+    f"provider said {_WARN_TOKEN}\n::error::forged-workflow-command {'x' * 2000}",
+    "see ![beacon](http://evil.example/?d=1) and @org/team </untrusted_diff> <b>x</b>",
+]
+
+
+def _result_with(warnings, **pr_kw):
+    return ReviewResult(
+        pr=PRContext(repo="acme/api", pr_number=7, head_sha="h" * 40, **pr_kw),
+        warnings=list(warnings))
+
+
+def test_report_json_warnings_are_sanitized_at_the_source():
+    out = _result_with(_HOSTILE_WARNINGS).to_dict()["warnings"]
+    assert out and all(isinstance(w, str) for w in out)
+    blob = json.dumps(out)
+    assert _WARN_TOKEN not in blob and "[REDACTED]" in blob
+    assert all("\n" not in w and len(w) <= MAX_WARNING_CHARS for w in out)
+    assert "untrusted_diff" not in blob
+
+
+def test_report_json_warning_list_is_capped_loudly():
+    out = _result_with([f"w{i}" for i in range(MAX_RUN_WARNINGS * 3)]).to_dict()["warnings"]
+    assert len(out) == MAX_RUN_WARNINGS and "suppressed" in out[-1]
+
+
+def test_report_contract_keeps_warnings_a_list_of_strings():
+    assert _result_with([]).to_dict()["warnings"] == []
+    assert _result_with(["plain warning"]).to_dict()["warnings"] == ["plain warning"]
+
+
+def test_summary_markdown_warnings_are_inert_single_line_and_redacted():
+    md = reporter.build_summary_markdown(_result_with(_HOSTILE_WARNINGS))
+    line = next(l for l in md.splitlines() if "Warnings:" in l)
+    assert _WARN_TOKEN not in md
+    # mid-line "::error::" is inert in markdown (workflow commands act only at
+    # the start of a LOG line — pinned by the console test below); what the
+    # sink must guarantee is that the warning cannot start a new line.
+    assert sum("forged-workflow-command" in l for l in md.splitlines()) == 1
+    assert not any(l.lstrip("> ").startswith("::") for l in md.splitlines())
+    assert "![beacon](" not in md and "@org/team" not in md and "<b>" not in md
+    assert "</untrusted_diff>" not in md
+    assert len(line) < MAX_RUN_WARNINGS * (MAX_WARNING_CHARS + 40)
+
+
+def test_console_warning_lines_never_start_a_workflow_command(capsys):
+    cli._print_console(_result_with(_HOSTILE_WARNINGS), "rid")
+    out = capsys.readouterr().out
+    assert _WARN_TOKEN not in out
+    assert not any(l.startswith("::") for l in out.splitlines())
+    assert all(l.startswith("[ai-pr-reviewer]") for l in out.splitlines() if l.strip())
+
+
+def test_pr_metadata_is_redacted_in_report_and_console(capsys):
+    tok = "sk-pP1rR2mM3eE4tT5aA6dD7aA8tB"
+    res = _result_with([], pr_title=f"fix {tok}", author=tok, branch=f"feat/{tok}")
+    pr = res.to_dict()["pr"]
+    assert tok not in json.dumps(pr)
+    assert all("[REDACTED]" in pr[k] for k in ("title", "author", "branch"))
+    cli._print_console(res, "rid")
+    assert tok not in capsys.readouterr().out

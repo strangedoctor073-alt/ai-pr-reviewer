@@ -16,8 +16,9 @@ import time
 
 from .config import Config, load_config, merge_dashboard_rules, sev_rank
 from .github_client import GitHubClient, GitHubError
-from .github_sync import (link_comment_ids, record_comment_ids,  # C5
-                          render_finding_comment, sync_finding_states)
+from .github_sync import (LifecycleStats, link_comment_ids,  # C5 + V4-E10
+                          record_comment_ids, render_finding_comment,
+                          sync_finding_states, sync_sticky_summary)
 from .models import PRContext, ReviewKey, ReviewResult, SEVERITY_ORDER
 from . import reporter
 # filter_files / validate_findings / _is_excluded / _finding_row moved to
@@ -25,7 +26,7 @@ from . import reporter
 # keeps working.
 from .orchestrator import (ReviewOrchestrator, _finding_row,  # noqa: F401
                             _is_excluded, filter_files, validate_findings)
-from .security import redact_secrets, scrub_with_config  # noqa: F401
+from .security import redact_secrets, sanitize_warnings, scrub_with_config  # noqa: F401
 from .storage import resolve_storage
 from .storage_schema import repo_pr_key
 
@@ -109,12 +110,24 @@ def run(cfg: Config, pr_overrides: dict | None = None) -> ReviewResult:
     open_ = reporter.open_findings(result.findings)
 
     # ------------------------------------------------------------ post review
+    lifecycle = LifecycleStats()        # V4-E10-T05: counts/ids/closed words only
     if gh and not cfg.no_comment:
-        result.posted_inline = _post_and_sync(gh, cfg, storage, result, open_)
+        result.posted_inline = _post_and_sync(gh, cfg, storage, result, open_,
+                                              stats=lifecycle)
 
     # ---------------------------------------------------------------- outputs
     result.duration_ms = int((time.monotonic() - t0) * 1000)
     report = reporter.finalize_report(result)
+    if gh and not cfg.no_comment:
+        # V4-E10-T02: one sticky summary, found only by engine identity +
+        # strict marker. Must run AFTER _post_and_sync (that is where the
+        # engine learns its GitHub identity) and AFTER finalize_report (the
+        # body is rendered from the finalized, already-redacted report).
+        _action, sticky_warnings = sync_sticky_summary(
+            gh, repo=result.pr.repo, pr_number=result.pr.pr_number,
+            body=reporter.render_sticky_summary(report), stats=lifecycle)
+        result.warnings.extend(scrub_with_config(w, cfg) for w in sticky_warnings)
+    report.update(lifecycle.to_report_fields())     # additive `github_lifecycle`
     if cfg.output:
         reporter.write_report(cfg.output, report)
     reporter.write_step_summary(result)
@@ -154,7 +167,7 @@ def _review_is_worth_posting(result: ReviewResult, to_post: list) -> bool:
 
 
 def _post_and_sync(gh: GitHubClient, cfg: Config, storage, result: ReviewResult,
-                   open_) -> int:
+                   open_, stats: LifecycleStats | None = None) -> int:
     """Post this run's review, then keep GitHub in sync with our state (C5).
 
     Three things happen in order: the new/reopened findings that don't already
@@ -181,7 +194,8 @@ def _post_and_sync(gh: GitHubClient, cfg: Config, storage, result: ReviewResult,
         if res is not None:
             linked += record_comment_ids(result.findings, res)
             n_linked, link_warnings = link_comment_ids(
-                gh, result.pr.pr_number, to_post, result.pr.head_sha)
+                gh, result.pr.pr_number, to_post, result.pr.head_sha,
+                stats=stats)
             linked += n_linked
             # V4-E08-T05 follow-up: sync warnings can embed finding titles
             # (github_sync quotes them on 404s); findings loaded from
@@ -197,7 +211,8 @@ def _post_and_sync(gh: GitHubClient, cfg: Config, storage, result: ReviewResult,
     # Reflect resolved/muted/dismissed/reopened on the comments already on
     # the PR. Deletions, rate limits and missing permissions all degrade to
     # warnings; the report has already been produced and is unaffected.
-    _updated, sync_warnings = sync_finding_states(gh, result.findings)
+    _updated, sync_warnings = sync_finding_states(gh, result.findings,
+                                                  stats=stats)
     result.warnings.extend(scrub_with_config(w, cfg) for w in sync_warnings)
 
     if linked:
@@ -278,11 +293,11 @@ def _print_console(result: ReviewResult, report_id: str) -> None:
     bits = ", ".join(f"{counts[s]} {s}" for s in ("critical", "high", "medium",
                                                   "low", "info") if counts.get(s))
     print(f"[ai-pr-reviewer] {repo_pr_key(result.pr.repo, result.pr.pr_number)} "
-          f"({result.pr.pr_title[:60]}) — {len(open_)} finding(s)"
+          f"({redact_secrets(result.pr.pr_title or '')[:60]}) — {len(open_)} finding(s)"
           f"{': ' + bits if bits else ''}")
     print(f"[ai-pr-reviewer] engine={result.model} mode={result.mode} "
           f"duration={result.duration_ms}ms report_id={report_id}")
-    for w in result.warnings:
+    for w in sanitize_warnings(result.warnings):  # V4-E08-T04: no raw newline/ANSI in logs
         print(f"[ai-pr-reviewer] warning: {w}")
 
 

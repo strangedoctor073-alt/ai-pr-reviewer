@@ -1,0 +1,8 @@
+diff --git a/src/big.py b/src/big.py
+--- a/src/big.py
++++ b/src/big.py
+@@ -1,3 +1,4 @@
+ import json
+ def f(x):
++    return json.loads(x)
+ # end

@@ -126,16 +126,24 @@ dependency incomplete) · 🔵 In progress · ✅ Complete.
 
 ### V4 — Deep repository intelligence
 
+> Reconciled against the approved V4 manifest (the V4 scope record in
+> `EPIC_BACKLOG.md`, approved 2026-10-07) during the V4 closeout — the
+> manifest is the ticket-level authority; these rows are the summary.
+
 | Epic | Name | Status | Completion | Dependencies (hard) | Notes |
 |------|------|--------|------------|---------------------|-------|
-| V4-E01 | repository index | ⬜ Not started | 0/6 tickets | V3-E01 (✅), V3-E02 (✅), V3-E03 (✅), V3-E04 (✅), V3-E05 (✅), V3-E06 (✅) | Critical-path start of V4; Phase 0 hard prereqs: **6 of 6 done** — Phase 0 complete, so the V4 entry condition is satisfied and V4-E01 is dependency-ready. NOT started (V4 out of scope for this run) |
-| V4-E02 | context engine v2 | 🔴 Blocked | 0/5 tickets | V4-E01 | Needs ADR-017 before implementation |
-| V4-E03 | change impact analysis | 🔴 Blocked | 0/4 tickets | V4-E01 | |
-| V4-E04 | evidence engine & provenance | 🟡 Partially implemented | 1/5 tickets complete | — (T02 blocker cleared — V3-E04-T02 shipped) | See Ticket Checklist below |
-| V4-E05 | finding identity v2 | 🔴 Blocked | 0/6 tickets | V4-E04 | Ticket list conflicts with ADR-005 — see Technical Debt |
-| V4-E06 | digital twin seed | 🔴 Blocked | 0/4 tickets | V4-E01, V4-E02 | |
-| V4-E07 | intelligence read contracts | 🔴 Blocked | 0/4 tickets | V4-E01, V4-E04 | |
-| V4-E08 | intelligence security & budgets | 🔴 Blocked | 0/5 tickets | V4-E01, V4-E02 | Continuous from V4-E01 per roadmap |
+| V4-C0 | contracts & planning | ✅ Complete | **5/5 tickets** | — | ADR-022 adoption checkpoint · ADR-005 reconciliation · context contract (ADR-017) · evaluation metrics · ADR-004 approval (all ratified 2026-10-07) |
+| V4-E01 | repository index | ✅ Complete | **6/6 tickets** | V3-E01…V3-E06 (✅) | Ephemeral per-run index (supersedes the persistent-storage outline; ADR-022 review recorded 2026-10-07) |
+| V4-E02 | context engine v2 | ✅ Complete | **5/5 tickets** | V4-E01 | ADR-017 approved; relevance@10 gate live |
+| V4-E03 | change impact analysis | ✅ Complete | **4/4 tickets** | V4-E01 | |
+| V4-E04 | evidence engine & provenance | ✅ Complete | **5/5 tickets** | — (T02 blocker cleared — V3-E04-T02 shipped) | D10 report surfacing (`risk`/`verification` JSON) completed in the closeout batch |
+| V4-E05 | finding identity v2 | ✅ Complete (T05 optional — not activated) | **4/5 tickets** | V4-E04 | Layered identity per approved ADR-005 (no alias table/backfill/cutover — old T03/T04/T06 outlines rejected; rollback-to-v1 specified in the identity spec); T05 static floor stays deferred pending a human decision |
+| V4-E06 | digital twin seed | ⏸ Deferred | — (outline dormant) | V4-E01, V4-E02 | ID reserved per the scope record — do not work |
+| V4-E07 | intelligence read contracts | ⏸ Deferred | — (outline dormant) | V4-E01, V4-E04 | ID reserved per the scope record — do not work |
+| V4-E08 | intelligence security & budgets | 🟡 Partially implemented | **6/7 tickets** | V4-E01, V4-E02 | T04 pending a human decision (sink-containment deviation ratification) |
+| V4-E09 | feedback & suppression rules | ✅ Complete | **7/7 tickets** | V3-E04 | Votes + human-authored rules; authoring reachable only via the dashboard/CLI admin token |
+| V4-E10 | GitHub comment lifecycle | ✅ Complete | **5/5 tickets** | V4-E04, V4-E05 | Ownership ledger, sticky summary, additive outputs |
+| V4-E11 | evaluation, telemetry & cost | ✅ Complete | **9/9 tickets** | V3-E03 | Includes the telemetry ingestion route + engine push (debt 15) and the dashboard cost surface (debt 9) |
 
 ### V5 — Multi-agent engineering review
 
@@ -844,17 +852,16 @@ pre-existing defects into epic credit):
     never touched, idempotent, `dry_run` observable. The V4-E04-T02
     dependency is cleared.
 11. **Provider per-batch fallback warnings echo full exception messages
-    (discovered during T06, deliberately NOT fixed):** `claude.py:245`,
-    `openai.py:78`, `gemini.py:85` all use
-    `f"... failed after retries ({exc}) — ..."`, so an exception message
-    carrying request bodies/secrets lands in report `warnings` (router
-    warnings are type-name-only per C5; this predates V3-E02 and is not
-    telemetry). T06 pinned only the *already-required* type-name-only
-    contracts (events + router warnings). Follow-up: align the three
-    provider warnings to `type(exc).__name__` + a redaction pass — needs its
-    own ticket to avoid silent scope creep. Notably,
-    `test_telemetry_nocontent.py::test_t06_claude_exception_message_never_reaches_telemetry`
-    documents the boundary (asserts telemetry clean only).
+    — ✅ RESOLVED (V4-E08-T04):** `claude.py`, `openai.py`, `gemini.py`
+    used `f"... failed after retries ({exc}) — ..."`, so an exception
+    message carrying request bodies/secrets landed in report `warnings`.
+    All three sites now emit `type(exc).__name__` only (matching the C5
+    router-warning contract); sink-side truncation + `redact_secrets()`
+    remain as the second layer. Pinned by
+    `test_v4_security_regressions.py::test_e08_t04_batch_failure_warning_is_type_name_only`
+    (source) and `test_tm_6_2_provider_warning_echo_is_bounded_redacted_and_inert`
+    (sinks); `test_telemetry_nocontent.py::test_t06_claude_exception_message_never_reaches_telemetry`
+    now asserts both layers.
 12. **ADR-016 ratification — ✅ RESOLVED (human-approved 2026-10-06):**
     ADR-016 (evaluation gate strategy: Tier A deterministic blocks / Tier B
     AI trends never block) was human-approved on 2026-10-06;

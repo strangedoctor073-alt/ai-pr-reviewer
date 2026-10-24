@@ -1,0 +1,24 @@
+id: VERIFY-002
+layer: regression
+title: 'Verification: a fixed finding whose flagged lines were reviewed is verified resolved'
+provenance: hand-authored
+diff: pr.diff
+previous:
+- file: src/safe.py
+  line: 3
+  severity: critical
+  category: security
+  title: Use of eval() executes arbitrary code
+  state: active
+expect:
+  findings:
+  - file: src/safe.py
+    line_hint: 3
+    category: security
+    title_match: eval
+    state: resolved
+    verification: resolved
+    bucket: reported
+notes: 'V4-E11-T05 replay: the seeded eval() on line 3 is replaced by ast.literal_eval inside
+  the reviewed hunk, so the flagged range was fully examined and not re-reported -> resolved.
+  Any other verdict here is a misverify (premature or missed).'

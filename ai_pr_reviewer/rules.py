@@ -40,6 +40,10 @@ SENSITIVE_EXCLUDE_GLOBS = (
     ".gcp/**", "**/.gcp/**", "secrets/**", "**/secrets/**",
     "credentials/**", "**/credentials/**",
     "service-account*.json", "**/service-account*.json",
+    # V4 merge pass (E08 finding F7, leader decision): bare private-key file
+    # names. Public keys (*.pub) are deliberately NOT excluded.
+    "id_rsa", "**/id_rsa", "id_dsa", "**/id_dsa",
+    "id_ecdsa", "**/id_ecdsa", "id_ed25519", "**/id_ed25519",
 )
 
 # Defensive cap on rules/exclude/focus — a huge (or malicious) YAML file
@@ -51,7 +55,7 @@ MAX_LIST_ENTRIES = 50
 # config written for a newer schema still reviews on an older engine.
 # ``context`` (V4-E01-T04) holds the repository-index budgets.
 KNOWN_TOP_LEVEL_KEYS = frozenset({"review", "rules", "exclude", "focus",
-                                  "context"})
+                                  "context", "feedback"})
 
 
 @dataclass
@@ -74,7 +78,12 @@ class ReviewPolicy:
 
 
 def _with_sensitive_exclusions(values: list[str]) -> list[str]:
-    return list(dict.fromkeys([*SENSITIVE_EXCLUDE_GLOBS, *values]))[:MAX_LIST_ENTRIES]
+    # The baseline always comes first and is never truncated; only the
+    # user's own entries are capped (a baseline that grows must not silently
+    # push user excludes out -- V4-E08 "known gaps").
+    baseline = list(SENSITIVE_EXCLUDE_GLOBS)
+    user = [v for v in dict.fromkeys(values) if v not in baseline]
+    return baseline + user[:MAX_LIST_ENTRIES]
 
 
 def _as_str_list(value: object, field_name: str, source: str) -> list[str]:

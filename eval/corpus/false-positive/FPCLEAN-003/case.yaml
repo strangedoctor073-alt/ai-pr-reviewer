@@ -1,0 +1,11 @@
+id: FPCLEAN-003
+layer: false-positive
+title: Benign quoted shell script draws no findings
+provenance: hand-authored
+diff: pr.diff
+expect:
+  findings: []
+  no_findings:
+  - file: scripts/build.sh
+notes: "Precision corpus (shell): quoted expansions, strict mode, no destructive glob \u2014\
+  \ the shell rules must stay quiet."

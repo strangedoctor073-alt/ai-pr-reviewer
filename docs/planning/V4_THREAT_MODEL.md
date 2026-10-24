@@ -74,7 +74,7 @@ only grow (non-removable).
 | Abuse case | Control | Owner | Test |
 |---|---|---|---|
 | Spoofed/unauthenticated telemetry ingestion | existing `X-Dashboard-Token` auth; payload structured + redacted; LAN-documented scope (network auth explicitly V5, never claimed) | `E11-T06` | auth + redaction tests on the route |
-| Provider warning echoes untrusted content into logs/output (debt 11) | truncation + `redact_secrets()` + safe formatting of warning text | `E08-T04` | warning-injection fixture |
+| Provider warning echoes untrusted content into logs/output (debt 11) | two layers: source emits only `type(exc).__name__` for batch-failure warnings (`E08-T04`); sinks keep truncation + `redact_secrets()` + safe formatting | `E08-T04` | warning-injection fixture + type-name-only source test |
 | Cost/latency data silently triggers routing (behavior change) | display-only guarantee: no cost- or latency-based routing in V4 | `E11-T07` | review gate — no routing code path |
 
 ## 7. Acceptance (E08-T01 done when…)

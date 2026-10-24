@@ -1,0 +1,10 @@
+diff --git a/src/slug.py b/src/slug.py
+--- a/src/slug.py
++++ b/src/slug.py
+@@ -1,4 +1,5 @@
+ import re
+ 
+ def slugify(text):
+-    return re.sub(r'[^a-z0-9]+', '-', text.lower()).strip('-')
++    cleaned = re.sub(r'[^a-z0-9]+', '-', text.lower())
++    return cleaned.strip('-')

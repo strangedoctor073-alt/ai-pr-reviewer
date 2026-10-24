@@ -1,0 +1,14 @@
+diff --git a/src/items.py b/src/items.py
+--- a/src/items.py
++++ b/src/items.py
+@@ -1,5 +1,6 @@
+ import yaml
+ 
+ # bookkeeping
++def add_item(item, items=[]):
+     items.append(item)
+     return items
+@@ -7,2 +8,3 @@
+ 
+ def load(stream):
++    return yaml.load(stream)

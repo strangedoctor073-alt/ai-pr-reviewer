@@ -39,6 +39,42 @@ code" per V3-E03-T02):
     **top 10** files, micro-averaged over labeled cases. Null when no
     corpus case ships relevance labels — no data beats an invented ratio.
 
+``severity_accuracy``
+    = V4 (E11-T04, §8 #4): matched findings whose engine severity **equals**
+    the label's exact ``severity`` / matched findings whose label declares
+    one. ``severity_min`` stays a match *floor*; ``severity`` is a *scored*
+    attribute — a wrong severity lowers this metric, it never turns into a
+    missed finding. **Reported only: never gated and never auto-regrades
+    severity** (debt 14). Null when no label declares a severity.
+
+``fix_usefulness``
+    = V4 (E11-T04, §8 #7): cases labeled ``fix_expected`` in which at least
+    one *posted, matched* finding carries a ``suggestion`` / all
+    ``fix_expected`` cases. Case-level on purpose: the plan's literal
+    "findings ÷ cases" can exceed 1. "Applicable" is a **presence check**
+    (a non-blank suggestion string) — the harness never applies, compiles
+    or executes a suggestion, so this measures "a fix was offered", not
+    "the fix is correct". Reported only. Null when no case is labeled.
+
+``verification_accuracy`` (+ ``misverify`` / ``missverify``)
+    = V4 (E11-T05, §8 #6): over matched findings whose label declares the
+    adjudicated ``verification`` status for the *current* diff, the share
+    whose engine ``verification_status`` equals it. Two explicit error
+    counters, with disjoint definitions:
+
+    * ``misverify`` — **wrongly confirmed**: the engine asserted a
+      definite verdict (``resolved`` or ``still_present``) that the label
+      contradicts. ``premature_resolved`` ⊂ ``misverify`` counts the D2
+      class (engine said ``resolved``, adjudication says it is not).
+      **Gate: must be 0** — an absolute check, not baselinable.
+    * ``missverify`` — **missed**: the engine said ``unable_to_verify`` (or
+      never verified) where adjudication has a definite verdict.
+      Reported, not gated.
+
+    An *unmatched* verification label already fails its case (no finding
+    to verify), so it is not double-counted here. Null when no label
+    declares a verification status.
+
 Rules that keep the numbers honest:
 
 * **Zero-input ratios are null**, never ``0.0``/``1.0`` invented from an
@@ -53,7 +89,10 @@ Rules that keep the numbers honest:
   measured (as ``xpass``) the moment the bug is fixed.
 * **Violations** (``must_not_report`` / ``no_findings`` hits) are listed
   per case with file/line/reason; any violation fails the case outright —
-  traps are absolute contracts, not partial credit.
+  traps are absolute contracts, not partial credit. A violation inside an
+  ``xfail`` case is the documented open defect: it is counted under
+  ``xfail_violations`` (visible) and never under the blocking
+  ``violations``.
 * **Verdicts**: ``pass`` (no failures) · ``fail`` (unmatched label,
   violation, state or report-order assertion failed) · ``error`` /
   ``skipped`` (run-level) · ``xfail`` (known-bug case failing as
@@ -79,9 +118,12 @@ _GUARD_FLOORS = ("high", "critical")
 
 _EMPTY_COUNTS = (
     "cases", "passed", "failed", "errors", "skipped", "xfail", "xpass",
-    "violations", "labels_total", "labels_matched",
+    "violations", "xfail_violations", "labels_total", "labels_matched",
     "findings_posted", "findings_below",
     "relevance_labels", "relevance_hits",
+    "severity_labels", "severity_hits", "fix_cases", "fix_hits",
+    "verification_labels", "verification_correct",
+    "misverify", "premature_resolved", "missverify",
 )
 
 
@@ -98,6 +140,15 @@ class CaseScore:
     false_positives: int = 0        # unmatched posted findings
     relevance_labels: int = 0       # labeled relevant files (V4 E02-T04)
     relevance_hits: int = 0         # of those, inside the selection top-10
+    severity_labels: int = 0        # matched findings w/ an exact severity label
+    severity_hits: int = 0          # of those, engine severity == label
+    fix_expected: bool = False      # case labeled fix_expected
+    fix_hit: bool = False           # a posted matched finding has a suggestion
+    verification_labels: int = 0    # matched findings w/ adjudicated status
+    verification_correct: int = 0   # engine status == adjudicated status
+    misverify: int = 0              # wrongly confirmed (definite & wrong)
+    premature_resolved: int = 0     # of those: said resolved, is not
+    missverify: int = 0             # missed (unable/None vs definite)
     violations: list[dict] = field(default_factory=list)
     failures: list[str] = field(default_factory=list)
 
@@ -171,6 +222,10 @@ def score_case(case: Case, run: CaseRun) -> CaseScore:
         cs.failures.append(
             f"unmatched expected finding: {_label_desc(below_labels[li])}")
 
+    # V4-E11 T04/T05: severity accuracy, fix usefulness, verification.
+    _score_v4_attributes(case, cs, posted_labels, below_labels,
+                         run, posted_match, below_match)
+
     # state assertions on matched labels
     for pool_labels, pool_findings, match in (
         (posted_labels, run.findings, posted_match),
@@ -221,6 +276,38 @@ def score_case(case: Case, run: CaseRun) -> CaseScore:
     return cs
 
 
+_DEFINITE = ("resolved", "still_present")
+
+
+def _score_v4_attributes(case, cs, posted_labels, below_labels, run,
+                         posted_match, below_match) -> None:
+    for pool_labels, pool_findings, match in (
+        (posted_labels, run.findings, posted_match),
+        (below_labels, run.below, below_match),
+    ):
+        for li, fi, _dist in match.matched:
+            label, finding = pool_labels[li], pool_findings[fi]
+            if label.severity is not None:
+                cs.severity_labels += 1
+                if finding.get("severity") == label.severity:
+                    cs.severity_hits += 1
+            if label.verification is not None:
+                cs.verification_labels += 1
+                actual = finding.get("verification_status")
+                if actual == label.verification:
+                    cs.verification_correct += 1
+                elif actual in _DEFINITE:
+                    cs.misverify += 1
+                    if actual == "resolved":
+                        cs.premature_resolved += 1
+                elif label.verification in _DEFINITE:
+                    cs.missverify += 1
+    if case.fix_expected:
+        cs.fix_expected = True
+        cs.fix_hit = any(run.findings[fi].get("has_suggestion")
+                         for _li, fi, _d in posted_match.matched)
+
+
 @dataclass
 class Scorecard:
     cases: list[CaseScore]
@@ -230,6 +317,10 @@ class Scorecard:
     recall_critical_high: float | None
     relevance_at_10: float | None
     counts: dict[str, int]
+    # V4-E11 (additive; defaults keep hand-built scorecards valid)
+    severity_accuracy: float | None = None
+    fix_usefulness: float | None = None
+    verification_accuracy: float | None = None
 
 
 def _ratio(num: int, den: int) -> float | None:
@@ -264,7 +355,14 @@ def score_corpus(cases: tuple[Case, ...],
     counts = {key: 0 for key in _EMPTY_COUNTS}
     counts["cases"] = len(scores)
     for s in scores:
-        counts["violations"] += len(s.violations)
+        # V4-E11 fix: a known-bug (xfail) case's trap hit IS the open
+        # defect — it stays visible (``xfail_violations``) but must not
+        # block the gate or the baseline, exactly like its unmatched
+        # labels. (Before any xfail case existed this path was unexercised.)
+        if s.status == "xfail":
+            counts["xfail_violations"] += len(s.violations)
+        else:
+            counts["violations"] += len(s.violations)
     counts["passed"] = sum(1 for s in scores if s.status == "pass")
     counts["failed"] = sum(1 for s in scores if s.status == "fail")
     counts["errors"] = sum(1 for s in scores if s.status == "error")
@@ -277,6 +375,16 @@ def score_corpus(cases: tuple[Case, ...],
     counts["findings_below"] = sum(s.below for s in scored)
     counts["relevance_labels"] = sum(s.relevance_labels for s in scored)
     counts["relevance_hits"] = sum(s.relevance_hits for s in scored)
+    for key, attr in (("severity_labels", "severity_labels"),
+                      ("severity_hits", "severity_hits"),
+                      ("verification_labels", "verification_labels"),
+                      ("verification_correct", "verification_correct"),
+                      ("misverify", "misverify"),
+                      ("premature_resolved", "premature_resolved"),
+                      ("missverify", "missverify")):
+        counts[key] = sum(getattr(s, attr) for s in scored)
+    counts["fix_cases"] = sum(1 for s in scored if s.fix_expected)
+    counts["fix_hits"] = sum(1 for s in scored if s.fix_hit)
 
     return Scorecard(
         cases=scores,
@@ -287,6 +395,11 @@ def score_corpus(cases: tuple[Case, ...],
         relevance_at_10=_ratio(counts["relevance_hits"],
                                counts["relevance_labels"]),
         counts=counts,
+        severity_accuracy=_ratio(counts["severity_hits"],
+                                 counts["severity_labels"]),
+        fix_usefulness=_ratio(counts["fix_hits"], counts["fix_cases"]),
+        verification_accuracy=_ratio(counts["verification_correct"],
+                                     counts["verification_labels"]),
     )
 
 
@@ -302,6 +415,10 @@ def scorecard_to_dict(card: Scorecard) -> dict:
             "false_positive_rate": card.false_positive_rate,
             "recall_critical_high": card.recall_critical_high,
             "relevance_at_10": card.relevance_at_10,
+            # V4-E11 (additive): report-only unless the gate says otherwise
+            "severity_accuracy": card.severity_accuracy,
+            "fix_usefulness": card.fix_usefulness,
+            "verification_accuracy": card.verification_accuracy,
         },
         "counts": dict(sorted(card.counts.items())),
         "cases": [
@@ -320,6 +437,18 @@ def scorecard_to_dict(card: Scorecard) -> dict:
                 "relevance_at_10": (
                     {"hits": s.relevance_hits, "labels": s.relevance_labels}
                     if s.relevance_labels else None),
+                # V4-E11 (additive, null when the case declares none)
+                "severity": ({"hits": s.severity_hits,
+                              "labels": s.severity_labels}
+                             if s.severity_labels else None),
+                "fix_usefulness": (s.fix_hit if s.fix_expected else None),
+                "verification": (
+                    {"correct": s.verification_correct,
+                     "labels": s.verification_labels,
+                     "misverify": s.misverify,
+                     "premature_resolved": s.premature_resolved,
+                     "missverify": s.missverify}
+                    if s.verification_labels else None),
                 "violations": list(s.violations),
                 "failures": list(s.failures),
             }

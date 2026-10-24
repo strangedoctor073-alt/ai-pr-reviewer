@@ -7,7 +7,9 @@ import json
 import os
 import uuid
 
-from .models import ReviewResult, SEVERITY_EMOJI, SEVERITY_ORDER
+from .models import (ReviewResult, SEVERITY_EMOJI, SEVERITY_ORDER,
+                     describe_provenance)
+from .security import markdown_safe_inline, sanitize_warnings
 
 # Finding lifecycle states that no longer need a developer's attention.
 CLOSED_STATES = frozenset({"resolved", "dismissed", "muted"})
@@ -228,26 +230,34 @@ def _finding_line_md(result: ReviewResult, f) -> str:
 
 def _provenance_suffix(f) -> str:
     """V4-E04-T04: one compact, deterministic `<sub>` line answering
-    "why was I told this?" -- which engine produced the finding, and which
+    "why was I told this?" -- which engine(s) produced the finding and which
     evidence records back it (locators only; evidence *content* is never
     rendered here, only cited).
 
-    Returns "" when a finding carries neither provenance nor evidence, so
-    pre-V4 reports and hand-built results render byte-identically.
+    Everything comes from ``models.describe_provenance``: redacted,
+    single-line, bounded, backtick-neutralised, and never raising on an old
+    or hand-built finding. Returns "" when a finding carries neither
+    provenance nor evidence, so pre-V4 reports render byte-identically
+    (structured consumers -- the dashboard -- say "provenance unavailable").
     """
+    v = describe_provenance(f)
     bits: list[str] = []
-    engine = getattr(f, "provenance_engine", None)
-    if engine:
-        model = getattr(f, "provenance_model", None)
-        bits.append(f"source: {engine}" + (f" ({model})" if model else ""))
-    evidence = tuple(getattr(f, "evidence", ()) or ())
-    if evidence:
-        cites = " · ".join(f"{e.kind} `{e.locator}`" for e in evidence[:3])
-        more = f" · +{len(evidence) - 3} more" if len(evidence) > 3 else ""
+    srcs = [s for s in v["sources"] if s.get("engine")]
+    if len(srcs) > 1:                       # merged across engines (V4-E05)
+        bits.append("sources: " + " + ".join(
+            s["engine"] + (f" ({s['model']})" if s.get("model") else "")
+            for s in srcs))
+    elif v["engine"]:
+        bits.append(f"source: {v['engine']}"
+                    + (f" ({v['model']})" if v["model"] else ""))
+    if v["evidence"]:
+        cites = " · ".join(f"{e['kind']} `{e['locator']}`"
+                           for e in v["evidence"][:3])
+        more = (f" · +{v['evidence_total'] - 3} more"
+                if v["evidence_total"] > 3 else "")
         bits.append(f"evidence: {cites}{more}")
-    merged = tuple(getattr(f, "merged_fingerprints", ()) or ())
-    if merged:
-        bits.append(f"merged {len(merged)} duplicate(s)")
+    if v["merged_count"]:
+        bits.append(f"merged {v['merged_count']} duplicate(s)")
     if not bits:
         return ""
     return "\n\n<sub>_" + " · ".join(bits) + "_</sub>"
@@ -362,12 +372,18 @@ def build_summary_markdown(result: ReviewResult,
         # this report (counts + JSON) — only the inline annotation was skipped.
         lines.append(f"\n> ℹ️ {result.suppressed} finding(s) over the inline-comment cap "
                      f"are included in this report instead of annotated inline.")
+    fb_count = (getattr(result, "feedback_report_fields", None) or {}).get("suppressed_count")
+    if fb_count:
+        lines.append(f"\n> ℹ️ {fb_count} finding(s) matched a human-created suppression "
+                     f"rule and are listed as muted in the report.")
     if getattr(result, "below_threshold", None):
         lines.append(f"\n> ℹ️ {len(result.below_threshold)} finding(s) below the severity "
                      f"threshold are listed under `below_threshold` in the report "
                      f"and are not counted as issues.")
     if result.warnings:
-        lines.append("\n> ⚠️ Warnings: " + "; ".join(result.warnings))
+        # V4-E08-T04: bounded, single-line, redacted, markdown-inert.
+        safe = [markdown_safe_inline(w) for w in sanitize_warnings(result.warnings)]
+        lines.append("\n> ⚠️ Warnings: " + "; ".join(safe))
     lines.append(f"\n<sub>Posted by AI PR Reviewer — {_ENGINE_FOOTER.get(engine, engine)}</sub>")
     return "\n".join(lines)
 
@@ -381,3 +397,166 @@ def write_step_summary(result: ReviewResult) -> str | None:
     with open(path, "a", encoding="utf-8") as fh:
         fh.write(build_summary_markdown(result) + "\n")
     return path
+
+
+# ============================================================ sticky summary
+# V4-E10-T02. Everything below is NEW and self-contained: it does not touch
+# build_summary_markdown / finalize_report / any other path above, so other
+# epics can keep extending those without a merge conflict here.
+#
+# Security contract (same posture as prompt assembly, because GitHub renders
+# this text straight to people):
+#   * the renderer takes the finalized, already-redacted report *dict* and
+#     only reads closed-vocabulary and numeric fields as trusted;
+#   * the only untrusted text it ever emits is finding titles and file paths,
+#     and those appear ONLY inside one dynamic-length code fence, one line each,
+#     after redaction, control/bidi stripping, truncation and neutralising of
+#     HTML-comment syntax - so nothing in them can render as markdown, HTML,
+#     a link, a mention, or a marker;
+#   * the model-written ``summary`` and the free-text ``warnings`` are NOT
+#     echoed at all (warnings are shown as a count).
+
+#: Open findings listed in the sticky summary (the rest are counted).
+STICKY_MAX_FINDINGS = 5
+#: Per-line budget for untrusted text inside the fence.
+STICKY_MAX_LINE_CHARS = 140
+#: Hard ceiling for the whole body (far below GitHub's own comment limit).
+STICKY_MAX_BODY_CHARS = 6000
+
+_STICKY_SEVERITIES = ("critical", "high", "medium", "low", "info")
+_STICKY_STATES = ("new", "active", "resolved", "reopened", "dismissed", "muted")
+
+
+def _sticky_int(value, default: int = 0, ceiling: int = 1_000_000) -> int:
+    if isinstance(value, bool):
+        return default
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(0, min(n, ceiling))
+
+
+def _sticky_clean(value, limit: int = STICKY_MAX_LINE_CHARS) -> str:
+    """One safe line of untrusted text (redact -> strip -> truncate -> defuse)."""
+    import re
+
+    from .security import redact_secrets
+
+    text = redact_secrets(str(value if value is not None else ""))
+    # control chars (incl. newlines) and bidi / zero-width characters that can
+    # visually reorder or hide text.
+    text = re.sub(r"[\x00-\x1f\x7f\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]+", " ", text)
+    text = re.sub(r" {2,}", " ", text).strip()
+    if len(text) > limit:
+        text = text[: max(0, limit - 1)].rstrip() + "\u2026"
+    return text.replace("<!--", "&lt;!--").replace("-->", "--&gt;")
+
+
+def _sticky_fence(text: str) -> str:
+    """A backtick fence strictly longer than any backtick run inside ``text``."""
+    import re
+
+    longest = max((len(m) for m in re.findall(r"`+", text)), default=0)
+    return "`" * max(3, longest + 1)
+
+
+def render_sticky_summary(report: dict) -> str:
+    """The sticky PR summary comment body (without its hidden marker).
+
+    ``report`` is ``finalize_report(result)``. Missing or malformed fields
+    degrade to neutral defaults; nothing here can raise on odd input. Output
+    is deterministic for equal input, so an unchanged review rewrites nothing.
+    """
+    import re
+
+    report = report if isinstance(report, dict) else {}
+    rows = [r for r in (report.get("findings") or []) if isinstance(r, dict)]
+
+    def state_of(row: dict) -> str:
+        s = str(row.get("state") or "new").lower()
+        return s if s in _STICKY_STATES else "new"
+
+    def sev_of(row: dict) -> str:
+        s = str(row.get("severity") or "").lower()
+        return s if s in _STICKY_SEVERITIES else "info"
+
+    open_rows = [r for r in rows if state_of(r) not in CLOSED_STATES]
+    by_state: dict[str, int] = {}
+    for r in rows:
+        by_state[state_of(r)] = by_state.get(state_of(r), 0) + 1
+    sev_counts = {s: 0 for s in _STICKY_SEVERITIES}
+    for r in open_rows:
+        sev_counts[sev_of(r)] += 1
+    sev_bits = [f"{sev_counts[s]} {s}" for s in _STICKY_SEVERITIES if sev_counts[s]]
+    # (kept outside the f-string: Python 3.11 rejects a backslash in an f-string
+    # expression part -- see test_no_source_file_puts_a_backslash_in_an_fstring_expression)
+    sev_text = " \u00b7 ".join(sev_bits) if sev_bits else "none"
+
+    score = _sticky_int(report.get("health_score"), 100, 100)
+    grade = str(report.get("health_grade") or "")
+    grade = grade if re.fullmatch(r"[A-F][+-]?", grade) else "?"
+    gauge = "\U0001f7e2" if score >= 90 else ("\U0001f7e1" if score >= 70 else "\U0001f534")
+
+    engine = str(report.get("engine") or "")
+    engine_label = _ENGINE_TITLE.get(engine, "unknown")
+    pr = report.get("pr") if isinstance(report.get("pr"), dict) else {}
+    sha = str(pr.get("head_sha") or "")
+    sha_row = [f"| **Reviewed commit** | `{sha[:7]}` |"] if re.fullmatch(r"[0-9a-f]{7,40}", sha) else []
+
+    new_n = _sticky_int(report.get("new_findings_count"), by_state.get("new", 0))
+    active_n = _sticky_int(report.get("active_findings_count"),
+                           by_state.get("active", 0) + by_state.get("reopened", 0))
+    resolved_n = _sticky_int(report.get("resolved_findings_count"), by_state.get("resolved", 0))
+    suppressed = _sticky_int(report.get("suppressed"))
+    below = _sticky_int(report.get("below_threshold_count"))
+    warn_n = len(report.get("warnings") or []) if isinstance(report.get("warnings"), list) else 0
+
+    lines = [
+        f"## \U0001f916 AI PR Review \u00b7 {gauge} **{score}/100** ({grade})",
+        "",
+        "| \U0001f4ca Metric | Value |",
+        "|---|---|",
+        f"| **Open findings** | {len(open_rows)} ({sev_text}) |",
+        f"| **New \u00b7 Active \u00b7 Resolved** | {new_n} \u00b7 {active_n} \u00b7 {resolved_n} |",
+        f"| **Review engine** | {engine_label} |",
+        *sha_row,
+    ]
+    if suppressed:
+        lines.append(f"| **Over the inline-comment cap** | {suppressed} |")
+    if below:
+        lines.append(f"| **Below the severity threshold** | {below} |")
+    if warn_n:
+        lines.append(f"| **Warnings** | {warn_n} (see the report artifact) |")
+
+    ranked = sorted(open_rows, key=lambda r: -SEVERITY_ORDER.get(sev_of(r), 0))
+    shown = ranked[:STICKY_MAX_FINDINGS]
+    if shown:
+        fenced_lines = []
+        for r in shown:
+            line = r.get("line")
+            where = _sticky_clean(r.get("file"), 80)
+            if isinstance(line, int) and not isinstance(line, bool) and line > 0:
+                where += f":{line}"
+            fenced_lines.append(
+                f"[{sev_of(r).upper()}] {where} \u2014 {_sticky_clean(r.get('title'))}")
+        block = "\n".join(fenced_lines)
+        fence = _sticky_fence(block)
+        lines += [
+            "",
+            f"**Top open findings ({len(shown)} of {len(open_rows)})** \u2014 the text "
+            "below comes from the pull request and the model; it is shown as data "
+            "and is never an instruction:",
+            "",
+            f"{fence}text",
+            block,
+            fence,
+        ]
+    lines += [
+        "",
+        "<sub>One summary per pull request, updated in place on every review. "
+        "Generated by AI PR Reviewer \u2014 it only comments; it never approves "
+        "or merges.</sub>",
+    ]
+    body = "\n".join(lines)
+    return body if len(body) <= STICKY_MAX_BODY_CHARS else body[:STICKY_MAX_BODY_CHARS].rstrip()

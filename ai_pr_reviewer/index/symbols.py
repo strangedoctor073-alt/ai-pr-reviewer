@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import re
 
-from .limits import IndexLimits
+from .limits import IndexLimits, bounded_lines
 
 # ------------------------------------------------------------- patterns
 
@@ -23,6 +23,12 @@ _PY_DEF = re.compile(r"^\s*(?:async\s+)?def\s+([A-Za-z_]\w*)")
 _PY_CLASS = re.compile(r"^\s*class\s+([A-Za-z_]\w*)")
 _PY_FROM = re.compile(r"^\s*from\s+([.\w][\w.]*)\s+import\b")
 _PY_IMPORT = re.compile(r"^\s*import\s+([.\w][\w.]*)")
+# V4 merge pass: ``from pkg import mod`` may import a SUBMODULE. The names
+# after ``import`` (single-line form only) become extra candidate specs
+# ``pkg.mod``; the graph resolves one only if that file is indexed, so a
+# plain symbol import (``from pkg import func``) still creates no edge.
+_PY_FROM_NAMES = re.compile(r"^\s*from\s+([.\w][\w.]*)\s+import\s+\(?([^#()]*)")
+_PY_NAME = re.compile(r"^[A-Za-z_]\w*$")
 
 # JavaScript / TypeScript
 _JS_FUNC = re.compile(
@@ -120,6 +126,24 @@ _IMPORT_RULES = {
 }
 
 
+def _py_from_submodule_specs(line: str) -> list[str]:
+    """Candidate submodule specs for a one-line ``from X import a, b as c``.
+
+    ``from . import m`` -> ``.m``; ``from core import m0`` -> ``core.m0``.
+    At most 16 names per line (bounded); aliases/``*`` are ignored.
+    """
+    m = _PY_FROM_NAMES.match(line)
+    if not m:
+        return []
+    base, tail = m.group(1), m.group(2)
+    out: list[str] = []
+    for part in tail.split(",")[:16]:
+        name = part.strip().split(" as ")[0].strip()
+        if _PY_NAME.match(name):
+            out.append(f"{base}{name}" if base.endswith(".") else f"{base}.{name}")
+    return out
+
+
 def extract_symbols(relpath: str, language: str, text: str,
                     limits: IndexLimits) -> tuple[list[tuple[str, str, int]],
                                                   list[str], bool]:
@@ -142,7 +166,7 @@ def extract_symbols(relpath: str, language: str, text: str,
     symbols_full = imports_full = False
     truncated = False
 
-    for lineno, line in enumerate(text.splitlines(), 1):
+    for lineno, line, _capped in bounded_lines(text):
         if symbols_full and imports_full:
             truncated = True
             break
@@ -163,12 +187,17 @@ def extract_symbols(relpath: str, language: str, text: str,
             for pattern in import_rules:
                 m = pattern.match(line)
                 if m:
-                    spec = m.group(1)
-                    if spec and spec not in seen_imports:
-                        if len(imports) >= limits.max_imports_per_file:
-                            imports_full = True
-                            truncated = True
-                            break
-                        seen_imports.add(spec)
-                        imports.append(spec)
+                    specs = [m.group(1)]
+                    if pattern is _PY_FROM:
+                        specs += _py_from_submodule_specs(line)
+                    for spec in specs:
+                        if spec and spec not in seen_imports:
+                            if len(imports) >= limits.max_imports_per_file:
+                                imports_full = True
+                                truncated = True
+                                break
+                            seen_imports.add(spec)
+                            imports.append(spec)
+                    if imports_full:
+                        break
     return symbols, imports, truncated

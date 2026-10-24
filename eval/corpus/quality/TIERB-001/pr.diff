@@ -1,0 +1,10 @@
+diff --git a/src/users.py b/src/users.py
+--- a/src/users.py
++++ b/src/users.py
+@@ -1,2 +1,6 @@
+ import sqlite3
+ 
++API_TOKEN = "fixture-not-a-real-secret-1234"
++
++def lookup(conn, name):
++    return conn.execute(f"SELECT * FROM users WHERE name = '{name}'").fetchall()

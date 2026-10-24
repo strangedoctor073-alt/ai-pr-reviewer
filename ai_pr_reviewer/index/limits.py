@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import fnmatch
 import os
+import time
 from dataclasses import dataclass
 
 from ..repo_context import _safe_repo_path
@@ -184,3 +185,74 @@ class IndexLimits:
             max_bytes=clamp_int(getattr(policy, "context_max_bytes", None),
                                 DEFAULT_MAX_BYTES, HARD_MAX_BYTES),
         )
+
+
+# ---------------------------------------------------------------------------
+# V4-E08-T03 (second pass) — regex-input and wall-clock bounds
+# ---------------------------------------------------------------------------
+# Additive only: nothing above is renamed or re-signed (builder.py reads this
+# module). Audit finding: the per-file BYTE cap bounds memory but not CPU —
+# ``symbols._JS_REQUIRE`` / ``_JS_EXPORT_FROM`` backtrack quadratically on one
+# long whitespace line (measured: 40 000 chars ≈ 16 s), and ``build_index`` has
+# no wall-clock bound. Both guards are WIRED since the E08 merge pass:
+# ``symbols.bounded_lines`` cuts every line to the cap below before any
+# per-line regex runs (``was_capped`` is recorded), and ``build_index`` holds
+# a ``BuildDeadline`` for the whole build (``builder.py``).
+
+#: Longest line handed to a symbol regex (V4-E08-T03 baseline). Real source
+#: lines are far shorter; minified/generated lines are already vendor-skipped.
+DEFAULT_MAX_LINE_CHARS = 2_000
+HARD_MAX_LINE_CHARS = 20_000
+#: Wall-clock budget for one index build, in seconds (V4-E08-T03 baseline).
+DEFAULT_MAX_BUILD_SECONDS = 30.0
+HARD_MAX_BUILD_SECONDS = 300.0
+
+
+def cap_line(line: str, max_chars: int = DEFAULT_MAX_LINE_CHARS) -> str:
+    """Return ``line`` cut to ``max_chars`` — the input guard for every
+    per-line regex, so no pattern can ever see an attacker-sized line."""
+    max_chars = clamp_int(max_chars, DEFAULT_MAX_LINE_CHARS, HARD_MAX_LINE_CHARS)
+    return line if len(line) <= max_chars else line[:max_chars]
+
+
+def bounded_lines(text: str, max_chars: int = DEFAULT_MAX_LINE_CHARS):
+    """``(lineno, line, was_capped)`` triples, each line cut to ``max_chars``.
+
+    Splits the way ``str.splitlines`` does; ``was_capped`` lets the caller
+    raise ONE loud warning per file instead of silently skipping content.
+    """
+    max_chars = clamp_int(max_chars, DEFAULT_MAX_LINE_CHARS, HARD_MAX_LINE_CHARS)
+    for lineno, line in enumerate(text.splitlines(), 1):
+        if len(line) > max_chars:
+            yield lineno, line[:max_chars], True
+        else:
+            yield lineno, line, False
+
+
+class BuildDeadline:
+    """Monotonic wall-clock budget for an index build.
+
+    ``expired()`` is cheap enough to call once per file. ``clock`` is
+    injectable so tests need no sleeping. A non-positive/invalid ``seconds``
+    falls back to the default and is capped at the hard maximum — config can
+    shorten the budget, never remove it.
+    """
+
+    def __init__(self, seconds=DEFAULT_MAX_BUILD_SECONDS, *, clock=time.monotonic):
+        ok = (isinstance(seconds, (int, float)) and not isinstance(seconds, bool)
+              and seconds > 0)
+        self.seconds = min(float(seconds), HARD_MAX_BUILD_SECONDS) if ok \
+            else DEFAULT_MAX_BUILD_SECONDS
+        self._clock = clock
+        self._start = clock()
+
+    def elapsed(self) -> float:
+        return self._clock() - self._start
+
+    def expired(self) -> bool:
+        return self.elapsed() >= self.seconds
+
+    def warning(self, done: int, total: int) -> str:
+        """The loud degrade message (partial index, never a silent stop)."""
+        return (f"index: build time budget ({self.seconds:g}s) exhausted — "
+                f"stopped after {done} of {total} file(s)")

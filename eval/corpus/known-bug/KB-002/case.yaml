@@ -1,0 +1,24 @@
+id: KB-002
+layer: known-bug
+title: KNOWN GAP - one eval() is reported twice (regex SEC003 + AST rule) instead of once
+provenance: hand-authored
+diff: pr.diff
+xfail: true
+expect:
+  findings:
+  - file: src/calc2.py
+    line_hint: 2
+    category: security
+    severity_min: critical
+    title_match: eval
+  must_not_report:
+  - file: src/calc2.py
+    line_hint: 2
+    title_match: AST-detected
+    reason: 'Same issue, same line as the regex finding: one comment per issue. Cross-engine
+      duplicates break the duplicate-rate budget (<= 0.02, TESTING_EVALUATION_PLAN section
+      4); fix owned by V4-E05-T03 (cross-engine dedup).'
+notes: 'xfail: documents a real defect the corpus surfaced while it was being expanded - the
+  regex rule and the AST rule both post the same eval() under different titles, which also
+  costs precision (unmatched duplicate). Kept OUT of the scored cases so another epic''s open
+  work does not turn this gate red; it flips to xpass when dedup lands - drop the marker then.'

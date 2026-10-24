@@ -1,0 +1,20 @@
+id: FN-002
+layer: false-negative
+title: Disabled TLS verification and pickle deserialization are caught
+provenance: hand-authored
+diff: pr.diff
+expect:
+  findings:
+  - file: src/net.py
+    line_hint: 5
+    category: security
+    severity_min: critical
+    title_match: TLS
+    severity: critical
+  - file: src/net.py
+    line_hint: 8
+    category: security
+    severity_min: high
+    title_match: pickle
+    severity: high
+notes: 'Recall corpus (critical-class): verify=False (SEC007) and unsafe pickle (AST).'

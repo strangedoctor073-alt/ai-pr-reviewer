@@ -1,0 +1,18 @@
+id: FIX-002
+layer: regression
+title: Disabled TLS verification is flagged; a fix is expected but the static rule offers
+  none
+provenance: hand-authored
+diff: pr.diff
+fix_expected: true
+expect:
+  findings:
+  - file: src/client.py
+    line_hint: 2
+    category: security
+    severity_min: critical
+    title_match: TLS
+    severity: critical
+notes: "Deliberate honest shortfall: SEC007 has no suggestion, so fix_usefulness reports <\
+  \ 1.0 over the corpus. The metric is report-only (\xA78 #7); the finding itself is a normal\
+  \ pass."

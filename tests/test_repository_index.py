@@ -295,7 +295,10 @@ def test_python_symbols_and_imports(tmp_path):
     assert ("class", "Worker") in names
     assert ("function", "main") in names
     assert ("function", "run") in names
-    assert entry.imports == ("os", "utils.helpers")   # line order, deduped
+    # line order, deduped. ``from utils.helpers import helper`` also yields the
+    # candidate submodule spec ``utils.helpers.helper`` (V4 merge pass); the
+    # graph keeps it only if that file is indexed, so no edge is invented.
+    assert entry.imports == ("os", "utils.helpers", "utils.helpers.helper")
     assert entry.symbols_truncated is False
     # every symbol line is a real line of the file
     assert all(1 <= s.line <= len(PY_TREE["app/main.py"].splitlines())
@@ -620,3 +623,35 @@ def test_no_provider_reads_the_index(tmp_path):
         source = Path(module.__file__).read_text(encoding="utf-8")
         assert "repo_index" not in source, module.__name__
         assert "context_selection" not in source, module.__name__
+
+
+# ---- V4 merge pass: ``from pkg import module`` is an import edge ----------
+def _edges_for(tmp_path, files):
+    from ai_pr_reviewer.index import build_index
+    _write_tree(tmp_path, files)
+    _git_checkout(tmp_path)
+    idx = build_index(str(tmp_path), expected_repo="acme/api")
+    assert idx is not None
+    return set(idx.edges)
+
+
+def test_from_pkg_import_module_resolves_to_the_submodule(tmp_path):
+    edges = _edges_for(tmp_path, {
+        "core/__init__.py": "", "core/m0.py": "def f():\n    return 1\n",
+        "svc/consumer.py": "from core import m0\n"})
+    assert ("svc/consumer.py", "core/m0.py") in edges
+
+
+def test_relative_from_dot_import_module_resolves(tmp_path):
+    edges = _edges_for(tmp_path, {
+        "pkg/__init__.py": "", "pkg/a.py": "from . import b\n",
+        "pkg/b.py": "X = 1\n"})
+    assert ("pkg/a.py", "pkg/b.py") in edges
+
+
+def test_from_import_of_a_plain_symbol_invents_no_edge(tmp_path):
+    edges = _edges_for(tmp_path, {
+        "core/__init__.py": "", "core/m0.py": "def f():\n    return 1\n",
+        "svc/c.py": "from core.m0 import f, nothing_here as z\n"})
+    assert ("svc/c.py", "core/m0.py") in edges          # via the module spec
+    assert not any(dst.endswith("nothing_here.py") for _s, dst in edges)

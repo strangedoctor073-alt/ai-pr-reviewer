@@ -60,3 +60,13 @@ focus:
 context:
   max_files: 1000
   max_bytes: 10485760
+
+# Human feedback wiring (V4-E09 — optional; DISABLED by default).
+# When enabled, the dashboard's feedback buttons (up/down/mute) record votes
+# and human-authored suppression rules, and subsequent runs apply the rules a
+# human created. A PR can never create a rule (only the dashboard/CLI admin
+# token can), and every row is repo-scoped, bounded and expiry-checked.
+# The value must be the literal `true` — any other value stays disabled, so
+# a typo can never silently activate it.
+feedback:
+  enabled: false

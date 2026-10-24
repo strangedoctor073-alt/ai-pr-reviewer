@@ -1,0 +1,25 @@
+id: RELEV-005
+layer: quality
+title: Two-hop dependent, direct importer and test outrank 11 core/ distractors
+provenance: hand-authored
+diff: pr.diff
+context:
+  files:
+  - checkout/svc/orders.py
+  - checkout/app/main.py
+  - checkout/tests/test_money.py
+  impact:
+  - svc/orders.py
+  - app/main.py
+  - tests/test_money.py
+expect:
+  findings: []
+  no_findings:
+  - file: core/money.py
+    category: security
+  - file: core/money.py
+    category: bug
+notes: 'V4-E11-T03 discriminating fixture: app/main.py -> svc/orders.py -> core/money.py (changed).
+  The transitive dependent (hop 2) and the test must stay inside the top 10 despite 11 adjacent
+  core/ files; impact must name all three. no_findings traps are category-scoped: the low-severity
+  TEST001 test-gap note is expected below threshold and is not what this case measures.'

@@ -1,0 +1,9 @@
+diff --git a/scripts/build.sh b/scripts/build.sh
+--- a/scripts/build.sh
++++ b/scripts/build.sh
+@@ -1,2 +1,5 @@
+ #!/usr/bin/env bash
+ set -euo pipefail
++out_dir="${1:?usage: build.sh <dir>}"
++mkdir -p "$out_dir"
++cp -r ./dist/. "$out_dir"/

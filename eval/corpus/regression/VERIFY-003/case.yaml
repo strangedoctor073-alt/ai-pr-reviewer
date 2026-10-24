@@ -1,0 +1,25 @@
+id: VERIFY-003
+layer: regression
+title: 'Verification: a finding outside the reviewed hunk is unable_to_verify and stays active
+  (D2 class)'
+provenance: hand-authored
+diff: pr.diff
+previous:
+- file: src/big.py
+  line: 120
+  severity: critical
+  category: security
+  title: Use of eval() executes arbitrary code
+  state: active
+expect:
+  findings:
+  - file: src/big.py
+    line_hint: 120
+    category: security
+    title_match: eval
+    state: active
+    verification: unable_to_verify
+    bucket: reported
+notes: 'V4-E11-T05 / D2 class: the diff only touches lines 1-3 of the file; the flagged line
+  120 was not examined. Not seeing it again is NOT evidence of a fix: it must read unable_to_verify
+  and stay active. ''resolved'' here is a premature-resolved misverify (gate: 0).'

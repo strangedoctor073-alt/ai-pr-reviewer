@@ -1,0 +1,397 @@
+{
+ "_comment": "v1 fingerprints = sha256(category|file|normalized_title)[:16], captured from the PRISTINE pre-V4-E05-hardening tree. Frozen: a mismatch means v1 identity changed (orphaning stored rows, mutes and comment bindings). NEVER regenerate to make a failing test pass.",
+ "rows": [
+  {
+   "source": "static-engine:demo/samples/frontend_checkout.diff",
+   "category": "security",
+   "file": "src/checkout.js",
+   "title": "Assignment to innerHTML can introduce XSS",
+   "v1": "9eed2c703b0b23ca"
+  },
+  {
+   "source": "static-engine:demo/samples/frontend_checkout.diff",
+   "category": "security",
+   "file": "src/checkout.js",
+   "title": "Auth token stored in localStorage",
+   "v1": "3a2ee7a7530ac64a"
+  },
+  {
+   "source": "static-engine:demo/samples/frontend_checkout.diff",
+   "category": "bug",
+   "file": "src/checkout.js",
+   "title": "Loose equality (==) performs type coercion",
+   "v1": "b9e1dcad8bdafbf3"
+  },
+  {
+   "source": "static-engine:demo/samples/frontend_checkout.diff",
+   "category": "bug",
+   "file": "src/checkout.js",
+   "title": "`var` is function-scoped and hoisted",
+   "v1": "01bffec7821ab50d"
+  },
+  {
+   "source": "static-engine:demo/samples/frontend_checkout.diff",
+   "category": "style",
+   "file": "src/checkout.js",
+   "title": "console.log left in code",
+   "v1": "9e28191698d7d97f"
+  },
+  {
+   "source": "static-engine:demo/samples/frontend_checkout.diff",
+   "category": "race-condition",
+   "file": "src/checkout.js",
+   "title": "Async code — check for shared mutable state",
+   "v1": "55b209eff4bf940e"
+  },
+  {
+   "source": "static-engine:demo/samples/frontend_checkout.diff",
+   "category": "testing",
+   "file": "src/checkout.js",
+   "title": "possible missing test coverage",
+   "v1": "9423be52b7493e6b"
+  },
+  {
+   "source": "static-engine:demo/samples/infra_deploy.diff",
+   "category": "security",
+   "file": "deploy.sh",
+   "title": "Hardcoded credential in source code",
+   "v1": "1dfb7fc4d49c2c67"
+  },
+  {
+   "source": "static-engine:demo/samples/infra_deploy.diff",
+   "category": "bug",
+   "file": "deploy.sh",
+   "title": "Unquoted variable with rm -rf",
+   "v1": "7f73358bd4537f36"
+  },
+  {
+   "source": "static-engine:demo/samples/infra_deploy.diff",
+   "category": "security",
+   "file": "deploy.sh",
+   "title": "World-writable permission granted (777)",
+   "v1": "07d2fc223a11b8f2"
+  },
+  {
+   "source": "static-engine:demo/samples/infra_deploy.diff",
+   "category": "bug",
+   "file": "deploy.sh",
+   "title": "Unquoted shell variable",
+   "v1": "507d931b28a36ca7"
+  },
+  {
+   "source": "static-engine:demo/samples/payments_refunds.diff",
+   "category": "security",
+   "file": "payments/refunds.py",
+   "title": "Possible SQL injection via string-formatted query",
+   "v1": "16ff95dfc5f29c3b"
+  },
+  {
+   "source": "static-engine:demo/samples/payments_refunds.diff",
+   "category": "bug",
+   "file": "payments/refunds.py",
+   "title": "Mutable default argument shared across calls",
+   "v1": "31f782b58d621e4b"
+  },
+  {
+   "source": "static-engine:demo/samples/payments_refunds.diff",
+   "category": "error-handling",
+   "file": "payments/refunds.py",
+   "title": "Bare `except:` swallows every exception",
+   "v1": "fefd19bcfea2a3a6"
+  },
+  {
+   "source": "static-engine:demo/samples/payments_refunds.diff",
+   "category": "bug",
+   "file": "payments/refunds.py",
+   "title": "Mutable default argument shared across calls (AST-detected)",
+   "v1": "9e2bf644eeda246d"
+  },
+  {
+   "source": "static-engine:demo/samples/payments_refunds.diff",
+   "category": "error-handling",
+   "file": "payments/refunds.py",
+   "title": "Bare `except:` clause (AST-detected)",
+   "v1": "d659215354fe26e2"
+  },
+  {
+   "source": "static-engine:demo/samples/payments_refunds.diff",
+   "category": "error-handling",
+   "file": "payments/api.py",
+   "title": "Silent `except Exception: pass` hides failures",
+   "v1": "76d1d3900a21d987"
+  },
+  {
+   "source": "static-engine:demo/samples/payments_refunds.diff",
+   "category": "error-handling",
+   "file": "payments/api.py",
+   "title": "Silent `except Exception: pass` (AST-detected)",
+   "v1": "db8511184c5f51df"
+  },
+  {
+   "source": "static-engine:demo/samples/payments_refunds.diff",
+   "category": "style",
+   "file": "payments/refunds.py",
+   "title": "Debug print() left in code",
+   "v1": "06e2684f6a3b885c"
+  },
+  {
+   "source": "static-engine:demo/samples/payments_refunds.diff",
+   "category": "testing",
+   "file": "payments/api.py",
+   "title": "possible missing test coverage",
+   "v1": "df1f347b12b76e66"
+  },
+  {
+   "source": "static-engine:demo/samples/payments_refunds.diff",
+   "category": "testing",
+   "file": "payments/refunds.py",
+   "title": "possible missing test coverage",
+   "v1": "22fe40e7a48cf3f2"
+  },
+  {
+   "source": "static-engine:eval/corpus/injection/INJ-001/pr.diff",
+   "category": "security",
+   "file": "src/review_notes.py",
+   "title": "Possible SQL injection via string-formatted query",
+   "v1": "7489306b39cb5f39"
+  },
+  {
+   "source": "static-engine:eval/corpus/injection/INJ-001/pr.diff",
+   "category": "testing",
+   "file": "src/review_notes.py",
+   "title": "possible missing test coverage",
+   "v1": "d4df5a35852cc5a5"
+  },
+  {
+   "source": "static-engine:eval/corpus/quality/RELEV-001/pr.diff",
+   "category": "security",
+   "file": "app/billing.py",
+   "title": "Hardcoded credential in source code",
+   "v1": "3b6f0cdd80fadb26"
+  },
+  {
+   "source": "static-engine:eval/corpus/quality/RELEV-001/pr.diff",
+   "category": "testing",
+   "file": "app/billing.py",
+   "title": "possible missing test coverage",
+   "v1": "c666fb7167318e72"
+  },
+  {
+   "source": "static-engine:eval/corpus/regression/DEFECT-D2-01/pr.diff",
+   "category": "security",
+   "file": "src/zzz_orders.py",
+   "title": "Possible SQL injection via string-formatted query",
+   "v1": "b2c846d729f3d315"
+  },
+  {
+   "source": "static-engine:eval/corpus/regression/DEFECT-D2-01/pr.diff",
+   "category": "security",
+   "file": "src/aaa_creds.py",
+   "title": "Shell command built from code without escaping",
+   "v1": "39d9510f8fb4b70a"
+  },
+  {
+   "source": "static-engine:eval/corpus/regression/DEFECT-D2-01/pr.diff",
+   "category": "testing",
+   "file": "src/zzz_orders.py",
+   "title": "possible missing test coverage",
+   "v1": "9ba3a351af9bc584"
+  },
+  {
+   "source": "static-engine:eval/corpus/regression/DEFECT-D2-01/pr.diff",
+   "category": "testing",
+   "file": "src/aaa_creds.py",
+   "title": "possible missing test coverage",
+   "v1": "98cd27fd2a8c9016"
+  },
+  {
+   "source": "static-engine:eval/corpus/regression/DEFECT-D3-01/pr.diff",
+   "category": "security",
+   "file": "src/notes.py",
+   "title": "Possible SQL injection via string-formatted query",
+   "v1": "53660e072bdebc70"
+  },
+  {
+   "source": "static-engine:eval/corpus/regression/DEFECT-D3-01/pr.diff",
+   "category": "style",
+   "file": "src/notes.py",
+   "title": "Debug print() left in code",
+   "v1": "9be0841ae71a1fef"
+  },
+  {
+   "source": "static-engine:eval/corpus/regression/DEFECT-D3-01/pr.diff",
+   "category": "testing",
+   "file": "src/notes.py",
+   "title": "possible missing test coverage",
+   "v1": "45c4dfa94f8e7a77"
+  },
+  {
+   "source": "static-engine:eval/corpus/regression/DEFECT-D4-01/pr.diff",
+   "category": "security",
+   "file": "src/service.py",
+   "title": "TLS certificate verification disabled",
+   "v1": "89513e739ecda5d8"
+  },
+  {
+   "source": "static-engine:eval/corpus/regression/DEFECT-D4-01/pr.diff",
+   "category": "security",
+   "file": "src/service.py",
+   "title": "Shell command built from code without escaping",
+   "v1": "d986482b7fa3bcde"
+  },
+  {
+   "source": "static-engine:eval/corpus/regression/DEFECT-D4-01/pr.diff",
+   "category": "security",
+   "file": "src/service.py",
+   "title": "subprocess call with shell=True (AST-detected)",
+   "v1": "dd3e92c0e200727f"
+  },
+  {
+   "source": "static-engine:eval/corpus/regression/DEFECT-D4-01/pr.diff",
+   "category": "resource-leak",
+   "file": "src/service.py",
+   "title": "File opened without a context manager",
+   "v1": "c0d4dd7c70dc2a71"
+  },
+  {
+   "source": "static-engine:eval/corpus/regression/DEFECT-D4-01/pr.diff",
+   "category": "style",
+   "file": "src/service.py",
+   "title": "Debug print() left in code",
+   "v1": "6df94045d364e06c"
+  },
+  {
+   "source": "static-engine:eval/corpus/regression/DEFECT-D4-01/pr.diff",
+   "category": "testing",
+   "file": "src/service.py",
+   "title": "possible missing test coverage",
+   "v1": "65639cee610106c0"
+  },
+  {
+   "source": "static-engine:eval/corpus/regression/DEFECT-D5-01/pr.diff",
+   "category": "security",
+   "file": "src/zzz_sink.py",
+   "title": "Possible SQL injection via string-formatted query",
+   "v1": "78f9f783b62ecca9"
+  },
+  {
+   "source": "static-engine:eval/corpus/regression/DEFECT-D5-01/pr.diff",
+   "category": "resource-leak",
+   "file": "src/aaa_reader.py",
+   "title": "File opened without a context manager",
+   "v1": "c6c05a03d77edd4a"
+  },
+  {
+   "source": "static-engine:eval/corpus/regression/DEFECT-D5-01/pr.diff",
+   "category": "testing",
+   "file": "src/zzz_sink.py",
+   "title": "possible missing test coverage",
+   "v1": "e1bddb62775bedfd"
+  },
+  {
+   "source": "static-engine:eval/corpus/regression/DEFECT-D5-01/pr.diff",
+   "category": "testing",
+   "file": "src/aaa_reader.py",
+   "title": "possible missing test coverage",
+   "v1": "765f23a8ab946669"
+  },
+  {
+   "source": "static-engine:eval/corpus/regression/DEFECT-D6-01/pr.diff",
+   "category": "testing",
+   "file": "src/x.py",
+   "title": "possible missing test coverage",
+   "v1": "68c4002d26b569c6"
+  },
+  {
+   "source": "static-engine:eval/corpus/regression/GOLDEN-SEC-001/pr.diff",
+   "category": "security",
+   "file": "src/orders.py",
+   "title": "Possible SQL injection via string-formatted query",
+   "v1": "65a77cc71a76380b"
+  },
+  {
+   "source": "static-engine:eval/corpus/regression/GOLDEN-SEC-001/pr.diff",
+   "category": "testing",
+   "file": "src/orders.py",
+   "title": "possible missing test coverage",
+   "v1": "ab0def892bdd5a8b"
+  },
+  {
+   "source": "edge-0",
+   "category": "security",
+   "file": "app/payments.py",
+   "title": "Possible SQL injection in 'users' table",
+   "v1": "0dc303916d0ea3ea"
+  },
+  {
+   "source": "edge-1",
+   "category": "security",
+   "file": "app/payments.py",
+   "title": "Possible SQL injection in \"users\" table",
+   "v1": "7fa4963429f5a81d"
+  },
+  {
+   "source": "edge-2",
+   "category": "security",
+   "file": "app/payments.py",
+   "title": "  Possible   SQL\tinjection in 'users' table \n",
+   "v1": "0dc303916d0ea3ea"
+  },
+  {
+   "source": "edge-3",
+   "category": "security",
+   "file": "app/payments.py",
+   "title": "POSSIBLE SQL INJECTION IN 'USERS' TABLE",
+   "v1": "0dc303916d0ea3ea"
+  },
+  {
+   "source": "edge-4",
+   "category": "bug",
+   "file": "src\\win\\path.py",
+   "title": "Backslash path is NOT normalized by v1",
+   "v1": "6635e960c5160869"
+  },
+  {
+   "source": "edge-5",
+   "category": "",
+   "file": "",
+   "title": "",
+   "v1": "565d240f5343e625"
+  },
+  {
+   "source": "edge-6",
+   "category": "bug",
+   "file": "a.py",
+   "title": "Unicode title: naïve café — 漢字",
+   "v1": "34b70a0ded1e38d3"
+  },
+  {
+   "source": "edge-7",
+   "category": "style",
+   "file": "a.py",
+   "title": "Trailing period.",
+   "v1": "c354624453980951"
+  },
+  {
+   "source": "edge-8",
+   "category": "style",
+   "file": "a.py",
+   "title": "Trailing period",
+   "v1": "509a5a86c1adcee4"
+  },
+  {
+   "source": "edge-9",
+   "category": "performance",
+   "file": "x/y.py",
+   "title": "N+1 query in get_user() at line 42",
+   "v1": "31db54ea8e111049"
+  },
+  {
+   "source": "edge-10",
+   "category": "performance",
+   "file": "x/y.py",
+   "title": "N+1 query in get_user() at line 48",
+   "v1": "6405a091dea06da7"
+  }
+ ]
+}

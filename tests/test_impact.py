@@ -18,6 +18,12 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from ai_pr_reviewer.impact import (  # noqa: E402
+    DEFAULT_SECTION_CHARS,
+    HARD_SECTION_CHARS,
+    TRUNCATION_HOPS,
+    TRUNCATION_NODES,
+    TRUNCATION_NONE,
+    render_impact_section,
     CONFIDENCE_DIRECT,
     CONFIDENCE_INDIRECT,
     CONFIDENCE_UNKNOWN,
@@ -190,6 +196,164 @@ class TestNoUnboundedRecursion:
 class TestImpactSerialization:
     def test_to_dict_shape(self):
         d = compute_impact(_chain_index(), ["a.py"]).to_dict()
-        assert set(d) == {"seeds", "entries", "truncated", "unknown_seeds"}
+        # Additive: ``truncation`` / ``max_hops`` joined the original four.
+        assert set(d) == {"seeds", "entries", "truncated", "unknown_seeds",
+                          "truncation", "max_hops"}
         assert d["entries"][0].keys() == {
             "path", "hop", "confidence", "via"}
+
+
+# ---------------------------------------------------------------------------
+# V4-E03-T02 · the hop cap is a cap like any other: never a silent stop
+# ---------------------------------------------------------------------------
+
+class TestHopCapReportsTruncation:
+    """Regression: stopping at ``max_hops`` with dependents still unvisited
+    used to leave ``truncated=False`` -- reading as "nothing else is
+    affected", the one wrong claim impact analysis must never make."""
+
+    def test_stopping_at_the_hop_limit_with_more_dependents_is_flagged(self):
+        # d <- c (1) <- b (2) <- a (3): a hop limit of 2 leaves ``a`` unseen.
+        result = compute_impact(_chain_index(), ["d.py"], max_hops=2)
+        assert result.paths == ("b.py", "c.py")
+        assert result.truncated is True
+        assert result.truncation == TRUNCATION_HOPS
+        assert result.max_hops == 2
+
+    def test_a_closure_that_ends_exactly_at_the_limit_is_not_truncated(self):
+        # d <- c (1) <- b (2) <- a (3) <- x (4); nothing imports ``x``, so a
+        # hop limit of 4 sees the whole chain and ends exactly at the cap.
+        result = compute_impact(_chain_index(), ["d.py"], max_hops=4)
+        assert result.paths == ("a.py", "b.py", "c.py", "x.py")
+        assert result.truncated is False
+        assert result.truncation == TRUNCATION_NONE
+
+    def test_node_cap_reports_nodes_not_hops(self):
+        entries = [_entry("hub.py")] + [_entry(f"u{i}.py") for i in range(20)]
+        edges = [(f"u{i}.py", "hub.py") for i in range(20)]
+        result = compute_impact(_index(entries, edges), ["hub.py"],
+                                max_nodes=5)
+        assert len(result.entries) == 5
+        assert result.truncation == TRUNCATION_NODES
+
+    def test_cycles_do_not_loop_or_falsely_truncate(self):
+        entries = [_entry("a.py"), _entry("b.py"), _entry("c.py")]
+        edges = [("a.py", "b.py"), ("b.py", "c.py"), ("c.py", "a.py")]
+        result = compute_impact(_index(entries, edges), ["a.py"], max_hops=4)
+        assert set(result.paths) == {"b.py", "c.py"}
+        assert result.truncated is False
+
+    def test_deep_fan_out_across_hops_terminates_under_the_caps(self):
+        """Multi-level pathological graph: 30 importers each imported by 30
+        more (900 dependents). Must stop at the node ceiling, fast."""
+        import time
+        entries = [_entry("core.py")]
+        edges = []
+        for i in range(30):
+            mid = f"mid{i:02d}.py"
+            entries.append(_entry(mid))
+            edges.append((mid, "core.py"))
+            for j in range(30):
+                leaf = f"leaf{i:02d}_{j:02d}.py"
+                entries.append(_entry(leaf))
+                edges.append((leaf, mid))
+        t0 = time.monotonic()
+        result = compute_impact(_index(entries, edges), ["core.py"],
+                                max_hops=4, max_nodes=10_000)
+        assert (time.monotonic() - t0) < 2.0
+        assert len(result.entries) <= HARD_MAX_NODES
+        assert result.truncation == TRUNCATION_NODES
+
+    def test_identical_inputs_give_identical_results_in_any_edge_order(self):
+        base = _chain_index()
+        shuffled = _index(list(reversed(base.files)), list(reversed(base.edges)))
+        assert (compute_impact(base, ["d.py"], max_hops=3).to_dict()
+                == compute_impact(shuffled, ["d.py"], max_hops=3).to_dict())
+
+
+# ---------------------------------------------------------------------------
+# V4-E03-T03 · the rendered prompt section: bounded, validated, redacted
+# ---------------------------------------------------------------------------
+
+def _hub_result(n, **kw):
+    entries = [_entry("hub.py")] + [_entry(f"user{i:03d}.py") for i in range(n)]
+    edges = [(f"user{i:03d}.py", "hub.py") for i in range(n)]
+    return compute_impact(_index(entries, edges), ["hub.py"],
+                          max_nodes=max(n, 1), **kw)
+
+
+class TestImpactSection:
+    def test_absent_or_empty_impact_renders_nothing(self):
+        assert render_impact_section(None) == ("", 0)
+        empty = compute_impact(_chain_index(), ["x.py"])   # nothing imports x
+        assert render_impact_section(empty) == ("", 0)
+
+    def test_lists_dependents_with_confidence_hop_and_via(self):
+        text, omitted = render_impact_section(
+            compute_impact(_chain_index(), ["d.py"], max_hops=2))
+        assert omitted == 0
+        assert "- c.py [direct, hop 1, via d.py]" in text
+        assert "- b.py [indirect, hop 2, via c.py]" in text
+        assert "not a finding" in text      # impact is context, never a finding
+
+    def test_is_deterministic(self):
+        r = compute_impact(_chain_index(), ["d.py"], max_hops=3)
+        assert render_impact_section(r) == render_impact_section(r)
+
+    def test_partial_closure_says_so(self):
+        text, _ = render_impact_section(
+            compute_impact(_chain_index(), ["d.py"], max_hops=1))
+        assert "Impact is partial" in text and "1 hop(s)" in text
+        text, _ = render_impact_section(_hub_result(30, max_hops=1))
+        assert "Impact is partial" not in text     # complete within hop 1
+
+    def test_unresolved_changed_files_are_named_as_unknown_not_guessed(self):
+        r = compute_impact(_chain_index(), ["d.py", "brand_new.py"])
+        text, _ = render_impact_section(r)
+        assert "impact unknown): brand_new.py" in text
+
+    def test_size_is_bounded_and_the_loss_is_reported(self):
+        r = _hub_result(150)
+        text, omitted = render_impact_section(r, max_chars=600)
+        assert len(text) <= 600
+        assert omitted > 0
+        assert "not listed (impact section budget)" in text
+        assert text.count("\n- ") + omitted == len(r.entries)   # nothing vanished
+
+    def test_the_ceiling_can_never_exceed_the_hard_cap(self):
+        text, _ = render_impact_section(_hub_result(200),
+                                        max_chars=10 * HARD_SECTION_CHARS)
+        assert len(text) <= HARD_SECTION_CHARS
+        assert DEFAULT_SECTION_CHARS <= HARD_SECTION_CHARS
+
+    def test_zero_budget_renders_nothing_but_counts_the_loss(self):
+        r = _hub_result(5)
+        assert render_impact_section(r, max_chars=0) == ("", len(r.entries))
+
+    def test_unsafe_path_names_are_counted_never_rendered(self):
+        hostile = ["../escape.py", "/etc/passwd", "a/../b.py", "evil\nname.py",
+                   "back`tick.py", "q\"uote.py", "C:/win.py"]
+        entries = [_entry("hub.py"), _entry("fine.py")] + [_entry(h) for h in hostile]
+        edges = [("fine.py", "hub.py")] + [(h, "hub.py") for h in hostile]
+        r = compute_impact(_index(entries, edges), ["hub.py"])
+        text, omitted = render_impact_section(r)
+        assert "- fine.py [direct, hop 1, via hub.py]" in text
+        for bad in ("escape", "passwd", "evil", "tick", "uote", "win.py"):
+            assert bad not in text, bad
+        assert omitted == len(hostile)
+        assert f"{len(hostile)} affected path(s) not listed (unprintable name)" in text
+
+    def test_no_absolute_path_ever_appears(self):
+        entries = [_entry("hub.py"), _entry("/abs/user.py")]
+        r = compute_impact(_index(entries, [("/abs/user.py", "hub.py")]),
+                           ["hub.py"])
+        text, omitted = render_impact_section(r)
+        assert text == "" and omitted == 1
+
+    def test_secret_shaped_path_names_are_redacted(self):
+        secret = "keys/ghp_abcdefghijklmnopqrstuvwxyz0123456789.py"
+        r = compute_impact(_index([_entry("hub.py"), _entry(secret)],
+                                  [(secret, "hub.py")]), ["hub.py"])
+        text, _ = render_impact_section(r)
+        assert "ghp_abcdefghijklmnopqrstuvwxyz0123456789" not in text
+        assert "[REDACTED]" in text

@@ -204,7 +204,8 @@ def test_t06_allowlists_are_the_enumerated_contract():
     test enumerates its fields — any silent addition or rename fails
     here, deliberately (review, don't drift)."""
     assert set(_RUN_FIELDS) == {"schema", "provider", "model", "batch_count",
-                                "fallback_used", "usage", "calls", "events"}
+                                "fallback_used", "usage", "calls", "events",
+                                "cost"}   # V4-E11-T07: display-only estimate
     assert set(_CALL_FIELDS) == {"provider", "model", "input_tokens",
                                  "output_tokens", "duration_ms", "state"}
     assert set(_EVENT_FIELDS) == {"type", "backend", "from", "to", "attempt",
@@ -321,9 +322,9 @@ def test_t06_claude_exception_message_never_reaches_telemetry():
     prompt text surfaces in telemetry only as the exception's *type
     name*.
 
-    NOTE: the per-batch *warning* echoes ``{exc}`` by pre-existing
-    design (claude.py:245) — warnings are not telemetry, and that echo
-    is tracked as follow-up debt, deliberately unchanged by T06.
+    NOTE: the per-batch warning used to echo ``{exc}`` by pre-existing
+    design; V4-E08-T04 closed that gap — the warning is now type-name-
+    only as well (asserted here, so the two layers cannot drift apart).
     """
     message = f"upstream refused while sending body {SECRET_SK} — {CANARY_PROMPT}"
     provider = ClaudeProvider(api_key="sk-ant-test", model="claude-sonnet-4-6",
@@ -337,6 +338,9 @@ def test_t06_claude_exception_message_never_reaches_telemetry():
     assert message not in json.dumps(row)
     assert [e["type"] for e in row["events"]] == ["retry"]
     assert [e["error"] for e in row["events"]] == ["ConnectError"]
+    # E08-T04: the per-batch warning is type-name-only too.
+    assert any("failed after retries (ConnectError)" in w for w in outcome.warnings)
+    assert all(message not in w for w in outcome.warnings)
 
 
 def test_t06_router_failover_events_and_warnings_stay_type_name_only(monkeypatch):

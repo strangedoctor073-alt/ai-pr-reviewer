@@ -33,6 +33,10 @@ REQUIRED_REPORT_KEYS = {
     "pr", "mode", "model", "reviewed_at", "duration_ms", "summary",
     "findings", "below_threshold", "stats", "posted_inline", "suppressed",
     "warnings", "health_score", "health_grade", "telemetry",
+    # V4-E04-T04 (D10): risk + verification ship in every report (None
+    # when the orchestrator did not compute them) — removing them later is
+    # a breaking change, exactly like provenance/evidence above/below.
+    "risk", "verification",
     # reporter.finalize_report()
     "id", "review_state", "engine", "fallback_used",
     "new_findings_count", "resolved_findings_count", "below_threshold_count",
@@ -97,3 +101,69 @@ def test_report_is_json_round_trippable():
     json.dump/load unchanged (no datetimes, no custom objects)."""
     report = _report()
     assert json.loads(json.dumps(report)) == report
+
+
+def test_d10_risk_and_verification_absent_is_explicit_null():
+    """V4-E04-T04 (D10): a result the orchestrator never labelled carries
+    both keys as explicit nulls — the null-with-reason rule (E04-T01),
+    never a missing key and never a crash."""
+    report = _report()
+    assert "risk" in report and report["risk"] is None
+    assert "verification" in report and report["verification"] is None
+
+
+def test_d10_risk_and_verification_surface_bounded_blocks():
+    """V4-E04-T04 (D10): computed values surface as bounded, closed-vocab
+    blocks — the same data the markdown rows render.
+
+    * level folds to {"low","high"} (markdown's not-high-is-green rule);
+    * reasons pass redact_secrets() and are list/length bounded;
+    * verification keeps exactly the three C4 keys as non-negative ints —
+      unknown keys dropped, malformed values coerced to 0.
+    """
+    from ai_pr_reviewer.model_router import ReviewRisk
+
+    pr = PRContext(repo="acme/api", pr_number=8, head_sha="b" * 40)
+    result = ReviewResult(pr=pr, mode="static", model="static-rules-v1")
+    result.risk = ReviewRisk(
+        level="medium",                             # out of vocab -> "low"
+        reasons=["touches auth/payment/db-looking path(s): src/auth.py",
+                 "   ",                             # blanks are dropped
+                 "x" * 600])                        # length-bounded
+    result.verification = {"resolved": 2, "still_present": 1,
+                           "unable_to_verify": 0,
+                           "smuggled": 99,           # unknown key dropped
+                           "active_findings": -7}    # unknown key dropped
+    report = reporter.finalize_report(result, report_id="test-report-d10")
+
+    risk = report["risk"]
+    assert risk["level"] == "low"
+    assert risk["reasons"][0].startswith("touches auth/payment/db-looking")
+    assert all(len(r) <= 500 for r in risk["reasons"])
+
+    # non-dict junk can never masquerade as verification counts
+    result.verification = {"resolved": "many", "still_present": -4}
+    report = reporter.finalize_report(result, report_id="test-report-d10b")
+    assert report["verification"] == {"resolved": 0, "still_present": 0,
+                                      "unable_to_verify": 0}
+    assert json.loads(json.dumps(report)) == report
+
+
+def test_d10_high_risk_level_survives_and_reasons_redact():
+    """The in-vocab "high" level round-trips untouched; free-text reasons
+    run through the same redaction every stored warning gets."""
+    from ai_pr_reviewer.model_router import ReviewRisk
+
+    pr = PRContext(repo="acme/api", pr_number=9, head_sha="c" * 40)
+    result = ReviewResult(pr=pr, mode="static", model="static-rules-v1")
+    result.risk = ReviewRisk(level="high", reasons=[
+        "token ghp_" + "a" * 36 + " leaked in diff"])
+    result.verification = {"resolved": 1, "still_present": 0,
+                           "unable_to_verify": 0}
+    report = reporter.finalize_report(result, report_id="test-report-d10c")
+
+    assert report["risk"]["level"] == "high"
+    assert report["risk"]["reasons"], "reason must not vanish, only redact"
+    assert "ghp_" + "a" * 36 not in report["risk"]["reasons"][0]
+    assert report["verification"] == {"resolved": 1, "still_present": 0,
+                                      "unable_to_verify": 0}

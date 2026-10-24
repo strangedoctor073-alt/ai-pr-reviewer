@@ -1,0 +1,27 @@
+id: RELEV-004
+layer: quality
+title: 'JS format change: both importers and package.json must outrank 12 sibling distractors'
+provenance: hand-authored
+diff: pr.diff
+context:
+  files:
+  - checkout/src/ui/label.js
+  - checkout/src/ui/format_user.js
+  - checkout/package.json
+  impact:
+  - src/ui/label.js
+  - src/ui/format_user.js
+  - src/ui/label.test.js
+expect:
+  findings: []
+  no_findings:
+  - file: src/lib/format.js
+    category: security
+  - file: src/lib/format.js
+    category: bug
+notes: 'V4-E11-T03 discriminating fixture (JS import resolution, with and without the .js
+  extension): 17 checkout files. A same-directory flood must not push importers or package.json
+  out of the top 10. Impact includes src/ui/label.test.js at hop 2 (test -> label.js -> format.js):
+  hand-checked, the first draft of this label missed it. no_findings traps are category-scoped:
+  the low-severity TEST001 test-gap note is expected below threshold and is not what this
+  case measures.'

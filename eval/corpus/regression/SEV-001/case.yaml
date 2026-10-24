@@ -1,0 +1,28 @@
+id: SEV-001
+layer: regression
+title: Three security findings carry their exact adjudicated severities
+provenance: hand-authored
+diff: pr.diff
+expect:
+  findings:
+  - file: src/payments.py
+    line_hint: 5
+    category: security
+    severity_min: critical
+    severity: critical
+    title_match: SQL injection
+  - file: src/payments.py
+    line_hint: 6
+    category: security
+    severity_min: high
+    severity: high
+    title_match: Shell command
+  - file: src/payments.py
+    line_hint: 7
+    category: security
+    severity_min: medium
+    severity: medium
+    title_match: World-writable
+notes: 'V4-E11-T04: critical (SEC001) / high (SEC004) / medium (SEC008). `severity` is a scored
+  attribute (severity_accuracy, report-only); `severity_min` stays the match floor. A wrong
+  severity lowers severity_accuracy and never auto-regrades.'

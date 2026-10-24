@@ -1,0 +1,16 @@
+id: KB-001
+layer: known-bug
+title: "KNOWN GAP \u2014 str.format() SQL injection is not detected by the static engine"
+provenance: hand-authored
+diff: pr.diff
+xfail: true
+expect:
+  findings:
+  - file: src/users.py
+    line_hint: 2
+    category: security
+    severity_min: critical
+    title_match: SQL injection
+notes: "xfail: SEC001 recognizes f-strings, %-formatting and + concatenation but not .format().\
+  \ Visible, non-blocking (\xA75.4); flips to xpass the day the rule is fixed \u2014 drop\
+  \ the marker then."

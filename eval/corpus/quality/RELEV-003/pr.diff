@@ -1,0 +1,7 @@
+diff --git a/shop/pricing.py b/shop/pricing.py
+--- a/shop/pricing.py
++++ b/shop/pricing.py
+@@ -1,2 +1,2 @@
+ def apply_discount(price, rate):
+-    return price * (1 - rate)
++    return round(price * (1 - rate), 2)

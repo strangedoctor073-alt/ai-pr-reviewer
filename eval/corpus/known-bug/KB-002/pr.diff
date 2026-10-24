@@ -1,0 +1,6 @@
+diff --git a/src/calc2.py b/src/calc2.py
+--- a/src/calc2.py
++++ b/src/calc2.py
+@@ -1,1 +1,2 @@
+ def calc(expr):
++    return eval(expr)

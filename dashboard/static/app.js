@@ -388,6 +388,24 @@ async function renderDetail(id) {
   });
 }
 
+// V4-E04-T04: "why was I told this?" -- every value escaped; evidence is
+// cited (kind + locator) with the already-redacted summary in a <details>.
+function provenanceBlock(f) {
+  const srcs = Array.isArray(f.provenance_sources) ? f.provenance_sources : [];
+  const part = (e, m) => [e, m ? `(${m})` : ""].filter(Boolean).join(" ");
+  const label = srcs.length
+    ? srcs.map((s) => part(s && s.engine, s && s.model)).filter(Boolean).join(" + ")
+    : part(f.provenance_engine, f.provenance_model);
+  const ev = (Array.isArray(f.evidence) ? f.evidence : []).filter((e) => e && e.locator);
+  if (!label && !ev.length) {
+    return `<div class="finding-fp">Provenance unavailable (not recorded for this finding)</div>`;
+  }
+  const rows = ev.slice(0, 8).map((e) =>
+    `<li>${esc(e.kind)} <code>${esc(e.locator)}</code>${e.summary ? ` &mdash; <code>${esc(e.summary)}</code>` : ""}${e.integrity_ok === false ? " (integrity check failed)" : ""}</li>`).join("");
+  return `<div class="finding-fp">Source: ${esc(label || "unavailable")}</div>` +
+    (rows ? `<details class="finding-fp"><summary>Evidence (${ev.length})</summary><ul>${rows}</ul></details>` : "");
+}
+
 function findingRow(f, pr) {
   const loc = f.file ? `${f.file}${f.line ? ":" + f.line : ""}` : "";
   const label = `${f.rule_id || f.category || "finding"} in ${f.file || "?"}`;
@@ -405,6 +423,7 @@ function findingRow(f, pr) {
         <div class="finding-loc">${esc(loc)}</div>
         <p class="finding-explain">${esc(f.explanation)}</p>
         ${f.suggestion ? `<div class="readonly-yaml" style="margin-top:8px">${esc(f.suggestion)}</div>` : ""}
+        ${provenanceBlock(f)}
       </div>
       <div class="finding-actions">
         <button class="btn btn-ghost btn-sm" title="Mark as useful"
@@ -574,6 +593,10 @@ async function renderMetrics() {
   const tel = m.telemetry || {};
   const tok = tel.tokens || {};
   const states = tel.usage_states || {};
+  /* V4-E11-T07: display-only cost estimate — guarded the same way, so an
+     older server (no cost block) renders zeros, never a crash. */
+  const cost = tel.cost || {};
+  const costStates = cost.states || {};
   const repoTotals = {};
   Object.entries(tel.by_repo || {}).forEach(([repo, v]) => {
     repoTotals[repo] = (v.input_tokens || 0) + (v.output_tokens || 0);
@@ -605,6 +628,16 @@ async function renderMetrics() {
       </div>
       ${barRows(states, { ok: "var(--sev-low)", unavailable: "var(--sev-medium)", "n/a": "var(--sev-info)" })}
       ${Object.keys(repoTotals).length ? `<h4>Tokens by repo (input + output)</h4>${barRows(repoTotals, {})}` : ""}
+    </div>
+    <div class="bar-block">
+      <h4>Estimated cost (USD, display only)</h4>
+      <div class="stat-grid">
+        <div class="stat-tile"><div class="num">$${Number(cost.low_total || 0).toFixed(4)}</div><div class="label">Est. total (low)</div></div>
+        <div class="stat-tile"><div class="num">$${Number(cost.high_total || 0).toFixed(4)}</div><div class="label">Est. total (high)</div></div>
+        <div class="stat-tile"><div class="num">${Number(costStates.estimated || 0)}</div><div class="label">Priced runs</div></div>
+        <div class="stat-tile"><div class="num">${Object.values(costStates).reduce((a, b) => a + (Number(b) || 0), 0)}</div><div class="label">Runs with cost block</div></div>
+      </div>
+      ${barRows(costStates, { estimated: "var(--sev-low)", unpriced: "var(--sev-medium)", unavailable: "var(--sev-info)", "n/a": "var(--sev-info)" })}
     </div>`;
 }
 

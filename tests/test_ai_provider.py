@@ -239,7 +239,12 @@ def test_claude_provider_per_batch_fallback_on_failed_batch():
     assert any("eval()" in t for t in titles)                 # from static fallback (batch 2)
     fallback_finding = next(f for f in outcome.findings if f.rule_id == "SEC003")
     assert fallback_finding.file == "utils.py"
-    assert any("failed after retries" in w for w in outcome.warnings)
+    # E08-T04: the fallback warning names the exception type, never its
+    # message (exception text can carry request bodies/secrets).
+    retry_warnings = [w for w in outcome.warnings if "failed after retries" in w]
+    assert retry_warnings, "sanity: the batch-failure warning was emitted"
+    assert any("ConnectError" in w for w in retry_warnings)
+    assert all("connection reset" not in w for w in outcome.warnings)
 
 
 def test_claude_provider_all_batches_fail_reports_pure_static_engine():

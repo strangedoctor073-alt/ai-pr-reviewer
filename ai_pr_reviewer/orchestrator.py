@@ -27,8 +27,10 @@ from .diff_parser import FileDiff, parse_unified_diff
 from .github_client import GitHubClient, GitHubError
 from .models import (LIFECYCLE_FIELDS as _MODEL_LIFECYCLE_FIELDS,  # models.py
                      EvidenceRecord, Finding, PRContext,
-                     ProvenanceSource, ReviewKey, ReviewResult, ReviewStats)
+                     ReviewKey, ReviewResult, ReviewStats,
+                     derive_provenance_source)
 from .rules import DEFAULT_SEVERITY, load_project_rules
+from .feedback import apply_feedback_suppression, load_feedback_config  # V4-E09
 from .storage import has_capability
 from .storage_schema import (CAP_DISMISSED_FINGERPRINTS,
                              CAP_PREVIOUS_FINDINGS, CAP_TELEMETRY)
@@ -348,6 +350,15 @@ class ReviewOrchestrator:
         # so muted findings don't count against it.
         lifecycle_findings = self._apply_dismissals(repo, lifecycle_findings,
                                                     warnings)
+        # V4-E09: apply HUMAN-created suppression rules (feedback.enabled,
+        # default off -> same list back, no storage access, no fields). Read
+        # side only; the engine cannot create or change a rule.
+        lifecycle_findings, feedback_fields = apply_feedback_suppression(
+            enabled=load_feedback_config(
+                getattr(cfg, "repo_root", None) or ".",
+                getattr(cfg, "rules_file", None) or ".ai-pr-reviewer.yml").enabled,
+            storage=self.storage, repo=repo, findings=lifecycle_findings,
+            warnings=warnings, scrub=lambda m: _scrub(m, cfg))
 
         # D5: one authoritative severity ordering for the whole result —
         # deterministic report JSON, and every downstream truncation (summary
@@ -379,6 +390,7 @@ class ReviewOrchestrator:
             ),
         )
         result.health_score = score
+        result.feedback_report_fields = feedback_fields   # V4-E09 ({} when off)
         result.health_grade = grade
         # ReviewResult does not declare these (yet); reporter reads them with
         # getattr, so they work as plain attributes and as real fields alike.
@@ -638,16 +650,17 @@ def _stamp_provenance(findings: list[Finding], outcome) -> None:
     """
     engine = getattr(outcome, "engine", "") or ""
     model = getattr(outcome, "model", "") or ""
-    origin = "static" if engine == "static" else "ai"
-    source = ProvenanceSource(engine=engine or None, model=model or None,
-                              origin=origin, agent=None)
     for f in findings:
-        f.provenance_engine = engine or None
-        f.provenance_model = model or None
+        # Per finding, not per outcome: a blended "claude+static" outcome
+        # holds both AI and rule-engine findings (models.derive_provenance_source).
+        src = derive_provenance_source(f, outcome_engine=engine,
+                                       outcome_model=model)
+        f.provenance_engine = src.engine
+        f.provenance_model = src.model
         f.provenance_agent = None  # V5+ specialist agents
-        f.provenance_origin = origin
+        f.provenance_origin = src.origin
         if not f.provenance_sources:
-            f.provenance_sources = (source,)
+            f.provenance_sources = (src,)
 
 
 def _attach_diff_evidence(findings: list[Finding],

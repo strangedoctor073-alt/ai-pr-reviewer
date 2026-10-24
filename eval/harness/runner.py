@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import gc
 import os
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -81,6 +82,12 @@ class CaseRun:
     context_top10: list[str] = field(default_factory=list)
     impact_paths: list[str] = field(default_factory=list)
     failures: list[str] = field(default_factory=list)
+    # V4-E11 (T06/T08): wall-clock phase timings and the run's telemetry
+    # row. NEVER serialized into the scorecard/baseline/--json report —
+    # wall-clock is not byte-stable (§5.3); they feed only the separate
+    # perf report and the Tier-B report.
+    timings_ms: dict = field(default_factory=dict)
+    telemetry: dict | None = None
 
 
 def _finding_dict(f: Finding, bucket: str) -> dict:
@@ -93,6 +100,11 @@ def _finding_dict(f: Finding, bucket: str) -> dict:
         "title": f.title,
         "state": f.state,
         "bucket": bucket,
+        # V4-E11: scored attributes. ``has_suggestion`` is a presence check
+        # (non-blank string) — the harness never applies or executes a
+        # suggestion (verification.py rule: suggestions are untrusted).
+        "has_suggestion": bool((f.suggestion or "").strip()),
+        "verification_status": f.verification_status,
     }
 
 
@@ -114,9 +126,9 @@ def _redact_error(exc: Exception) -> str:
     return redact_secrets(f"{type(exc).__name__}: {exc}")[:_MAX_ERROR_CHARS]
 
 
-def _selection_over_fixture(case: Case, diff_text: str,
-                            workdir: Path) -> tuple[list[str], list[str],
-                                                    list[str]]:
+def _selection_over_fixture(case: Case, diff_text: str, workdir: Path,
+                            timings: dict | None = None,
+                            ) -> tuple[list[str], list[str], list[str]]:
     """V4-E02-T04/E03-T04 — score the *production* selection and impact
     code over a base-revision fixture checkout, fully offline.
 
@@ -141,7 +153,10 @@ def _selection_over_fixture(case: Case, diff_text: str,
     (fixture / ".git").mkdir(exist_ok=True)   # availability marker only
 
     changed = [fd.path for fd in parse_unified_diff(diff_text)]
+    t_index = time.perf_counter()
     index = build_index(str(fixture), expected_repo="", changed_paths=changed)
+    if timings is not None:
+        timings["index_build"] = (time.perf_counter() - t_index) * 1000.0
     if index is None:
         return [], [], ["fixture index was not built (availability check "
                         "declined a committed fixture — fixture bug)"]
@@ -209,12 +224,21 @@ def _run_config_error_case(case: Case) -> CaseRun:
         os.environ.update(saved)
 
 
-def run_case(case: Case, workdir: Path | str) -> CaseRun:
-    """Execute ``case`` fully offline and return its raw outcome.
+def run_case(case: Case, workdir: Path | str, *, engine: str = "static",
+             engine_config: dict | None = None) -> CaseRun:
+    """Execute ``case`` and return its raw outcome (offline by default).
 
     ``workdir`` must be a scratch directory (pytest ``tmp_path`` /
     ``tempfile``); it receives any per-case state storage and is owned by
     the caller. The function never writes inside the repository.
+
+    ``engine`` (V4-E11-T08): ``"static"`` (default — the offline Tier A
+    path, unchanged) or a provider name for a **Tier-B** run, in which
+    case ``engine_config`` supplies the extra ``Config`` fields
+    (credentials, an explicit model). A Tier-B run is only *scored* when
+    the pipeline's reported engine is exactly the requested one: a
+    silent fallback to the static engine would otherwise be a fake
+    provider number, so it returns ``skipped`` with the reason instead.
     """
     workdir = Path(workdir)
     workdir.mkdir(parents=True, exist_ok=True)
@@ -222,12 +246,17 @@ def run_case(case: Case, workdir: Path | str) -> CaseRun:
     if case.expect.config_error:
         return _run_config_error_case(case)
 
-    if "static" not in case.engine_matrix:
+    if engine not in case.engine_matrix:
+        if engine == "static":
+            return CaseRun(
+                case.id, case.layer, "skipped",
+                skipped_reason=f"engine_matrix {list(case.engine_matrix)} "
+                               f"needs a live provider; only the offline "
+                               f"static engine runs in this harness")
         return CaseRun(
             case.id, case.layer, "skipped",
-            skipped_reason=f"engine_matrix {list(case.engine_matrix)} needs a "
-                           f"live provider; only the offline static engine "
-                           f"runs in this harness")
+            skipped_reason=f"engine_matrix {list(case.engine_matrix)} does "
+                           f"not include {engine!r}")
 
     diff_text = case.diff_path.read_text(encoding="utf-8")
     cfg = Config(
@@ -237,6 +266,7 @@ def run_case(case: Case, workdir: Path | str) -> CaseRun:
         severity_threshold_explicit=True,
         max_comments=case.config.max_comments,
         exclude=list(case.config.exclude),
+        **(engine_config or {}),
     )
 
     storage = None
@@ -254,6 +284,7 @@ def run_case(case: Case, workdir: Path | str) -> CaseRun:
         pr=PRContext(repo=EVAL_REPO, pr_number=EVAL_PR),
         diff_text=diff_text,
     )
+    t_run = time.perf_counter()
     try:
         result = orchestrator.run()
     except Exception as exc:  # engine/config crash — surfaced, redacted
@@ -270,16 +301,29 @@ def run_case(case: Case, workdir: Path | str) -> CaseRun:
         # after a run, so this only matters for harness/fixture lifetimes.)
         gc.collect()
 
+    timings = {"pipeline": (time.perf_counter() - t_run) * 1000.0}
+    got_engine = getattr(result, "engine", "") or ""
+    if engine != "static" and got_engine != engine:
+        return CaseRun(
+            case.id, case.layer, "skipped", engine=got_engine,
+            skipped_reason=f"requested engine {engine!r} but the pipeline "
+                           f"reported {got_engine!r} (no usable credentials "
+                           f"or a provider fallback) — never scored as a "
+                           f"provider result",
+            warnings=[redact_secrets(w)[:_MAX_ERROR_CHARS]
+                      for w in result.warnings],
+            timings_ms=timings, telemetry=getattr(result, "telemetry", None))
+
     top10: list[str] = []
     impact_paths: list[str] = []
     selection_failures: list[str] = []
     if case.checkout_dir is not None:
         top10, impact_paths, selection_failures = _selection_over_fixture(
-            case, diff_text, workdir)
+            case, diff_text, workdir, timings)
 
     return CaseRun(
         case.id, case.layer, "ran",
-        engine=getattr(result, "engine", "") or "",
+        engine=got_engine,
         findings=[_finding_dict(f, "reported") for f in result.findings],
         below=[_finding_dict(f, "below_threshold")
                for f in result.below_threshold],
@@ -287,4 +331,6 @@ def run_case(case: Case, workdir: Path | str) -> CaseRun:
         context_top10=top10,
         impact_paths=impact_paths,
         failures=selection_failures,
+        timings_ms=timings,
+        telemetry=getattr(result, "telemetry", None),
     )

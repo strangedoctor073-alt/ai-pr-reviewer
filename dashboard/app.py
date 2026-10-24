@@ -466,6 +466,23 @@ def health():
 # endpoint that serves stored finding text re-redacts on the way out —
 # same keys, same types, same schema, only the text values change.
 _FINDING_TEXT_FIELDS = ("title", "explanation", "suggestion")
+# V4-E04: embedded evidence + provenance strings are redacted on read too.
+_PROVENANCE_KEYS = ("evidence", "provenance_sources", "provenance_engine",
+                    "provenance_model", "provenance_agent",
+                    "provenance_origin")
+
+
+def _redact_provenance_payload(row: dict) -> None:
+    """Re-run the engine's own evidence/provenance sanitizers over a stored
+    dict row (redaction, single-line, bounds, closed evidence kinds). Only
+    keys already present are rewritten -- old rows gain nothing."""
+    present = [k for k in _PROVENANCE_KEYS if k in row]
+    if not present:
+        return
+    clean = Finding.from_dict(
+        {"file": "", "line": None, **{k: row[k] for k in present}}).to_dict()
+    for k in present:
+        row[k] = clean[k]
 
 
 def _redact_finding_payload(row):
@@ -484,6 +501,7 @@ def _redact_finding_payload(row):
                 value = row.get(key)
                 if isinstance(value, str) and value:
                     row[key] = redact_secrets(value)
+            _redact_provenance_payload(row)
     except Exception:  # noqa: BLE001 — a read must never 500 on redaction
         pass
     return row
@@ -787,6 +805,88 @@ async def get_metrics(request: Request):
     return JSONResponse(get_storage().metrics())
 
 
+# ------------------------------------------------- telemetry ingestion
+# V4-E11-T06 (debt 15). Accepts one run's telemetry row from an engine or a
+# script and stores it through the *existing* ``save_telemetry`` seam (same
+# allowlist + redaction chokepoint, same ``telemetry`` table, no schema
+# change).
+#
+# SCOPE — LAN / trusted-network only. Auth is the same single shared
+# ``X-Dashboard-Token`` every other write uses. There is NO network-grade
+# authentication here (no TLS termination, per-client identity, signing or
+# replay protection); that is explicitly deferred to V5 (ships as v4.5.0)
+# and must not be assumed or claimed. Do not expose this route to an
+# untrusted network. Rate limiting (per-IP write window), the audit log and
+# the body cap apply as for every write.
+#
+# Trust level of the payload: the token holder asserts token counts,
+# durations and the display-only cost block; the server can allowlist,
+# bound, redact and type-check them (``sanitize_telemetry``) but cannot
+# verify them. Re-posting the same review id upserts (last write wins).
+TELEMETRY_MAX_BODY_BYTES = 65_536
+_TELEMETRY_REVIEW_ID_RE = re.compile(
+    r"[A-Za-z0-9._-]{1,100}/[A-Za-z0-9._-]{1,100}#[0-9]{1,9}@[A-Za-z0-9]{1,40}")
+
+
+async def _read_capped_body(request: Request, cap: int) -> bytes:
+    """Read the request body, refusing (413) past ``cap`` bytes even when
+    the client sends no/lying Content-Length (chunked)."""
+    declared = request.headers.get("content-length", "")
+    if declared.isdigit() and int(declared) > cap:
+        raise HTTPException(413, "telemetry payload too large")
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > cap:
+            raise HTTPException(413, "telemetry payload too large")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+@app.post("/api/telemetry")
+async def ingest_telemetry(request: Request):
+    """Ingest ``{"review_id": "owner/repo#pr@sha", "telemetry": {...}}``.
+
+    LAN-scope only — see the block comment above. Auth first (before any
+    body is read), then a capped read, strict id validation, and the
+    storage boundary's allowlist + redaction. The response never echoes
+    payload content.
+    """
+    _check_token(request)
+    try:
+        raw = await _read_capped_body(request, TELEMETRY_MAX_BODY_BYTES)
+    except HTTPException as exc:
+        _audit(request, "telemetry_rejected", "payload too large", exc.status_code)
+        raise
+    try:
+        body = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        _audit(request, "telemetry_rejected", "body not JSON", 400)
+        raise HTTPException(400, "body must be JSON")
+    if not isinstance(body, dict):
+        _audit(request, "telemetry_rejected", "body not an object", 400)
+        raise HTTPException(400, "body must be a JSON object")
+    review_id = body.get("review_id")
+    if (not isinstance(review_id, str) or len(review_id) > 140
+            or not _TELEMETRY_REVIEW_ID_RE.fullmatch(review_id)):
+        _audit(request, "telemetry_rejected", "bad review_id", 400)
+        raise HTTPException(400, "review_id must look like owner/repo#pr@sha")
+    telemetry = body.get("telemetry")
+    if not isinstance(telemetry, dict):
+        _audit(request, "telemetry_rejected", "telemetry not an object", 400)
+        raise HTTPException(400, "telemetry must be a JSON object")
+    from ai_pr_reviewer.storage import has_capability
+
+    storage = get_storage()
+    if not has_capability(storage, _schema().CAP_TELEMETRY):
+        _audit(request, "telemetry_rejected", "no capability", 501)
+        raise HTTPException(501, "storage backend cannot store telemetry")
+    storage.save_telemetry(review_id, telemetry)
+    _audit(request, "telemetry_ingest", review_id, 200)
+    return {"ok": True, "id": review_id}
+
+
 @app.post("/api/findings/{fingerprint}/feedback")
 async def post_feedback(request: Request, fingerprint: str):
     _check_token(request)
@@ -800,7 +900,11 @@ async def post_feedback(request: Request, fingerprint: str):
         raise HTTPException(400, "kind must be 'up', 'down', or 'mute'")
     repo = str(body.get("repo", ""))
     note = str(body.get("note", ""))
-    result = get_storage().record_feedback(fingerprint, kind, repo, note)
+    try:
+        result = get_storage().record_feedback(fingerprint, kind, repo, note)
+    except ValueError as exc:       # V4-E08: per-repo mute cap
+        _audit(request, "feedback_rejected", f"{fingerprint}:{kind}", 429)
+        raise HTTPException(429, str(exc))
     _audit(request, "feedback", f"{fingerprint}:{kind}", 200)
     return JSONResponse({"ok": True, **result})
 
@@ -907,3 +1011,191 @@ async def sandbox_simulate(request: Request):
         logging.getLogger("dashboard").exception("sandbox simulation failed")
         raise HTTPException(500, "Simulation failed (see server log)")
 
+
+
+# =====================================================================
+# V4-E09 · feedback & suppression routes (additive — no existing route above
+# was edited). Every route is scoped to ONE repository taken from the URL;
+# bodies can never name a repository, an origin, an id or a timestamp.
+#
+#   votes  : POST/GET  /api/repos/{owner}/{name}/feedback/events
+#   rules  : GET       /api/repos/{owner}/{name}/feedback/rules
+#            POST      /api/repos/{owner}/{name}/feedback/rules
+#            POST      /api/repos/{owner}/{name}/feedback/rules/{rule_id}/disable
+#            POST      /api/repos/{owner}/{name}/feedback/rules/disable-all
+#   eval   : GET       /api/repos/{owner}/{name}/feedback/effectiveness
+#
+# THE INVARIANT (V4_THREAT_MODEL.md §4): rules are created and changed only
+# here, behind ``_feedback_authority`` — a SEPARATE admin credential
+# (DASHBOARD_ADMIN_TOKEN, header X-Dashboard-Admin-Token) that the review
+# Action never holds. Unset => rule authoring is disabled (503), not open.
+# Votes use the ordinary dashboard token (like the V3 feedback route) and
+# never influence engine behavior.
+# =====================================================================
+from ai_pr_reviewer import feedback_admin as _fb  # noqa: E402
+from ai_pr_reviewer import feedback_eval as _fb_eval  # noqa: E402
+
+FEEDBACK_ADMIN_HEADER = "X-Dashboard-Admin-Token"
+FEEDBACK_ORIGIN_HEADER = "X-Feedback-Origin"
+
+
+def _fb_repo(owner: str, name: str) -> str:
+    try:
+        return _fb.validate_repo(f"{owner}/{name}")
+    except _fb.FeedbackError as exc:
+        raise HTTPException(exc.status, str(exc))
+
+
+def _fb_http(exc: "_fb.FeedbackError") -> HTTPException:
+    headers = {"Retry-After": str(exc.retry_after)} if exc.retry_after else None
+    return HTTPException(exc.status, str(exc), headers=headers)
+
+
+def _fb_origin(request: Request) -> str:
+    # Informational only: both origins are authenticated. Anything other
+    # than the literal "cli" is recorded as "dashboard".
+    return "cli" if request.headers.get(FEEDBACK_ORIGIN_HEADER) == "cli" \
+        else "dashboard"
+
+
+def _feedback_authority(request: Request):
+    """Mint the sealed authority every rule writer requires (or raise)."""
+    try:
+        return _fb.mint_admin_authority(
+            request.headers.get(FEEDBACK_ADMIN_HEADER, ""),
+            os.environ.get("DASHBOARD_ADMIN_TOKEN", ""),
+            engine_token=get_token(), origin=_fb_origin(request))
+    except _fb.AuthorityError as exc:
+        _audit(request, "feedback_admin_rejected", exc.code, exc.status)
+        raise _fb_http(exc)
+
+
+def _fb_check_reads(request: Request) -> None:
+    """Read access for the feedback routes: the ordinary read credential, OR
+    a valid admin token (so the operator CLI, which holds only the admin
+    token, can list rules). Presenting the admin token here grants nothing
+    beyond what a read already shows."""
+    supplied = request.headers.get(FEEDBACK_ADMIN_HEADER, "")
+    if supplied:
+        try:
+            _fb.mint_admin_authority(
+                supplied, os.environ.get("DASHBOARD_ADMIN_TOKEN", ""),
+                engine_token=get_token())
+            return
+        except _fb.AuthorityError:
+            pass
+    _check_reads(request)
+
+
+async def _fb_json(request: Request):
+    try:
+        return await request.json()
+    except Exception:
+        raise HTTPException(400, "body must be JSON")
+
+
+def _fb_rule_out(row: dict) -> dict:
+    out = dict(row)
+    if isinstance(out.get("reason"), str):
+        out["reason"] = redact_secrets(out["reason"])   # display-layer echo
+    return out
+
+
+@app.post("/api/repos/{repo_owner}/{repo_name}/feedback/events")
+async def post_feedback_event(repo_owner: str, repo_name: str, request: Request):
+    _check_token(request)
+    repo = _fb_repo(repo_owner, repo_name)
+    try:
+        spec = _fb.parse_event_spec(await _fb_json(request))
+        row = get_storage().record_feedback_event(repo, spec, _fb_origin(request))
+    except _fb.FeedbackError as exc:
+        raise _fb_http(exc)
+    _audit(request, "feedback_event", f"{repo}:{row['id']}:{row['kind']}", 201)
+    return JSONResponse({"ok": True, "event": row}, status_code=201)
+
+
+@app.get("/api/repos/{repo_owner}/{repo_name}/feedback/events")
+def list_feedback_events_endpoint(repo_owner: str, repo_name: str,
+                                  request: Request, limit: int = 100,
+                                  offset: int = 0):
+    _fb_check_reads(request)
+    repo = _fb_repo(repo_owner, repo_name)
+    rows = get_storage().list_feedback_events(
+        repo, limit=max(1, min(limit, 500)), offset=max(0, offset))
+    return {"repo": repo, "events": rows}
+
+
+@app.get("/api/repos/{repo_owner}/{repo_name}/feedback/rules")
+def list_suppression_rules_endpoint(repo_owner: str, repo_name: str,
+                                    request: Request,
+                                    include_inactive: bool = False):
+    """In-force rules (what the engine reads); ``?include_inactive=1`` adds
+    expired/disabled ones for the dashboard's audit view."""
+    _fb_check_reads(request)
+    repo = _fb_repo(repo_owner, repo_name)
+    rows = get_storage().get_suppression_rules(
+        repo, include_inactive=include_inactive)
+    return {"repo": repo, "rules": [_fb_rule_out(r) for r in rows]}
+
+
+@app.post("/api/repos/{repo_owner}/{repo_name}/feedback/rules")
+async def create_suppression_rule_endpoint(repo_owner: str, repo_name: str,
+                                           request: Request):
+    authority = _feedback_authority(request)         # no authority, no write
+    repo = _fb_repo(repo_owner, repo_name)
+    try:
+        spec = _fb.parse_rule_spec(await _fb_json(request))
+        row, created = get_storage().create_suppression_rule(
+            authority, repo, spec)
+    except _fb.FeedbackError as exc:
+        raise _fb_http(exc)
+    status = 201 if created else 200
+    _audit(request, "create_suppression_rule", f"{repo}:{row['id']}", status)
+    return JSONResponse({"ok": True, "created": created,
+                         "rule": _fb_rule_out(row)}, status_code=status)
+
+
+@app.post("/api/repos/{repo_owner}/{repo_name}/feedback/rules/disable-all")
+async def disable_all_suppression_rules_endpoint(repo_owner: str,
+                                                 repo_name: str,
+                                                 request: Request):
+    authority = _feedback_authority(request)
+    repo = _fb_repo(repo_owner, repo_name)
+    try:
+        count = get_storage().disable_all_suppression_rules(authority, repo)
+    except _fb.FeedbackError as exc:
+        raise _fb_http(exc)
+    _audit(request, "disable_all_suppression_rules", f"{repo}:{count}", 200)
+    return {"ok": True, "disabled": count}
+
+
+@app.post("/api/repos/{repo_owner}/{repo_name}/feedback/rules/{rule_id}/disable")
+async def disable_suppression_rule_endpoint(repo_owner: str, repo_name: str,
+                                            rule_id: str, request: Request):
+    authority = _feedback_authority(request)
+    repo = _fb_repo(repo_owner, repo_name)
+    try:
+        row, changed = get_storage().disable_suppression_rule(
+            authority, repo, rule_id)
+    except _fb.FeedbackError as exc:
+        raise _fb_http(exc)
+    if row is None:
+        raise HTTPException(404, "rule not found")
+    _audit(request, "disable_suppression_rule", f"{repo}:{rule_id}", 200)
+    return {"ok": True, "changed": changed, "rule": _fb_rule_out(row)}
+
+
+@app.get("/api/repos/{repo_owner}/{repo_name}/feedback/effectiveness")
+def feedback_effectiveness_endpoint(repo_owner: str, repo_name: str,
+                                    request: Request):
+    """V4-E09-T07: descriptive before/after repeat-FP counts. Read-only,
+    bounded, and makes no success claim (``claim`` is always ``none``)."""
+    _fb_check_reads(request)
+    repo = _fb_repo(repo_owner, repo_name)
+    s, storage = _schema(), get_storage()
+    result = _fb_eval.evaluate_effectiveness(
+        repo,
+        storage.list_feedback_events(repo, limit=s.MAX_EVENTS_PER_REPO),
+        storage.get_suppression_rules(repo, include_inactive=True),
+        storage.list_findings(repo=repo, limit=s.MAX_EVAL_FINDING_ROWS))
+    return result

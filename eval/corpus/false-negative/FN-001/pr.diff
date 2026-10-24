@@ -1,0 +1,11 @@
+diff --git a/web/app.js b/web/app.js
+--- a/web/app.js
++++ b/web/app.js
+@@ -1,1 +1,7 @@
+ const box = document.getElementById('out');
++function show(userInput) {
++  box.innerHTML = userInput;
++}
++function keep(t) {
++  localStorage.setItem('authToken', t);
++}

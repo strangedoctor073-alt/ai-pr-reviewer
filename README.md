@@ -181,9 +181,14 @@ at any time):
 - **Top level** — `pr`, `mode`, `model`, `reviewed_at`, `duration_ms`,
   `summary`, `findings`, `below_threshold`, `stats`, `posted_inline`,
   `suppressed`, `warnings`, `health_score`, `health_grade`, `telemetry`,
+  `risk`, `verification`,
   `id`, `review_state`, `engine`, `fallback_used`, `new_findings_count`,
   `resolved_findings_count`, `below_threshold_count`,
   `active_findings_count`.
+  `risk` (`{"level": "low"|"high", "reasons": [...]}`) and `verification`
+  (`{"resolved", "still_present", "unable_to_verify"}`) are the V4-D10
+  surfacing of what the markdown summary already renders; both are `null`
+  when the orchestrator did not compute them for a run.
 - **Every finding row** — `file`, `line`, `end_line`, `severity`,
   `category`, `title`, `explanation`, `suggestion`, `confidence`,
   `rule_id`, `fingerprint`, `state`, `first_seen_sha`, `last_seen_sha`,
@@ -507,8 +512,9 @@ reach over HTTPS (`localhost` will not work) and set the `PR_DASHBOARD_URL` and
 | `GET`/`PUT` | `/api/settings` | reads* / token | Validated rules |
 | `GET` | `/api/config` | token | Action consumes before review |
 | `GET`/`POST`/`PUT`/`DELETE` | `/api/reviews/{owner}/{repo}/{pr}/state` and `/findings`; `/api/repos/{owner}/{repo}/memory` (`PUT`/`DELETE` select a row with `?id=`) | reads* / token | Review state the Action stores between pushes; project memory (mute rows refused with 403) |
-| `GET` | `/api/findings`, `/api/metrics` | reads* | Findings browser and aggregate metrics |
+| `GET` | `/api/findings`, `/api/metrics` | reads* | Findings browser and aggregate metrics (tokens, provider latency, display-only estimated cost) |
 | `POST` | `/api/findings/{fingerprint}/feedback` | token | `up` / `down` / `mute` |
+| `POST` | `/api/telemetry` | token | One run's sanitized telemetry row (≤ 64 KiB) — LAN/trusted-network scope only, see `docs/TELEMETRY_INGESTION.md` |
 | `GET` | `/api/badge/{owner}/{repo}` | **none (public)** | SVG health badge; reveals a repo's average score to anyone who knows its name |
 | `POST` | `/api/sandbox/simulate` | **none (rate-limited)** | Runs the static rules on a pasted diff (≤ 50 000 chars) |
 

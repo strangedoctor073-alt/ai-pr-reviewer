@@ -1,0 +1,24 @@
+id: TIERB-001
+layer: quality
+title: Tier B - hardcoded credential and string-built SQL are both reported by a provider
+provenance: hand-authored
+diff: pr.diff
+engine_matrix:
+- claude
+- openai
+- gemini
+expect:
+  findings:
+  - file: src/users.py
+    line_hint: 3
+    tolerance: 1
+    category: security
+    severity_min: high
+  - file: src/users.py
+    line_hint: 6
+    tolerance: 1
+    category: security
+    severity_min: high
+notes: 'V4-E11-T08 (reporting only): provider-only matrix, so Tier A reports it as skipped
+  (not measured here). Labels are provider-tolerant on purpose - file + line tolerance + category
+  + severity floor, no title regex - because model wording is not stable.'

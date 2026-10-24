@@ -1394,6 +1394,15 @@ an unrelated contract change.
 
 #### V4-E05 · finding identity v2 — tickets
 
+> **Superseded outlines — read the V4 scope record above first.** These
+> are the pre-ADR-005 drafts kept for history. T03 (alias table), T04
+> (backfill) and T06 (cutover) are **rejected** outright; T02's dual-
+> computation wording was implemented as the layered occurrence key (no
+> persisted v2); T05's approved form is the manifest's "static floor
+> (P2, optional)" — the soak outline below is dormant; T01's approved
+> acceptance lives in `ai_pr_reviewer/findings.py` (identity spec incl.
+> rollback-to-v1).
+
 - **V4-E05-T01** · Identity v2 specification + ADR
   - *Goal*: write the v2 basis (fields, normalization, location anchoring) and record it as an ADR in the ADR set (`ADR_INDEX.md` — ADR-005 per plan references).
   - *Likely files/new subsystem*: ADR document (planning docs), spec comment in findings module at implementation time.

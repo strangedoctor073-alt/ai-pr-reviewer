@@ -1,0 +1,18 @@
+id: TIERB-002
+layer: quality
+title: Tier B - a benign refactor must draw no security or bug findings from a provider
+provenance: hand-authored
+diff: pr.diff
+engine_matrix:
+- claude
+- openai
+- gemini
+expect:
+  findings: []
+  no_findings:
+  - file: src/slug.py
+    category: security
+  - file: src/slug.py
+    category: bug
+notes: 'V4-E11-T08 precision probe: anything a provider posts here (>= severity threshold)
+  is an unmatched finding and lowers Tier-B precision toward the 0.80 reporting floor.'

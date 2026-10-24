@@ -3,8 +3,11 @@ from __future__ import annotations
 
 from typing import Optional
 
-from sqlalchemy import JSON, Boolean, Float, Index, Integer, String
+from sqlalchemy import (JSON, Boolean, CheckConstraint, Float, Index, Integer,
+                        String)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+from ai_pr_reviewer import storage_schema as _schema
 
 
 class Base(DeclarativeBase):
@@ -117,3 +120,64 @@ class TelemetryRow(Base):
     updated_at: Mapped[str] = mapped_column(String(32), default="")
     payload: Mapped[dict] = mapped_column(JSON, default=dict)
 
+
+class FeedbackEventRow(Base):
+    """V4-E09-T01 — one human vote on a finding fingerprint (additive table).
+
+    A *record*: the engine never reads these rows to change behavior.
+    Scoped per repository on every row; ``origin`` is CHECK-constrained to
+    the two authenticated entry points. Constraints and columns mirror
+    ``storage_schema`` (asserted by ``tests/test_feedback.py``).
+    """
+
+    __tablename__ = _schema.FEEDBACK_EVENTS_TABLE
+    __table_args__ = (
+        *(CheckConstraint(sql, name=name)
+          for name, sql in _schema.FEEDBACK_EVENT_CHECKS),
+        Index("ix_feedback_events_repo_created", "repo", "created_at"),
+        Index("ix_feedback_events_repo_fingerprint", "repo", "fingerprint"),
+    )
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    repo: Mapped[str] = mapped_column(String(200), nullable=False)
+    fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    kind: Mapped[str] = mapped_column(String(8), nullable=False)
+    note: Mapped[str] = mapped_column(String(500), nullable=False, default="")
+    origin: Mapped[str] = mapped_column(String(16), nullable=False)
+    created_at: Mapped[str] = mapped_column(String(32), nullable=False)
+
+
+class SuppressionRuleRow(Base):
+    """V4-E09-T01 — one human-authored suppression rule (additive table).
+
+    THE INVARIANT lives partly here: ``origin`` is NOT NULL and CHECKed to
+    the authenticated origins, a rule's shape is CHECKed so it can never
+    match everything, and ``expires_at`` is NOT NULL (every rule expires).
+    A forged row — origin ``model``, ``pr``, ``engine`` — is rejected by the
+    database itself, whatever code tried to write it.
+    """
+
+    __tablename__ = _schema.SUPPRESSION_RULES_TABLE
+    __table_args__ = (
+        *(CheckConstraint(sql, name=name)
+          for name, sql in _schema.SUPPRESSION_RULE_CHECKS),
+        Index("ix_suppression_rules_repo", "repo", "expires_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    repo: Mapped[str] = mapped_column(String(200), nullable=False)
+    match_kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    fingerprint: Mapped[str] = mapped_column(String(64), nullable=False,
+                                             default="")
+    rule_id: Mapped[str] = mapped_column(String(200), nullable=False,
+                                         default="")
+    path_glob: Mapped[str] = mapped_column(String(255), nullable=False,
+                                           default="")
+    reason: Mapped[str] = mapped_column(String(500), nullable=False,
+                                        default="")
+    origin: Mapped[str] = mapped_column(String(16), nullable=False)
+    created_at: Mapped[str] = mapped_column(String(32), nullable=False)
+    expires_at: Mapped[str] = mapped_column(String(32), nullable=False)
+    disabled_at: Mapped[str] = mapped_column(String(32), nullable=False,
+                                             default="")
+    updated_at: Mapped[str] = mapped_column(String(32), nullable=False)

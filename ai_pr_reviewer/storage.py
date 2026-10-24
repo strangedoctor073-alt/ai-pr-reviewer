@@ -24,7 +24,10 @@ from .findings import fingerprint_finding
 from .models import Finding
 from .storage_schema import (CAP_DISMISSED_FINGERPRINTS, CAP_LIST_REPO_MEMORY,
                              CAP_PREVIOUS_FINDINGS, CAP_PRUNE, CAP_REPO_MEMORY,
-                             CAP_TELEMETRY, CORE_CAPABILITIES,
+                             CAP_SUPPRESSION_RULES, CAP_TELEMETRY,
+                             CORE_CAPABILITIES, MAX_RULES_APPLIED_PER_RUN,
+                             SUPPRESSION_RULE_COLUMNS, SUPPRESSION_RULES_TABLE,
+                             feedback_iso, feedback_now,
                              is_mute_pattern, mute_fingerprint, parse_review_id,
                              retention_cutoff)
 from .telemetry import sanitize_telemetry
@@ -67,7 +70,8 @@ class ReviewStorage(Protocol):
     ``storage_schema.CAP_*`` vocabulary). Callers must branch with
     :func:`has_capability` and follow the documented fallback instead
     of probing with getattr. A backend may legitimately omit a
-    capability — the HTTP client declares no telemetry or pruning — in
+    capability — the HTTP client declares no pruning (V4-E11-T06 gave it
+    ``save_telemetry``) — in
     which case ``has_capability`` is False and the caller degrades with
     a logged warning rather than silently varying.
     """
@@ -118,16 +122,26 @@ class DashboardStorageClient:
     """Remote HTTP client connecting to the AI PR Reviewer Dashboard.
 
     Declared capabilities (V3-E04-T04): the core protocol plus the two
-    formerly-undeclared capabilities. Telemetry and pruning are
-    *explicitly absent* — this client has no engine→dashboard telemetry
-    route, and the engine must never delete dashboard data remotely, so
-    callers see a declared absence (warning-logged) instead of a
-    silently-varying getattr miss.
+    formerly-undeclared capabilities. V4-E11-T06 closed debt 15 by adding
+    ``save_telemetry`` — telemetry now rides the dashboard's ingestion
+    route when one is configured (still drop-safe: a failed push only
+    warns, the review is unaffected). Pruning remains *explicitly absent*:
+    the engine must never delete dashboard data remotely, so callers see a
+    declared absence (warning-logged) instead of a silently-varying
+    getattr miss.
     """
 
+    # V4-E09: CAP_SUPPRESSION_RULES is a READ capability. The authoring
+    # capability (``storage_schema.CAP_FEEDBACK_ADMIN``) is deliberately
+    # absent here and on LocalReviewStorage: the engine's storage classes
+    # have no method that can create or change a suppression rule.
+    # V4-E11-T06: CAP_TELEMETRY joins in V4 (debt 15); CAP_PRUNE stays
+    # absent — remote deletion is not this client's business.
     capabilities: frozenset[str] = CORE_CAPABILITIES | {
         CAP_LIST_REPO_MEMORY,
         CAP_DISMISSED_FINGERPRINTS,
+        CAP_SUPPRESSION_RULES,
+        CAP_TELEMETRY,
     }
 
     def __init__(self, base_url: str, token: str, timeout: float = 15.0,
@@ -217,6 +231,26 @@ class DashboardStorageClient:
         except Exception as exc:
             log.warning("DashboardStorageClient: save_findings failed: %s", exc)
 
+    def save_telemetry(self, review_id: str, telemetry: dict) -> None:
+        """V4-E11-T06 (debt 15): push one run's sanitized telemetry row to
+        the dashboard's ``POST /api/telemetry`` ingestion route.
+
+        Same trust model as ``save_findings``: the shared
+        ``X-Dashboard-Token``, a bounded body (the row is already
+        allowlist-bounded by ``telemetry.sanitize_telemetry`` and the
+        route caps bodies at 64 KiB), and best-effort semantics — telemetry
+        is drop-safe (ADR-014), so any failure degrades to a logged
+        warning and the review itself is unaffected. The server
+        re-sanitizes at its own boundary before storing.
+        """
+        payload = {"review_id": review_id, "telemetry": telemetry}
+        try:
+            client = self._get_client()
+            r = client.post("/api/telemetry", json=payload)
+            r.raise_for_status()
+        except Exception as exc:
+            log.warning("DashboardStorageClient: save_telemetry failed: %s", exc)
+
     def get_repo_memory(self, repo: str, paths: list[str]) -> list[str]:
         url = f"/api/repos/{repo}/memory"
         try:
@@ -289,6 +323,24 @@ class DashboardStorageClient:
             log.warning("DashboardStorageClient: get_dismissed_fingerprints failed: %s", exc)
             return set()
 
+    def get_suppression_rules(self, repo: str) -> list[dict]:
+        """Active suppression rules the dashboard holds for ``repo`` (V4-E09).
+
+        Read-only. Unlike its neighbours this one *raises* on a transport
+        or HTTP failure instead of returning an empty value: the caller
+        (``feedback.load_active_rules``) turns that into an explicit report
+        warning, because "no rules" and "could not load the rules" must not
+        look identical in a review that claims to apply them. A 404 (an
+        older dashboard without the route) is a plain "no rules".
+        """
+        client = self._get_client()
+        r = client.get(f"/api/repos/{repo}/feedback/rules")
+        if r.status_code == 404:
+            return []
+        r.raise_for_status()
+        rows = r.json().get("rules", [])
+        return [row for row in rows if isinstance(row, dict)]
+
 
 class LocalReviewStorage:
     """SQLite-backed local storage requiring no third-party libraries.
@@ -303,6 +355,7 @@ class LocalReviewStorage:
         CAP_DISMISSED_FINGERPRINTS,
         CAP_TELEMETRY,
         CAP_PRUNE,
+        CAP_SUPPRESSION_RULES,
     }
 
     def __init__(self, db_path: str | Path):
@@ -617,6 +670,33 @@ class LocalReviewStorage:
                 if fp:
                     out.add(fp)
             return out
+
+    def get_suppression_rules(self, repo: str, now: datetime | None = None
+                              ) -> list[dict]:
+        """Active suppression rules for exactly ``repo`` (V4-E09).
+
+        READ-ONLY, like ``repo_memory`` above: this engine never writes a
+        rule (rules are authored in the dashboard/CLI; the tables here are
+        seeded by tooling/tests). The query is scoped by ``repo`` and
+        filters disabled/expired rows in SQL; ``feedback`` re-validates
+        every row again. A database that has no suppression table (every
+        V3 file, and every file when feedback is off) answers ``[]`` and is
+        **not altered** — no DDL runs on this path.
+        """
+        stamp = feedback_iso(feedback_now(now))
+        columns = ", ".join(SUPPRESSION_RULE_COLUMNS)
+        with self._connection() as conn:
+            present = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                (SUPPRESSION_RULES_TABLE,)).fetchone()
+            if present is None:
+                return []
+            rows = conn.execute(
+                f"SELECT {columns} FROM {SUPPRESSION_RULES_TABLE} "
+                "WHERE repo = ? AND disabled_at = '' AND expires_at > ? "
+                "ORDER BY created_at, id LIMIT ?",
+                (repo, stamp, MAX_RULES_APPLIED_PER_RUN + 1)).fetchall()
+            return [dict(row) for row in rows]
 
     def prune(self, retention_days: int, *, dry_run: bool = False,
               now: datetime | None = None) -> dict:

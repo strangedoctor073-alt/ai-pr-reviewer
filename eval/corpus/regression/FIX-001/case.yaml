@@ -1,0 +1,24 @@
+id: FIX-001
+layer: regression
+title: Findings whose rules offer a fix carry a suggestion
+provenance: hand-authored
+diff: pr.diff
+fix_expected: true
+expect:
+  findings:
+  - file: src/items.py
+    line_hint: 4
+    category: bug
+    severity_min: high
+    title_match: Mutable default
+    severity: high
+  - file: src/items.py
+    line_hint: 10
+    category: security
+    severity_min: high
+    title_match: yaml.load
+    severity: high
+notes: 'V4-E11-T04 fix_usefulness: labeled fix_expected; at least one posted+matched finding
+  must carry a non-blank suggestion (a presence check - the harness never applies or executes
+  a suggestion). The signature-only edit (body unchanged) is a realistic diff shape that exercises
+  ERR006 once; see KB-002 for the AST+regex duplicate gap.'

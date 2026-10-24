@@ -251,7 +251,7 @@ def test_t02_to_telemetry_row_drops_non_allowlisted_fields():
     assert "/home/dev" not in json.dumps(row)
     assert "hunter2" not in json.dumps(row)
     allowed = {"schema", "provider", "model", "batch_count", "fallback_used",
-               "usage", "calls", "events"}
+               "usage", "calls", "events", "cost"}   # V4-E11-T07
     assert set(row) == allowed
 
 
@@ -437,3 +437,473 @@ def _failover_context() -> ReviewContext:
     return ReviewContext(pr=PRContext(repo="acme/api", pr_number=7),
                          files=[], project_rules=None, previous_findings=[],
                          memory_notes=[], focus_areas=[])
+
+
+# =====================================================================
+# V4-E11 — T06 latency · T07 cost table (display only) · ingestion route
+# =====================================================================
+import ast
+import re
+
+from ai_pr_reviewer import telemetry as tel_mod
+from ai_pr_reviewer.telemetry import (
+    PRICE_TABLE_ENV, Price, estimate_cost, latency_from_rows,
+    load_price_table, lookup_price, parse_price_table, percentile,
+    sanitize_telemetry, summarize_latency,
+)
+
+_OK_USAGE = {"provider": "p", "model": "m-1", "input_tokens": 1000,
+             "output_tokens": 500, "duration_ms": 10, "state": "ok"}
+
+
+def _row(**over):
+    base = {"schema": 1, "provider": "p", "model": "m-1", "batch_count": 1,
+            "fallback_used": False, "usage": dict(_OK_USAGE),
+            "calls": [], "events": []}
+    base.update(over)
+    return base
+
+
+# ------------------------------------------------------------ T07 · cost
+def test_t07_no_model_ids_or_prices_ship_in_source():
+    """No price table is baked in: with an empty environment every
+    reported-usage run is ``unpriced`` — never a guessed number."""
+    assert load_price_table({}) == {}
+    cost = estimate_cost(_OK_USAGE, [], load_price_table({}))
+    assert cost["state"] == "unpriced"
+    assert cost["low"] is None and cost["high"] is None
+    src = Path(tel_mod.__file__).read_text(encoding="utf-8")
+    for banned in ("claude-", "gpt-", "gemini-"):
+        assert banned not in src, f"telemetry.py hard-codes a model id ({banned})"
+
+
+def test_t07_estimate_is_a_band_from_table_times_usage():
+    table = {"m-1": Price(3.0, 15.0, 10.0)}
+    cost = estimate_cost(_OK_USAGE, [], table)
+    # (1000*3 + 500*15) / 1e6 = 0.0105  ±10 %
+    assert cost == {"state": "estimated", "currency": "USD",
+                    "low": 0.00945, "high": 0.01155, "display_only": True}
+
+
+def test_t07_states_mirror_usage_states_never_a_fake_zero():
+    table = {"m-1": Price(1.0, 1.0)}
+    assert estimate_cost({"state": "n/a"}, [], table)["state"] == "n/a"
+    assert estimate_cost({"state": "unavailable"}, [], table)["state"] == "unavailable"
+    assert estimate_cost({"state": "n/a"}, [], table)["low"] is None
+
+
+def test_t07_failover_prices_each_call_by_its_own_model_all_or_nothing():
+    table = {"a-*": Price(1.0, 1.0, 0.0), "b-exact": Price(2.0, 2.0, 0.0)}
+    calls = [{"state": "ok", "model": "a-large", "input_tokens": 1_000_000,
+              "output_tokens": 0},
+             {"state": "ok", "model": "b-exact", "input_tokens": 1_000_000,
+              "output_tokens": 0}]
+    assert estimate_cost(_OK_USAGE, calls, table)["low"] == 3.0
+    # one unpriced model => no total at all (a partial sum would read as one)
+    calls.append({"state": "ok", "model": "c-unknown", "input_tokens": 5,
+                  "output_tokens": 5})
+    assert estimate_cost(_OK_USAGE, calls, table)["state"] == "unpriced"
+
+
+def test_t07_prefix_lookup_longest_wins_and_exact_beats_prefix():
+    table = parse_price_table({
+        "fam-*": {"input_per_mtok": 1, "output_per_mtok": 1},
+        "fam-big-*": {"input_per_mtok": 2, "output_per_mtok": 2},
+        "fam-big-1": {"input_per_mtok": 9, "output_per_mtok": 9}})
+    assert lookup_price(table, "fam-small").input_per_mtok == 1
+    assert lookup_price(table, "fam-big-2").input_per_mtok == 2
+    assert lookup_price(table, "fam-big-1").input_per_mtok == 9
+    assert lookup_price(table, "other") is None
+    assert lookup_price(table, None) is None
+
+
+def test_t07_price_table_parsing_is_strict_and_bounded():
+    bad = {"neg": {"input_per_mtok": -1, "output_per_mtok": 1},
+           "str": {"input_per_mtok": "1", "output_per_mtok": 1},
+           "bool": {"input_per_mtok": True, "output_per_mtok": 1},
+           "nan": {"input_per_mtok": float("nan"), "output_per_mtok": 1},
+           "huge": {"input_per_mtok": 1e12, "output_per_mtok": 1},
+           "missing": {"input_per_mtok": 1},
+           "notdict": 5, "": {"input_per_mtok": 1, "output_per_mtok": 1},
+           "ok": {"input_per_mtok": 1, "output_per_mtok": 2}}
+    assert list(parse_price_table(bad)) == ["ok"]
+    assert parse_price_table(["not", "a", "dict"]) == {}
+    many = {f"m{i}": {"input_per_mtok": 1, "output_per_mtok": 1}
+            for i in range(500)}
+    assert len(parse_price_table(many)) <= 64
+
+
+@pytest.mark.parametrize("text", ["", "not json", "[1,2]", "{" * 5000,
+                                  "x" * 30_000])
+def test_t07_garbage_env_table_degrades_to_empty_never_raises(text):
+    assert load_price_table({PRICE_TABLE_ENV: text}) == {}
+
+
+def test_t07_cost_is_in_every_report_row_via_the_chokepoint(monkeypatch):
+    """Static/n-a runs and unpriced runs carry a typed cost block; a priced
+    run carries a band — all through the one serialization chokepoint."""
+    monkeypatch.delenv(PRICE_TABLE_ENV, raising=False)
+    static = tel_mod.to_telemetry_row(RunTelemetry())
+    assert static["cost"]["state"] == "n/a"
+    ai = tel_mod.to_telemetry_row(RunTelemetry(
+        provider="p", model="m-1",
+        usage=tel_mod.UsageRecord.for_call("p", "m-1", 10, 10, 5)))
+    assert ai["cost"]["state"] == "unpriced"
+    monkeypatch.setenv(PRICE_TABLE_ENV, json.dumps(
+        {"m-*": {"input_per_mtok": 1, "output_per_mtok": 1}}))
+    priced = tel_mod.to_telemetry_row(RunTelemetry(
+        provider="p", model="m-1",
+        usage=tel_mod.UsageRecord.for_call("p", "m-1", 10, 10, 5)))
+    assert priced["cost"]["state"] == "estimated"
+    assert priced["cost"]["display_only"] is True
+
+
+def test_t07_forged_cost_in_a_payload_cannot_claim_more_than_usage_allows():
+    forged = _row(usage={"state": "n/a"},
+                  cost={"state": "estimated", "currency": "USD",
+                        "low": 1.0, "high": 2.0, "display_only": False})
+    cost = sanitize_telemetry(forged)["cost"]
+    assert cost["state"] == "n/a" and cost["low"] is None
+    assert cost["display_only"] is True          # cannot be turned off
+    for lo, hi in ((5, 1), (-1, 1), (float("nan"), 1), ("1", "2"),
+                   (True, 2), (1e12, 1e12)):
+        out = sanitize_telemetry(_row(cost={
+            "state": "estimated", "currency": "USD", "low": lo, "high": hi,
+            "display_only": True}))["cost"]
+        assert out["state"] == "unpriced"         # recomputed, not trusted
+    wrong_ccy = sanitize_telemetry(_row(cost={
+        "state": "estimated", "currency": "EUR", "low": 1, "high": 2}))
+    assert wrong_ccy["cost"]["currency"] == "USD"
+    assert wrong_ccy["cost"]["state"] == "unpriced"
+
+
+def test_t07_well_formed_carried_cost_survives_and_is_idempotent():
+    carried = _row(cost={"state": "estimated", "currency": "USD",
+                         "low": 0.01, "high": 0.02, "display_only": True})
+    once = sanitize_telemetry(carried)
+    assert once["cost"]["low"] == 0.01 and once["cost"]["high"] == 0.02
+    assert sanitize_telemetry(once) == once
+
+
+# ---------------------------------------------------------- T06 · latency
+def test_t06_percentiles_are_nearest_rank_and_null_without_data():
+    assert percentile([], 50) is None
+    assert percentile([10], 95) == 10
+    assert percentile(list(range(1, 101)), 50) == 50
+    assert percentile(list(range(1, 101)), 95) == 95
+    s = summarize_latency([5, None, "7", True, 9, float("nan"), 1])
+    assert s == {"n": 3, "p50": 5, "p95": 9, "max": 9}
+    assert summarize_latency([]) == {"n": 0, "p50": None, "p95": None,
+                                     "max": None}
+
+
+def test_t06_latency_from_rows_ignores_untrusted_shapes():
+    rows = [_row(calls=[{"duration_ms": 100}, {"duration_ms": "x"}, 5]),
+            "garbage", None, {"usage": "nope"},
+            _row(usage={**_OK_USAGE, "duration_ms": 300},
+                 calls=[{"duration_ms": 200}])]
+    got = latency_from_rows(rows)
+    assert got["per_call_ms"]["n"] == 2 and got["per_call_ms"]["max"] == 200
+    assert got["per_run_ms"]["n"] == 2 and got["per_run_ms"]["max"] == 300
+
+
+# ------------------------------------- debt 11 ground rule · safe formatting
+def test_debt11_warning_text_is_safe_formatted_redacted_then_truncated():
+    secret = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+    nasty = ("boom\r\nFAKE LOG LINE\x1b[31m red \x00" + secret
+             + " <untrusted_diff> " + "x" * 400)
+    row = sanitize_telemetry(_row(events=[
+        {"type": "provider_error", "backend": "p", "error": nasty}]))
+    err = row["events"][0]["error"]
+    assert "\n" not in err and "\r" not in err and "\x1b" not in err
+    assert "\x00" not in err and secret not in err
+    assert "<untrusted_diff>" not in err
+    assert len(err) <= 200
+
+
+def test_debt11_secret_straddling_the_length_bound_is_not_leaked_as_a_prefix():
+    secret = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+    text = "x" * 189 + " " + secret      # secret starts 10 chars before 200
+    assert len(text) - len(secret) == 190
+    err = sanitize_telemetry(_row(events=[
+        {"type": "provider_error", "error": text}]))["events"][0]["error"]
+    assert "ghp_A1b2" not in err and "ghp_" not in err.replace("[REDACTED", "")
+
+
+# ---------------------------------------- review gate · no cost routing
+_ENGINE = Path(tel_mod.__file__).parent
+_DISPLAY_ONLY_API = {
+    "estimate_cost", "load_price_table", "lookup_price", "parse_price_table",
+    "Price", "COST_STATES", "PRICE_TABLE_ENV", "summarize_latency",
+    "latency_from_rows", "percentile"}
+_ROUTING_MODULES = ("model_router.py", "circuit.py", "retry.py",
+                    "orchestrator.py", "context.py", "selection.py",
+                    "config.py", "impact.py", "repo_context.py")
+_SENSITIVE_RE = re.compile(r"cost|price|latenc|duration|elapsed", re.I)
+
+
+def _imported_names(tree: ast.AST) -> set[str]:
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            names.update(a.name for a in node.names)
+        elif isinstance(node, ast.Import):
+            names.update(a.name.split(".")[-1] for a in node.names)
+    return names
+
+
+def _ids(node: ast.AST) -> list[str]:
+    out = []
+    for n in ast.walk(node):
+        if isinstance(n, ast.Name):
+            out.append(n.id)
+        elif isinstance(n, ast.Attribute):
+            out.append(n.attr)
+        elif isinstance(n, ast.Constant) and isinstance(n.value, str):
+            out.append(n.value)
+    return out
+
+
+def _decision_violations(source: str) -> list[str]:
+    """Every place a cost/latency-ish identifier takes part in a *decision*:
+    a comparison, an if/while/ternary test, a boolean op, or a sort/min/max
+    key. Recording (``x.duration_ms = ...``) is not a decision."""
+    bad = []
+    for n in ast.walk(ast.parse(source)):
+        tests: list[ast.AST] = []
+        if isinstance(n, (ast.Compare, ast.BoolOp)):
+            tests.append(n)
+        elif isinstance(n, (ast.If, ast.While, ast.IfExp)):
+            tests.append(n.test)
+        elif isinstance(n, ast.Call):
+            fn = n.func.id if isinstance(n.func, ast.Name) else (
+                n.func.attr if isinstance(n.func, ast.Attribute) else "")
+            if fn in ("sorted", "sort", "min", "max"):
+                tests.extend(kw.value for kw in n.keywords if kw.arg == "key")
+                tests.extend(n.args)
+        for t in tests:
+            hits = [i for i in _ids(t) if _SENSITIVE_RE.search(i)]
+            if hits:
+                bad.append(f"line {getattr(n, 'lineno', '?')}: {hits[:3]}")
+    return bad
+
+
+def test_review_gate_negative_control_the_scanner_can_fail():
+    """The gate is only meaningful if it would catch the thing it guards."""
+    routed = ("def pick(tel, a, b):\n"
+              "    if tel.duration_ms > 3000:\n        return b\n"
+              "    return min([a, b], key=lambda p: p.cost)\n")
+    assert len(_decision_violations(routed)) >= 2
+    recorded = "def done(r, t0):\n    r.duration_ms = int(now() - t0)\n"
+    assert _decision_violations(recorded) == []
+
+
+def test_review_gate_no_engine_module_consumes_the_cost_or_latency_api():
+    """V4_THREAT_MODEL §6 / V4-E11-T07: display-only. Only telemetry.py may
+    even *import* the price/latency API — no other engine module."""
+    offenders = []
+    for path in sorted(_ENGINE.rglob("*.py")):
+        if path.name == "telemetry.py":
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        used = _imported_names(tree) & _DISPLAY_ONLY_API
+        if used:
+            offenders.append(f"{path.relative_to(_ENGINE)}: {sorted(used)}")
+        if PRICE_TABLE_ENV in path.read_text(encoding="utf-8"):
+            offenders.append(f"{path.name}: reads the price-table env var")
+    assert offenders == [], offenders
+
+
+@pytest.mark.parametrize("module", _ROUTING_MODULES)
+def test_review_gate_no_routing_decision_depends_on_cost_or_latency(module):
+    source = (_ENGINE / module).read_text(encoding="utf-8")
+    assert _decision_violations(source) == [], (
+        f"{module}: cost/latency/duration participates in a decision — "
+        f"V4 has NO cost- or latency-based routing")
+
+
+def test_review_gate_behavioral_routing_is_blind_to_price_table_and_latency(
+        monkeypatch):
+    """Same config -> same backend and same failover order, whatever the
+    price table says and whatever telemetry latency history exists."""
+    cfg = Config(anthropic_api_key="a", openai_api_key="o", gemini_api_key="g",
+                 provider_order="gemini, claude, openai", model="")
+    before = (router.select_backend(cfg), router.provider_order(cfg))
+    monkeypatch.setenv(PRICE_TABLE_ENV, json.dumps({
+        "*": {"input_per_mtok": 0, "output_per_mtok": 0},
+        "claude-*": {"input_per_mtok": 1e5, "output_per_mtok": 1e5},
+        "gemini-*": {"input_per_mtok": 0, "output_per_mtok": 0}}))
+    router.reset_circuits()
+    after_priced = (router.select_backend(cfg), router.provider_order(cfg))
+    assert after_priced == before
+    # a pathological latency history changes nothing either
+    latency_from_rows([_row(usage={**_OK_USAGE, "duration_ms": 10**9})])
+    assert (router.select_backend(cfg), router.provider_order(cfg)) == before
+
+
+# ------------------------------------------- T06 · ingestion route (debt 15)
+from fastapi.testclient import TestClient
+
+from dashboard import app as dashboard_app
+
+_TOKEN = "unit-test-token-0123456789abcdef"
+_RID = "acme/widgets#7@abc123def456"
+
+
+@pytest.fixture()
+def dash(monkeypatch, tmp_path):
+    monkeypatch.setattr(dashboard_app, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(dashboard_app, "REPORTS_DIR", tmp_path / "reports")
+    monkeypatch.setattr(dashboard_app, "SETTINGS_PATH", tmp_path / "settings.json")
+    monkeypatch.setattr(dashboard_app, "AUDIT_PATH", tmp_path / "audit.jsonl")
+    monkeypatch.setattr(dashboard_app, "_storage", None)
+    monkeypatch.setattr(dashboard_app, "_api_token", None)
+    monkeypatch.setenv("DASHBOARD_TOKEN", _TOKEN)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setattr(dashboard_app, "limiter",
+                        dashboard_app.SlidingWindowLimiter())
+    with TestClient(dashboard_app.app) as client:
+        yield client, tmp_path
+
+
+def _post(client, body, token=_TOKEN, **kw):
+    headers = {"X-Dashboard-Token": token} if token is not None else {}
+    return client.post("/api/telemetry", json=body, headers=headers, **kw)
+
+
+def test_t06_route_requires_the_dashboard_token(dash):
+    client, tmp = dash
+    body = {"review_id": _RID, "telemetry": _row()}
+    assert _post(client, body, token=None).status_code == 401
+    assert _post(client, body, token="wrong").status_code == 401
+    assert _post(client, body, token="").status_code == 401
+    assert dashboard_app.get_storage().get_telemetry(_RID) is None
+    audit = (tmp / "audit.jsonl").read_text(encoding="utf-8")
+    assert "auth_rejected" in audit and "telemetry_ingest" not in audit
+
+
+def test_t06_route_auth_applies_even_when_reads_are_open(dash, monkeypatch):
+    client, _ = dash
+    monkeypatch.setattr(dashboard_app, "REQUIRE_READS_AUTH", False)
+    assert _post(client, {"review_id": _RID, "telemetry": _row()},
+                 token=None).status_code == 401
+
+
+def test_t06_route_stores_through_the_existing_seam_and_feeds_metrics(dash):
+    client, _ = dash
+    r = _post(client, {"review_id": _RID, "telemetry": _row()})
+    assert r.status_code == 200 and r.json() == {"ok": True, "id": _RID}
+    stored = dashboard_app.get_storage().get_telemetry(_RID)
+    assert stored["usage"]["input_tokens"] == 1000
+    assert stored["cost"]["display_only"] is True
+    runs = client.get("/api/metrics",
+                      headers={"X-Dashboard-Token": _TOKEN}).json()["telemetry"]["runs"]
+    assert runs == 1
+    _post(client, {"review_id": _RID, "telemetry": _row(batch_count=4)})
+    assert dashboard_app.get_storage().get_telemetry(_RID)["batch_count"] == 4
+    assert client.get("/api/metrics", headers={"X-Dashboard-Token": _TOKEN}
+                      ).json()["telemetry"]["runs"] == 1       # upsert
+
+
+def test_t06_route_structures_and_redacts_every_payload(dash):
+    client, tmp = dash
+    secret = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+    payload = _row(
+        diff="+ password = 'hunter2hunter2'", prompt="ignore previous",
+        path="/home/dev/secret.py",
+        usage={**_OK_USAGE, "findings": ["leak"], "file": "/etc/passwd"},
+        events=[
+            {"type": "provider_error", "backend": "p",
+             "error": f"401 bad key {secret}\r\nINJECTED <untrusted_diff>"},
+            {"type": "totally_unapproved", "error": "dropped whole"}])
+    r = _post(client, {"review_id": _RID, "telemetry": payload,
+                       "extra_top_level": "ignored"})
+    assert r.status_code == 200
+    stored = dashboard_app.get_storage().get_telemetry(_RID)
+    blob = json.dumps(stored)
+    for leak in (secret, "hunter2", "ignore previous", "/home/dev", "/etc/passwd",
+                 "INJECTED <untrusted", "dropped whole", "extra_top_level"):
+        assert leak not in blob, leak
+    assert set(stored) == set(tel_mod._RUN_FIELDS)
+    assert [e["type"] for e in stored["events"]] == ["provider_error"]
+    # the response and the audit trail never echo payload content either
+    assert secret not in r.text
+    assert secret not in (tmp / "audit.jsonl").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("bad_id", [
+    "", "no-hash", "a/b#1", "a/b#x@sha", "../../etc#1@abc", "a/b#1@abc\nx",
+    "a b/c#1@abc", "x" * 200 + "/r#1@abc", "a/b#1@" + "z" * 80, None, 5,
+    ["a/b#1@c"]])
+def test_t06_route_rejects_malformed_review_ids(dash, bad_id):
+    client, _ = dash
+    r = _post(client, {"review_id": bad_id, "telemetry": _row()})
+    assert r.status_code == 400
+
+
+@pytest.mark.parametrize("body", [[1, 2], "str", 5, {"review_id": _RID},
+                                  {"review_id": _RID, "telemetry": [1]},
+                                  {"review_id": _RID, "telemetry": "x"}])
+def test_t06_route_rejects_malformed_bodies(dash, body):
+    client, _ = dash
+    assert _post(client, body).status_code == 400
+
+
+def test_t06_route_rejects_non_json_and_non_utf8(dash):
+    client, _ = dash
+    h = {"X-Dashboard-Token": _TOKEN}
+    assert client.post("/api/telemetry", content=b"{not json",
+                       headers=h).status_code == 400
+    assert client.post("/api/telemetry", content=b"\xff\xfe\x00",
+                       headers=h).status_code == 400
+
+
+def test_t06_route_caps_the_body_even_without_content_length(dash):
+    client, _ = dash
+    h = {"X-Dashboard-Token": _TOKEN}
+    big = json.dumps({"review_id": _RID, "telemetry": _row(),
+                      "pad": "x" * 70_000}).encode()
+    assert client.post("/api/telemetry", content=big,
+                       headers=h).status_code == 413
+
+    def chunks():                      # chunked: no Content-Length header
+        for i in range(0, len(big), 4096):
+            yield big[i:i + 4096]
+
+    assert client.post("/api/telemetry", content=chunks(),
+                       headers=h).status_code == 413
+    assert dashboard_app.get_storage().get_telemetry(_RID) is None
+
+
+def test_t06_route_is_additive_existing_routes_unchanged(dash):
+    client, _ = dash
+    paths = {r.path for r in dashboard_app.app.routes}
+    for existing in ("/api/reports", "/api/metrics", "/api/health",
+                     "/api/findings", "/api/settings", "/api/config"):
+        assert existing in paths
+    assert "/api/telemetry" in paths
+
+
+def test_t06_route_documents_lan_scope_and_claims_no_network_auth():
+    src = Path(dashboard_app.__file__).read_text(encoding="utf-8")
+    start = src.index("V4-E11-T06 (debt 15)")
+    block = src[start:src.index('@app.post("/api/telemetry")')]
+    assert "LAN" in block and "NO network-grade" in block
+    doc = dashboard_app.ingest_telemetry.__doc__
+    assert "LAN-scope only" in doc
+
+
+def test_t06_operator_doc_states_lan_scope_and_never_claims_network_auth():
+    doc = (ROOT / "docs" / "TELEMETRY_INGESTION.md").read_text(encoding="utf-8")
+    low = doc.lower()
+    assert "lan / trusted-network only" in low
+    assert "no network-grade authentication" in low
+    assert "v4.5.0" in doc                      # V5 ships publicly as v4.5.0
+    for overclaim in ("secure by default", "production-grade auth",
+                      "mutual tls", "is authenticated end-to-end"):
+        assert overclaim not in low
+    assert "display only" in low and "never influences routing" in low
+    # the documented example must be the real parseable shape
+    import re as _re
+    example = _re.search(r"AI_PR_REVIEWER_PRICE_TABLE='(\{.*?\})'", doc, _re.S)
+    assert parse_price_table(json.loads(example.group(1)))

@@ -448,3 +448,131 @@ class TestBudgetStateIsSurfaced:
         assert selection.budget_state == "ok"
         assert selection.excluded_files == ()
         assert self._surfaced(caplog) == []
+
+
+# ---------------------------------------------------------------------------
+# V4-E02-T02 · test_of must recognise every common test-file convention
+# ---------------------------------------------------------------------------
+
+class TestTestFileConventions:
+    """Regression: only ``test_x.py`` ever matched. ``x_test.go``,
+    ``x.test.ts``, ``x.spec.ts`` and ``x_spec.rb`` never produced a ``test_of``
+    selection, so a change to ``x`` silently lost its test."""
+
+    @staticmethod
+    def _select(changed, test_path):
+        idx = _index([_entry(changed, changed=True), _entry(test_path)])
+        sel = select_context(idx, [changed])
+        return {f.path: f.reason for f in sel.selected_files}
+
+    def test_every_convention_selects_its_test(self):
+        cases = [
+            ("pkg/billing.py", "tests/test_billing.py"),
+            ("pkg/billing.go", "pkg/billing_test.go"),
+            ("web/billing.ts", "web/billing.test.ts"),
+            ("web/billing.js", "web/billing.spec.js"),
+            ("lib/billing.rb", "spec/billing_spec.rb"),
+            ("web/billing.tsx", "web/__tests__/billing.tsx"),
+        ]
+        for changed, test_path in cases:
+            assert self._select(changed, test_path).get(test_path) == REASON_TEST_OF, \
+                (changed, test_path)
+
+    def test_a_similarly_named_non_test_is_not_a_test_of(self):
+        for other in ("pkg/billing_utils.py", "pkg/contest.py",
+                      "pkg/latest_billing.py", "pkg/billing_helpers.go"):
+            got = self._select("pkg/billing.py", other).get(other)
+            assert got != REASON_TEST_OF, other
+
+    def test_stem_extraction_is_symmetric(self):
+        from ai_pr_reviewer.selection import _base_stem, _is_test_path
+        for name in ("test_billing.py", "billing_test.go", "billing.test.ts",
+                     "billing.spec.ts", "billing_spec.rb"):
+            assert _base_stem(name) == "billing", name
+            assert _is_test_path(name), name
+        for name in ("billing.py", "contest.py", "attest.go", "latest.ts"):
+            assert not _is_test_path(name), name
+
+
+class TestSelectionIsOrderIndependent:
+    """The adjacency maps are built once; ordering must still depend only on
+    (reason priority, rank, path) -- never on index iteration order."""
+
+    def test_shuffled_index_gives_an_identical_contract(self):
+        base = _demo_index()
+        shuffled = _index(list(reversed(base.files)), list(reversed(base.edges)))
+        a = select_context(base, ["src/app.py"])
+        b = select_context(shuffled, ["src/app.py"])
+        assert a.to_dict() == b.to_dict()
+
+    def test_large_index_selection_is_fast(self):
+        import time
+        entries = [_entry("hub.py", changed=True)]
+        edges = []
+        for i in range(2_000):
+            entries.append(_entry(f"pkg{i % 40}/m{i}.py"))
+            edges.append((f"pkg{i % 40}/m{i}.py", "hub.py"))
+        t0 = time.monotonic()
+        sel = select_context(_index(entries, edges), ["hub.py"])
+        assert (time.monotonic() - t0) < 1.0        # ADR-017: p95 < 500 ms
+        assert len(sel.selected_files) == DEFAULT_MAX_SELECTED
+        assert sel.budget_state == "truncated"      # and it says so
+
+
+# ---------------------------------------------------------------------------
+# V4-E02-T03 · fetch order: the diff's own files are filler, not the headline
+# ---------------------------------------------------------------------------
+
+def _wide_pr_tree(n_changed=9):
+    tree = {f"core/m{i}.py": f"X{i} = {i}\n" for i in range(n_changed)}
+    tree["svc/consumer.py"] = "from core.m0 import X0\n"   # a form the E01 graph resolves
+    tree["tests/test_m0.py"] = "def test_m0():\n    assert True\n"
+    tree["pyproject.toml"] = "[project]\nname = \"demo\"\n"
+    return tree
+
+
+def _wide_diff(n_changed=9):
+    out = []
+    for i in range(n_changed):
+        out += [f"diff --git a/core/m{i}.py b/core/m{i}.py",
+                f"--- a/core/m{i}.py", f"+++ b/core/m{i}.py",
+                "@@ -1,1 +1,2 @@", f" X{i} = {i}", f"+Y{i} = {i}"]
+    return "\n".join(out) + "\n"
+
+
+class TestFetchOrderOnAWidePR:
+    def test_candidates_put_changed_files_last_but_keep_them(self):
+        from ai_pr_reviewer.context import _select_repository_context
+        tree = _wide_pr_tree()
+        entries = [_entry(p, changed=p.startswith("core/")) for p in tree]
+        edges = [("svc/consumer.py", "core/m0.py")]
+        candidates, selection = _select_repository_context(
+            parse_unified_diff(_wide_diff()), _index(entries, edges))
+        paths = [p for p, _ in candidates]
+        changed = [f"core/m{i}.py" for i in range(9)]
+        # the contract itself is unchanged: changed files lead (ADR-017)
+        assert [f.path for f in selection.selected_files[:9]] == changed
+        # ...but fetching leads with what the diff does NOT already show
+        assert paths[:3] == ["svc/consumer.py", "tests/test_m0.py", "pyproject.toml"]
+        assert paths[-9:] == changed                  # still candidates, as filler
+        assert set(paths) == set(selection.paths)     # nothing dropped
+
+    def test_importer_test_and_config_reach_the_prompt_despite_nine_changed_files(
+            self, tmp_path, monkeypatch):
+        """Regression: with changed files first, a PR touching >= 8 files
+        spent all 8 fetch slots re-reading its own diff and fetched none of
+        the importers / tests / config the selection exists to surface."""
+        from ai_pr_reviewer.config import Config
+        from ai_pr_reviewer.context import build_context
+
+        tree = _wide_pr_tree()
+        _write_tree(tmp_path, tree)
+        _git_checkout(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        pr = PRContext(repo="acme/api", pr_number=7, base_sha="b" * 40,
+                       head_sha="h" * 40)
+        ctx = build_context(pr, parse_unified_diff(_wide_diff()), Config(),
+                            storage=None, gh=_FakeGH(files=dict(tree)))
+        fetched = {e.path for e in ctx.repo_context}
+        assert {"svc/consumer.py", "tests/test_m0.py", "pyproject.toml"} <= fetched
+        assert len(ctx.repo_context) <= 8              # D13 cap still holds

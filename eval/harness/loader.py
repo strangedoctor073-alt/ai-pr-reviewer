@@ -32,7 +32,7 @@ from typing import Sequence
 
 import yaml
 
-from ai_pr_reviewer.models import SEVERITY_ORDER
+from ai_pr_reviewer.models import SEVERITY_ORDER, VERIFICATION_STATUSES
 
 # Layers from TESTING_EVALUATION_PLAN.md §5.1 (directory name == layer).
 VALID_LAYERS = (
@@ -56,11 +56,17 @@ _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 _TOP_REQUIRED = ("id", "layer", "title", "provenance", "diff", "expect")
 _TOP_ALLOWED = _TOP_REQUIRED + (
-    "context", "engine_matrix", "xfail", "notes", "config", "previous")
+    "context", "engine_matrix", "xfail", "notes", "config", "previous",
+    # V4-E11-T04: case-level "a fix suggestion is expected" flag.
+    "fix_expected")
 _EXPECT_KEYS = ("findings", "no_findings", "must_not_report",
                 "report_order", "config_error")
 _LABEL_KEYS = ("file", "line_hint", "tolerance", "category", "severity_min",
-               "title_match", "bucket", "state", "reason")
+               "title_match", "bucket", "state", "reason",
+               # V4-E11 (T04/T05): *scored* attributes, never match
+               # predicates — a wrong severity/verification must surface
+               # in its own metric, not masquerade as a missed finding.
+               "severity", "verification")
 
 
 class CorpusError(Exception):
@@ -81,6 +87,13 @@ class Label:
     bucket: str = "reported"
     state: str | None = None
     reason: str | None = None
+    # V4-E11-T04: the exact severity the engine is expected to assign
+    # (adjudicated label). Scored as ``severity_accuracy`` — report-only,
+    # never auto-regrades (debt 14).
+    severity: str | None = None
+    # V4-E11-T05: the adjudicated verification status for this finding on
+    # the *current* diff (one of models.VERIFICATION_STATUSES).
+    verification: str | None = None
 
 
 @dataclass(frozen=True)
@@ -133,6 +146,9 @@ class Case:
     checkout_dir: Path | None = None
     context_relevant: tuple[str, ...] = ()   # repo-relative relevance labels
     context_impact: tuple[str, ...] = ()     # expected impact-set labels
+    # V4-E11-T04: this case expects a posted, matched finding to carry a
+    # fix suggestion (fix_usefulness denominator).
+    fix_expected: bool = False
 
 
 # ---------------------------------------------------------------- helpers
@@ -211,6 +227,19 @@ def _label(raw: object, where: str, *, require_reason: bool = False) -> Label:
     state = data.get("state")
     if state is not None and (not isinstance(state, str) or not state):
         raise CorpusError(f"{where}.state must be a non-empty string")
+    severity = None
+    if data.get("severity") is not None:
+        severity = _check_enum(data["severity"], SEVERITIES,
+                               f"{where}.severity")
+        if (severity_min is not None
+                and SEVERITY_ORDER[severity] < SEVERITY_ORDER[severity_min]):
+            raise CorpusError(f"{where}: severity {severity!r} is below its "
+                              f"own severity_min {severity_min!r}")
+    verification = None
+    if data.get("verification") is not None:
+        verification = _check_enum(data["verification"],
+                                   VERIFICATION_STATUSES,
+                                   f"{where}.verification")
     reason = data.get("reason")
     if require_reason:
         if not isinstance(reason, str) or not reason.strip():
@@ -222,7 +251,8 @@ def _label(raw: object, where: str, *, require_reason: bool = False) -> Label:
     return Label(file=file, line_hint=line_hint, tolerance=tolerance,
                  category=category, severity_min=severity_min,
                  title_match=title_match, bucket=bucket, state=state,
-                 reason=reason)
+                 reason=reason, severity=severity,
+                 verification=verification)
 
 
 def _labels(raw: object, where: str, *, require_reason: bool = False,
@@ -418,6 +448,21 @@ def load_case(case_dir: Path) -> Case:
                                   f"in checkout/: {value!r}")
         context_impact = tuple(str(v).replace("\\", "/") for v in impact)
 
+    fix_expected = data.get("fix_expected", False)
+    if not isinstance(fix_expected, bool):
+        raise CorpusError(f"{manifest}: fix_expected must be a boolean")
+    expect = _expect(data["expect"])
+    if fix_expected and not any(l.bucket == "reported"
+                                for l in expect.findings):
+        raise CorpusError(
+            f"{manifest}: fix_expected needs at least one expected finding "
+            f"in the 'reported' bucket (a fix can only ride a posted finding)")
+    previous = _previous(data.get("previous"))
+    if not previous and any(l.verification for l in expect.findings):
+        raise CorpusError(
+            f"{manifest}: a label declares 'verification' but the case has "
+            f"no 'previous' findings — nothing could be verified")
+
     matrix = data.get("engine_matrix", ["static"])
     if (not isinstance(matrix, list) or not matrix
             or not all(isinstance(x, str) and x for x in matrix)):
@@ -432,11 +477,12 @@ def load_case(case_dir: Path) -> Case:
 
     return Case(
         id=str(case_id), layer=layer, title=title, provenance=provenance,
-        diff_path=diff_path, expect=_expect(data["expect"]),
+        diff_path=diff_path, expect=expect,
         case_dir=case_dir.resolve(), context_files=tuple(context_files),
         engine_matrix=tuple(matrix), xfail=xfail, notes=notes,
         config=_config(data.get("config")),
-        previous_findings=_previous(data.get("previous")),
+        previous_findings=previous,
+        fix_expected=fix_expected,
         checkout_dir=checkout_resolved,
         context_relevant=context_relevant,
         context_impact=context_impact,

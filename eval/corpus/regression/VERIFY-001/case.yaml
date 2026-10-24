@@ -1,0 +1,23 @@
+id: VERIFY-001
+layer: regression
+title: 'Verification: a re-reported finding is verified still_present'
+provenance: hand-authored
+diff: pr.diff
+previous:
+- file: src/run.py
+  line: 3
+  severity: high
+  category: security
+  title: Shell command built from code without escaping
+  state: active
+expect:
+  findings:
+  - file: src/run.py
+    line_hint: 3
+    category: security
+    severity_min: high
+    title_match: Shell command
+    state: active
+    verification: still_present
+notes: 'V4-E11-T05 replay: the prior review''s finding is detected again on the current diff
+  -> the engine must say still_present (a definite verdict), and the finding stays active.'

@@ -94,23 +94,38 @@ def _clamp(value: int, lo: int, hi: int) -> int:
     return max(lo, min(hi, int(value)))
 
 
+# Test-file naming conventions across the languages the index covers. A
+# change to ``billing.py`` should surface ``test_billing.py`` (pytest),
+# ``billing_test.go`` (Go), ``billing.test.ts`` / ``billing.spec.ts`` (JS/TS)
+# and ``billing_spec.rb`` alike -- the closed ``test_of`` reason is only as
+# useful as the conventions it can recognise.
+_TEST_PREFIXES = ("test_", "tests_", "test.")
+_TEST_SUFFIXES = ("_test", "_tests", ".test", ".spec", "_spec")
+_TEST_DIRS = frozenset({"tests", "test", "__tests__"})
+
+
 def _base_stem(path: str) -> str:
-    """``src/auth/service.py`` -> ``service``; ``test_auth.py`` -> ``auth``."""
+    """``src/auth/service.py`` -> ``service``; ``test_auth.py`` -> ``auth``;
+    ``auth_test.go`` / ``auth.test.ts`` / ``auth.spec.ts`` -> ``auth``."""
     name = path.rsplit("/", 1)[-1]
-    stem = name.rsplit(".", 1)[0]
-    for prefix in ("test_", "tests_", "test.", "_test"):
-        if stem.startswith(prefix):
+    stem = name.rsplit(".", 1)[0] if "." in name else name
+    for prefix in _TEST_PREFIXES:
+        if stem.startswith(prefix) and len(stem) > len(prefix):
             return stem[len(prefix):]
+    for suffix in _TEST_SUFFIXES:
+        if stem.endswith(suffix) and len(stem) > len(suffix):
+            return stem[:-len(suffix)]
     return stem
 
 
 def _is_test_path(path: str) -> bool:
-    name = path.rsplit("/", 1)[-1].lower()
-    stem = name.rsplit(".", 1)[0]
-    return (name.startswith("test_") or stem.startswith("test_")
-            or "/tests/" in path.lower() or path.lower().startswith("tests/")
-            or name.endswith("_test.py") or name.endswith(".test.js")
-            or name.endswith(".test.ts") or name.endswith("_spec.js"))
+    lowered = path.lower()
+    name = lowered.rsplit("/", 1)[-1]
+    stem = name.rsplit(".", 1)[0] if "." in name else name
+    directories = lowered.split("/")[:-1]
+    return (stem.startswith(_TEST_PREFIXES)
+            or stem.endswith(_TEST_SUFFIXES)
+            or any(d in _TEST_DIRS for d in directories))
 
 
 @dataclass(frozen=True)
@@ -195,6 +210,21 @@ def select_context(
     changed = sorted({p for p in (changed_paths or []) if p})
     cap = _clamp(max_selected, 1, HARD_MAX_SELECTED)
     sizes = {f.path: f.size for f in index.files}
+    all_paths = index.paths
+
+    # Forward / reverse import maps and the directory map are built ONCE.
+    # The old per-changed-file edge rescans made selection O(changed * E);
+    # on the largest permitted index that is the difference between meeting
+    # and missing the ADR-017 overhead budget (p95 < 500 ms).
+    forward: dict[str, set[str]] = {}
+    reverse: dict[str, set[str]] = {}
+    for src, dst in index.edges:
+        forward.setdefault(src, set()).add(dst)
+        reverse.setdefault(dst, set()).add(src)
+    by_directory: dict[str, list[str]] = {}
+    for path in all_paths:
+        by_directory.setdefault(path.rsplit("/", 1)[0] if "/" in path else "",
+                                []).append(path)
 
     # path -> best (reason, rank, relationship) seen. A file reachable by
     # several relationships keeps the strongest (lowest reason priority,
@@ -215,16 +245,16 @@ def select_context(
     for p in changed:
         offer(p, REASON_CHANGED, 0, _RELATIONSHIP_NOTE[REASON_CHANGED])
 
-    indexed = set(index.paths)
+    indexed = set(all_paths)
 
     # 1. structure: imports of and importers of the changed files.
     #    The index stores resolved edges (spec -> inventoried path), so
     #    the graph -- not the raw import specs -- is the source of truth.
     for p in changed:
-        for dep in sorted({dst for src, dst in index.edges if src == p}):
+        for dep in sorted(forward.get(p, ())):
             offer(dep, REASON_IMPORT, 1,
                   f"{_RELATIONSHIP_NOTE[REASON_IMPORT]} ({p})")
-        for importer in index.importers(p):
+        for importer in sorted(reverse.get(p, ())):
             offer(importer, REASON_IMPORTER, 1,
                   f"{_RELATIONSHIP_NOTE[REASON_IMPORTER]} ({p})")
 
@@ -238,7 +268,7 @@ def select_context(
 
     # 3. tests of changed modules + config, matched against the index.
     changed_stems = {_base_stem(p) for p in changed}
-    for path in index.paths:
+    for path in all_paths:
         if _is_test_path(path) and _base_stem(path) in changed_stems:
             offer(path, REASON_TEST_OF, 2, _RELATIONSHIP_NOTE[REASON_TEST_OF])
         base = path.rsplit("/", 1)[-1]
@@ -251,8 +281,8 @@ def select_context(
         if p not in indexed:
             continue
         directory = p.rsplit("/", 1)[0] if "/" in p else ""
-        for path in index.paths:
-            if path.rsplit("/", 1)[0] == directory and path != p:
+        for path in by_directory.get(directory, ()):
+            if path != p:
                 offer(path, REASON_ADJACENT, 4,
                       f"{_RELATIONSHIP_NOTE[REASON_ADJACENT]} ({directory or '.'})")
 

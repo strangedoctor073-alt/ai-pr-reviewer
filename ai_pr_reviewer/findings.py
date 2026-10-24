@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from ai_pr_reviewer.models import (  # provided by models.py
     MAX_EVIDENCE_PER_FINDING,
     MAX_PROVENANCE_SOURCES,
+    SEVERITY_ORDER,
     Finding,
     ProvenanceSource,
 )
@@ -90,6 +91,8 @@ def fingerprint_finding(finding: Finding) -> str:
 #   -> v1 fingerprints DIFFER (quote characters survive v1 normalization),
 #      but the occurrence key strips quote style (keeping the literal) and
 #      anchors on the code-like token "SQL": identical keys => merged.
+#   static: "Hardcoded API key in config_loader"  / ai: "Hardcoded API key in
+#   config_loader." -> same key (edge punctuation is formatting, not gist).
 #   Different issues (different file, symbol or gist) => different keys:
 #   "…in 'users' table" vs "…in 'orders' table" keep distinct gists.
 #
@@ -100,10 +103,27 @@ def fingerprint_finding(finding: Finding) -> str:
 #   * Re-wording that changes the gist (not just phrasing) will not merge.
 #     That is the documented C4 limitation surface, honest by construction:
 #     we never claim fuzzy/semantic matching (principle: deterministic).
-#   * Across runs, the merged winner is the first occurrence in input
-#     order; a run-to-run engine switch can change which v1 fingerprint
+#   * Which rendering survives a cross-engine merge: the highest-severity
+#     one, ties broken by input order (so a critical rendering can never be
+#     swallowed by a medium one merely because the provider listed it
+#     second -- providers are NOT trusted to arrive sorted, defect D5).
+#     A run-to-run engine switch can still change which v1 fingerprint
 #     survives -- identical to today's single-engine behavior (each engine
-#     has its own v1 fingerprints anyway).
+#     has its own v1 fingerprints anyway). The key is NOT consulted across
+#     runs: apply_lifecycle/mutes stay v1-only (ADR-005 decision 4).
+#
+# Rollback to v1 (ADR-005 · V4-E05-T01, specified here as behavior, not
+# implemented as a switch): the occurrence key is pure derivation —
+# nothing persists it and no storage, lifecycle, mute or comment path
+# reads it, so rolling back means exactly "stop consulting
+# occurrence_key() in the cross-engine merge path". No migration, no
+# stored-state rewrite, no backfill and no identity change: v1
+# fingerprints are byte-identical before and after, already-merged
+# findings keep their v1 keys, and live runs simply lose cross-engine
+# merge dedup (back to conservative v1-only dedup). Reports already
+# written are immutable history and need no rewrite. The reverse
+# direction (v1 → layered) is likewise migration-free for the same
+# reason: nothing in v1 ever depended on the second key.
 # ---------------------------------------------------------------------------
 
 _IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -137,7 +157,10 @@ def _title_gist(title: str) -> str:
     t = _NUMBER_RE.sub("<n>", title or "")
     t = t.lower()
     t = re.sub(r"[^a-z0-9_<>.]+", " ", t)
-    return _WHITESPACE_RE.sub(" ", t).strip()
+    # '.' survives inside a token (``os.system``, ``config.py``) but not at
+    # its edges: a sentence-final period or an ellipsis is formatting, and
+    # engines disagree on it ("Hardcoded API key" vs "Hardcoded API key.").
+    return " ".join(tok for tok in (w.strip(".") for w in t.split()) if tok)
 
 
 def _title_symbol(title: str) -> str:
@@ -238,17 +261,21 @@ def deduplicate(findings: list[Finding]) -> list[Finding]:
        being destroyed (C3 fix).
     2. **occurrence-key pass** (V4-E05-T03, new): two findings with
        *different* v1 fingerprints but the *same* :func:`occurrence_key`
-       are the same issue seen by two engines (C4 gap); the first wins, its
-       v1 fingerprint remains the storage/comment/mute key, and the loser's
-       fingerprint is recorded in ``merged_fingerprints``. Findings with no
-       symbol anchor (occurrence key ``""``) are never merged here -- a
-       conservative miss beats a wrong merge.
+       are the same issue seen by two engines (C4 gap); the highest-severity
+       rendering wins (ties: first in input order), its v1 fingerprint
+       remains the storage/comment/mute key, and the loser's fingerprint is
+       recorded in ``merged_fingerprints``. Findings with no symbol anchor
+       (occurrence key ``""``) are never merged here -- a conservative miss
+       beats a wrong merge. The returned order is still the input order of
+       the surviving renderings.
 
-    Callers should pass findings ordered highest-severity/best-worded
-    first so the surviving copy (and surviving v1 fingerprint) is the most
-    useful one. Nothing else about identity changes: ``fingerprint_finding``
-    is byte-for-byte the v1 formula, and every v1 consumer (lifecycle,
-    mutes, comment sync) is untouched.
+    Pass 1 keeps its historical first-wins rule, so callers should still
+    pass findings ordered highest-severity first (the pipeline sorts only
+    *after* dedup). Pass 2 does not depend on that ordering: a critical
+    rendering is never hidden behind a medium one that happened to come
+    first. Nothing else about identity changes: ``fingerprint_finding`` is
+    byte-for-byte the v1 formula, and every v1 consumer (lifecycle, mutes,
+    comment sync) is untouched.
     """
     order: list[str] = []
     by_fp: dict[str, Finding] = {}
@@ -260,23 +287,28 @@ def deduplicate(findings: list[Finding]) -> list[Finding]:
             by_fp[fp] = f
             order.append(fp)
 
-    # Pass 2: cross-engine occurrence merge. Iterate in the original
-    # (severity-ordered) winner order so the survivor is deterministic.
-    survivors: list[Finding] = []
+    # Pass 2: cross-engine occurrence merge. Visit candidates highest
+    # severity first (stable: ties keep input order) so the survivor of a
+    # merge is deterministic and never the less severe rendering; remember
+    # each survivor's input position so the output order is unchanged.
+    position = {fp: i for i, fp in enumerate(order)}
+    medium = SEVERITY_ORDER["medium"]    # unknown severity ranks like medium
+    ranked = sorted(
+        order, key=lambda p: -SEVERITY_ORDER.get(by_fp[p].severity, medium))
+    survivors: dict[int, Finding] = {}
     by_occ: dict[str, int] = {}
-    for fp in order:
+    for fp in ranked:
         f = by_fp[fp]
         occ = occurrence_key(f)
         if not occ:
-            survivors.append(f)
-            continue
-        if occ in by_occ:
+            survivors[position[fp]] = f
+        elif occ in by_occ:
             idx = by_occ[occ]
             survivors[idx] = _merge_duplicate(survivors[idx], f, merged_fp=fp)
         else:
-            by_occ[occ] = len(survivors)
-            survivors.append(f)
-    return survivors
+            by_occ[occ] = position[fp]
+            survivors[position[fp]] = f
+    return [survivors[i] for i in sorted(survivors)]
 
 
 def apply_lifecycle(previous: list[Finding], current: list[Finding]) -> list[Finding]:

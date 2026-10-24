@@ -23,9 +23,12 @@ Accepted deviations (parity compares past these, on purpose):
 * **Json telemetry rows** wrap the sanitized payload in storage metadata
   (``id``/``repo``/``pr_number``/``updated_at``); parity compares payload
   fields.
-* **HTTP declares no ``save_telemetry``/``prune`` capability** — the
-  engine never writes telemetry to, or deletes data from, the dashboard
-  remotely (T04). It also adds token auth: without a token, reads degrade
+* **HTTP declares no ``prune`` capability** — the engine never deletes
+  dashboard data remotely (T04). V4-E11-T06 closed the telemetry half of
+  that deviation: the client now declares ``save_telemetry`` and writes
+  through the real ``/api/telemetry`` route (its read-back is the
+  *server's* storage — the engine has no telemetry read path). It also
+  adds token auth: without a token, reads degrade
   to empty with a logged warning (fail-closed) instead of raising.
 * **Mute rows are written by tests through the same row shape on every
   backend** (``record_feedback``'s production path is covered by
@@ -76,7 +79,12 @@ REVIEW_ID = format_review_id(REPO, PR, "abc123456789")
 
 
 class Backend:
-    """The storage under test plus the handle that owns its bytes."""
+    """The storage under test plus the handle that owns its bytes.
+
+    ``raw`` is the seeding handle; for ``http`` it is also the *server's*
+    storage, so capability-gated writes landing through the real route can
+    be read back server-side (V4-E11-T06).
+    """
 
     def __init__(self, name: str, storage, raw, db_path=None):
         self.name = name
@@ -202,8 +210,9 @@ def _memory_view(rows: list[dict]) -> dict:
 # ------------------------------------------------------------------ capability
 def test_t07_capabilities_are_core_superset_with_callable_methods(backend):
     """Declared capabilities are a real, callable superset of the core —
-    and the two members T04 pulled into the contract are declared by
-    every backend, while telemetry/prune stay absent over HTTP (T04)."""
+    and the members T04 pulled into the contract are declared by every
+    backend, while prune stays absent over HTTP (T04); telemetry became an
+    HTTP-declared capability in V4-E11-T06 (debt 15)."""
     caps = backend.storage.capabilities
     assert isinstance(caps, frozenset)
     assert CORE_CAPABILITIES <= caps
@@ -212,11 +221,10 @@ def test_t07_capabilities_are_core_superset_with_callable_methods(backend):
             f"{backend.name} declares {name} but does not provide it")
     assert CAP_LIST_REPO_MEMORY in caps
     assert CAP_DISMISSED_FINGERPRINTS in caps
+    assert CAP_TELEMETRY in caps
     if backend.name == "http":
-        assert CAP_TELEMETRY not in caps
         assert CAP_PRUNE not in caps
     else:
-        assert CAP_TELEMETRY in caps
         assert CAP_PRUNE in caps
 
 
@@ -366,24 +374,27 @@ def test_t07_dismissed_fingerprints_lifecycle(backend):
 
 # -------------------------------------------------- capability-gated lifecycles
 def test_t07_telemetry_round_trip_when_capability_declared(backend):
-    """Backends declaring CAP_TELEMETRY round-trip the sanitized row; the
-    HTTP client (no capability) skips with an explicit reason."""
+    """Backends declaring CAP_TELEMETRY round-trip the sanitized row. V4-
+    E11-T06: the HTTP client writes through ``POST /api/telemetry`` and
+    the row lands on the *server's* storage (``backend.raw``) — the
+    engine's client has no telemetry read path by design."""
     if not has_capability(backend.storage, CAP_TELEMETRY):
         pytest.skip(f"{backend.name} declares no telemetry capability")
 
     st = backend.storage
-    assert st.get_telemetry(REVIEW_ID) is None
+    read = backend.raw if backend.name == "http" else st
+    assert read.get_telemetry(REVIEW_ID) is None
 
     st.save_telemetry(REVIEW_ID, _telemetry_row())
-    got = st.get_telemetry(REVIEW_ID)
-    assert got is not None
+    got = read.get_telemetry(REVIEW_ID)
+    assert got is not None, f"{backend.name}: telemetry row did not land"
     assert got["provider"] == "claude"
     assert got["model"] == "claude-sonnet-4-6"
     assert got["usage"]["input_tokens"] == 120
     assert got["usage"]["state"] == "ok"
 
     st.save_telemetry(REVIEW_ID, _telemetry_row(in_tok=999))
-    assert st.get_telemetry(REVIEW_ID)["usage"]["input_tokens"] == 999
+    assert read.get_telemetry(REVIEW_ID)["usage"]["input_tokens"] == 999
 
 
 def test_t07_prune_disabled_is_identical_noop(backend):

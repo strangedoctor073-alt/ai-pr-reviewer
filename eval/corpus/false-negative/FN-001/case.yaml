@@ -1,0 +1,21 @@
+id: FN-001
+layer: false-negative
+title: JS XSS sink and token-in-localStorage are both caught
+provenance: hand-authored
+diff: pr.diff
+expect:
+  findings:
+  - file: web/app.js
+    line_hint: 3
+    category: security
+    severity_min: high
+    title_match: innerHTML
+    severity: high
+  - file: web/app.js
+    line_hint: 6
+    category: security
+    severity_min: high
+    title_match: localStorage
+    severity: high
+notes: 'Recall corpus: a missed XSS/token-storage finding must fail this case, not shrink
+  silently.'

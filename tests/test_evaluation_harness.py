@@ -20,6 +20,7 @@ import json
 import os
 import re
 import subprocess
+import tempfile
 import sys
 import time
 from pathlib import Path
@@ -106,15 +107,29 @@ class TestLoaderSchema:
         # Layer order follows VALID_LAYERS, ids sorted within a layer.
         assert [c.id for c in cases] == [
             "DEFECT-D2-01", "DEFECT-D3-01", "DEFECT-D4-01", "DEFECT-D5-01",
-            "DEFECT-D6-01", "GOLDEN-SEC-001", "FPCLEAN-001", "INJ-001",
-            "RELEV-001", "RELEV-002"]
-        assert [c.layer for c in cases] == [
-            "regression", "regression", "regression", "regression",
-            "regression", "regression", "false-positive", "injection",
-            "quality", "quality"]
+            "DEFECT-D6-01", "FIX-001", "FIX-002", "GOLDEN-SEC-001",
+            "SEV-001", "VERIFY-001", "VERIFY-002", "VERIFY-003",
+            "KB-001", "KB-002",
+            "FPCLEAN-001", "FPCLEAN-002", "FPCLEAN-003",
+            "FN-001", "FN-002",
+            "INJ-001", "INJ-002", "TIERB-003",
+            "RELEV-001", "RELEV-002", "RELEV-003", "RELEV-004", "RELEV-005",
+            "TIERB-001", "TIERB-002"]
+        # V4-E11-T01 (§8 #2): the corpus grew 10 -> 29 (>= 16 required) and
+        # every layer now has cases — no layer directory is empty.
+        assert len(cases) >= 16
+        assert {c.layer for c in cases} == set(VALID_LAYERS)
         assert all(c.provenance in ("hand-authored", "synthetic")
                    for c in cases)
-        assert all(c.engine_matrix == ("static",) for c in cases)
+        # Every case is either offline-static or an explicit provider-only
+        # Tier-B case (never a mix that would blur Tier A's determinism).
+        tier_b = [c for c in cases if "static" not in c.engine_matrix]
+        assert {c.id for c in tier_b} == {"TIERB-001", "TIERB-002",
+                                          "TIERB-003"}
+        assert all(set(c.engine_matrix) <= {"claude", "openai", "gemini"}
+                   for c in tier_b)
+        assert all(c.engine_matrix == ("static",) for c in cases
+                   if c not in tier_b)
         # Loading twice is byte-identical in structure (stability).
         assert [(c.id, c.layer) for c in load_corpus(CORPUS)] == \
             [(c.id, c.layer) for c in cases]
@@ -210,7 +225,7 @@ class TestLoaderSchema:
 
     def test_layer_filter_selects_one_layer(self):
         only = load_corpus(CORPUS, ["injection"])
-        assert [c.id for c in only] == ["INJ-001"]
+        assert [c.id for c in only] == ["INJ-001", "INJ-002", "TIERB-003"]
         with pytest.raises(CorpusError, match="unknown layer"):
             load_corpus(CORPUS, ["not-a-layer"])
 
@@ -237,6 +252,12 @@ class TestRunner:
             run = run_case(case, tmp_path / case.id)
             assert run.run_status in ("ran", "skipped"), \
                 f"{case.id}: {run.error}"
+            if run.run_status == "skipped":
+                # only provider-only (Tier B) cases may skip offline, and
+                # they must say why — never a silent no-op
+                assert "static" not in case.engine_matrix, case.id
+                assert run.skipped_reason, case.id
+                continue
             assert run.engine == "static", case.id
 
     def test_host_environment_cannot_flip_the_engine(self, monkeypatch,
@@ -328,7 +349,9 @@ class TestCliOneCommand:
         assert "quality/RELEV-001" in proc.stdout
         assert "quality/RELEV-002" in proc.stdout
         assert "engine=static" in proc.stdout
-        assert "cases=10 ran=10 errors=0" in proc.stdout
+        assert "cases=29 ran=26 errors=0 skipped=3" in proc.stdout
+        assert "quality/TIERB-001" in proc.stdout     # skipped, but visible
+        assert "known-bug/KB-001" in proc.stdout
 
     def test_cli_runs_with_credentials_stripped_from_the_environment(self):
         proc = self._run(env=_offline_env())
@@ -646,7 +669,10 @@ class TestRelevanceAt10:
 
     def test_real_relevance_cases_score_full_hits(self):
         cases = load_corpus(CORPUS, ["quality"])
-        assert [c.id for c in cases] == ["RELEV-001", "RELEV-002"]
+        assert [c.id for c in cases] == [
+            "RELEV-001", "RELEV-002", "RELEV-003", "RELEV-004", "RELEV-005",
+            "TIERB-001", "TIERB-002"]
+        cases = tuple(c for c in cases if c.context_relevant)
         import tempfile
         with tempfile.TemporaryDirectory() as tmp:
             runs = [run_case(c, Path(tmp) / c.id) for c in cases]
@@ -691,7 +717,11 @@ class TestDeterminism:
         assert set(data["metrics"]) == {"precision", "recall",
                                         "false_positive_rate",
                                         "recall_critical_high",
-                                        "relevance_at_10"}
+                                        "relevance_at_10",
+                                        # V4-E11 (additive)
+                                        "severity_accuracy",
+                                        "fix_usefulness",
+                                        "verification_accuracy"}
         assert [c["id"] for c in data["cases"]] == \
             [c.id for c in cases]
 
@@ -888,7 +918,8 @@ class TestBaselineFile:
         assert baseline["thresholds"] == {
             "precision": 0.0, "recall": 0.0,
             "recall_critical_high": 0.0, "false_positive_rate": 0.0,
-            "relevance_at_10": 0.0}
+            "relevance_at_10": 0.0,
+            "verification_accuracy": 0.0}
         assert baseline["corpus_hash"] == corpus_hash(CORPUS)
         # not stale: matches a fresh evaluation of today's corpus
         cases = load_corpus(CORPUS)
@@ -1250,16 +1281,20 @@ class TestJsonReport:
             assert re.fullmatch(r"[0-9a-f]{40}", run["git_commit"])
         assert isinstance(run["git_dirty"], (bool, type(None)))
         assert run["corpus_hash"] == corpus_hash(CORPUS)
-        assert run["case_count"] == 10               # case count
+        assert run["case_count"] == len(load_corpus(CORPUS))   # case count
 
         scorecard = report["scorecard"]               # score + per-case
         assert scorecard["metrics"]["precision"] == 1.0
         assert scorecard["metrics"]["recall"] == 1.0
-        assert scorecard["counts"]["cases"] == 10
+        assert scorecard["counts"]["cases"] == len(load_corpus(CORPUS))
         assert [c["id"] for c in scorecard["cases"]] == \
             [c.id for c in load_corpus(CORPUS)]
-        assert all(c["status"] == "pass"
-                   for c in scorecard["cases"])
+        # every case is pass, a visible known-bug xfail, or a Tier-B skip —
+        # never a silent fail/error
+        assert {c["status"] for c in scorecard["cases"]} <= {
+            "pass", "xfail", "skipped"}
+        assert {c["id"] for c in scorecard["cases"]
+                if c["status"] == "xfail"} == {"KB-001", "KB-002"}
 
     def test_report_is_byte_stable_on_the_same_commit(self, tmp_path):
         first, second = tmp_path / "a.json", tmp_path / "b.json"
@@ -1341,3 +1376,624 @@ class TestCorpusSafety:
     def test_every_case_declares_synthetic_provenance(self):
         for case in load_corpus(CORPUS):
             assert case.provenance in ("hand-authored", "synthetic")
+
+
+# =====================================================================
+# V4-E11 — T01 corpus · T03 relevance · T04/T05 metrics · T06 perf ·
+#          T08 Tier B · T09 gates
+# =====================================================================
+from eval.harness.perf import (                          # noqa: E402
+    INDEX_P95_BUDGET_MS, build_perf, dumps_perf, perf_budget_failures,
+)
+from eval.harness.tier_b import (                        # noqa: E402
+    TIER_B_PRECISION_FLOOR, engine_config, run_tier_b,
+)
+
+
+def _vf(file="src/a.py", line=7, severity="critical", category="security",
+        title="Possible SQL injection", suggestion=False, verification=None,
+        state="active") -> dict:
+    d = _f(file, line, severity, category, title, state)
+    d["has_suggestion"] = suggestion
+    d["verification_status"] = verification
+    return d
+
+
+def _lab(**kw) -> Label:
+    return Label(file="src/a.py", line_hint=7, **kw)
+
+
+# ------------------------------------------------------- T01 · corpus size
+class TestV4CorpusExpansion:
+    def test_corpus_meets_the_rebaseline_threshold_and_covers_every_layer(self):
+        cases = load_corpus(CORPUS)
+        assert len(cases) >= 16                      # §8 #2
+        by_layer = {layer: [c for c in cases if c.layer == layer]
+                    for layer in VALID_LAYERS}
+        assert all(by_layer.values()), "an empty layer is untested territory"
+
+    def test_known_bug_layer_pins_real_defects_visibly_not_silently(self):
+        cases = load_corpus(CORPUS, ["known-bug"])
+        assert {c.id for c in cases} == {"KB-001", "KB-002"}
+        assert all(c.xfail for c in cases)
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = [run_case(c, Path(tmp) / c.id) for c in cases]
+        card = score_corpus(cases, runs)
+        assert card.counts["xfail"] == 2 and card.counts["xpass"] == 0
+        # They are *outside* the scored metrics (precision et al. unchanged
+        # by the open defects) but visible.
+        assert card.counts["labels_total"] == 0
+        assert card.counts["xfail_violations"] == 1       # KB-002's trap
+
+    def test_xfail_violations_never_block_the_gate_or_the_baseline(self):
+        """Regression for a latent bug the V4-E11 corpus expansion exposed:
+        an xfail case's must_not_report hit used to count as a blocking
+        violation, contradicting 'a known-bug case never blocks'."""
+        trap = Label(file="src/a.py", line_hint=7,
+                     reason="documented open defect")
+        case = _case(Expect(must_not_report=(trap,)), xfail=True)
+        run = _run([_f()])
+        card = score_corpus((case,), [run])
+        assert card.counts["violations"] == 0
+        assert card.counts["xfail_violations"] == 1
+        # ...while the same trap in a NON-xfail case still blocks.
+        strict = _case(Expect(must_not_report=(trap,)))
+        assert score_corpus((strict,), [run]).counts["violations"] == 1
+
+    def test_scored_cases_post_no_duplicates_the_defect_is_pinned_in_kb_002(self):
+        """The cross-engine duplicate (regex + AST posting the same issue
+        twice) is documented once, in KB-002. No *scored* case may post the
+        same (file, line, category) twice — a duplicate would be an
+        unmatched posted finding silently taxing precision."""
+        cases = [c for c in load_corpus(CORPUS) if not c.xfail
+                 and "static" in c.engine_matrix]
+        with tempfile.TemporaryDirectory() as tmp:
+            for c in cases:
+                run = run_case(c, Path(tmp) / c.id)
+                keys = [(f["file"], f["line"], f["category"])
+                        for f in run.findings]
+                assert len(keys) == len(set(keys)), (c.id, keys)
+        # ...and KB-002 really does exhibit it (so the xfail is honest)
+        kb = load_case(CORPUS / "known-bug" / "KB-002")
+        with tempfile.TemporaryDirectory() as tmp:
+            run = run_case(kb, Path(tmp) / "kb")
+        keys = [(f["file"], f["line"], f["category"]) for f in run.findings]
+        assert len(keys) != len(set(keys))
+
+
+# ------------------------------------------------------ loader · new keys
+class TestV4LoaderKeys:
+    def _load(self, tmp_path, **over):
+        manifest = _manifest("V4-LOAD-001", **over)
+        return load_case(_write_case(tmp_path, "regression", "V4-LOAD-001",
+                                     manifest))
+
+    def test_severity_and_verification_labels_parse(self, tmp_path):
+        case = self._load(tmp_path,
+                          previous=[{"file": "src/x.py", "line": 2,
+                                     "severity": "high", "category": "bug",
+                                     "title": "t", "state": "active"}],
+                          expect={"findings": [
+                              {"file": "src/x.py", "line_hint": 2,
+                               "severity_min": "medium", "severity": "high",
+                               "verification": "unable_to_verify"}]})
+        label = case.expect.findings[0]
+        assert (label.severity, label.verification) == (
+            "high", "unable_to_verify")
+
+    @pytest.mark.parametrize("bad", ["urgent", "", 3, ["high"]])
+    def test_invalid_severity_rejected(self, tmp_path, bad):
+        with pytest.raises(CorpusError):
+            self._load(tmp_path, expect={"findings": [
+                {"file": "src/x.py", "line_hint": 2, "severity": bad}]})
+
+    def test_severity_below_own_floor_is_a_contradiction(self, tmp_path):
+        with pytest.raises(CorpusError, match="below its own severity_min"):
+            self._load(tmp_path, expect={"findings": [
+                {"file": "src/x.py", "line_hint": 2,
+                 "severity_min": "high", "severity": "low"}]})
+
+    @pytest.mark.parametrize("bad", ["fixed", "RESOLVED", "", 1])
+    def test_invalid_verification_rejected(self, tmp_path, bad):
+        with pytest.raises(CorpusError):
+            self._load(tmp_path,
+                       previous=[{"file": "src/x.py", "line": 2,
+                                  "severity": "high", "category": "bug",
+                                  "title": "t", "state": "active"}],
+                       expect={"findings": [
+                           {"file": "src/x.py", "line_hint": 2,
+                            "verification": bad}]})
+
+    def test_verification_without_previous_findings_is_rejected(self, tmp_path):
+        with pytest.raises(CorpusError, match="no 'previous' findings"):
+            self._load(tmp_path, expect={"findings": [
+                {"file": "src/x.py", "line_hint": 2,
+                 "verification": "resolved"}]})
+
+    def test_fix_expected_needs_a_posted_label_and_a_bool(self, tmp_path):
+        assert self._load(tmp_path, fix_expected=True).fix_expected is True
+        with pytest.raises(CorpusError, match="boolean"):
+            self._load(tmp_path, fix_expected="yes")
+        with pytest.raises(CorpusError, match="'reported' bucket"):
+            self._load(tmp_path, fix_expected=True,
+                       expect={"no_findings": [{"file": "src/x.py"}]})
+        with pytest.raises(CorpusError, match="'reported' bucket"):
+            self._load(tmp_path, fix_expected=True, expect={"findings": [
+                {"file": "src/x.py", "line_hint": 2,
+                 "bucket": "below_threshold"}]})
+
+    def test_scored_attributes_are_not_match_predicates(self):
+        """A wrong severity must show up in severity_accuracy, not as a
+        missed finding (recall) — matching ignores severity/verification."""
+        from eval.harness.match import matches
+        label = _lab(severity="low", verification="resolved")
+        assert matches(label, _vf(severity="critical", verification=None))
+
+
+# --------------------------------------------------------- T04 · severity
+class TestSeverityAccuracy:
+    def test_exact_equality_against_the_label(self):
+        exp = Expect(findings=(
+            _lab(category="security", severity="critical"),
+            Label(file="src/a.py", line_hint=20, severity="high")))
+        run = _run([_vf(severity="critical"),
+                    _vf(line=20, severity="medium", category="bug")])
+        card = score_corpus((_case(exp),), [run])
+        assert card.counts["severity_labels"] == 2
+        assert card.counts["severity_hits"] == 1
+        assert card.severity_accuracy == 0.5
+        # a wrong severity is NOT a recall miss
+        assert card.recall == 1.0
+
+    def test_null_without_labels_and_never_gated(self):
+        card = score_corpus((_case(Expect(findings=(_lab(),))),),
+                            [_run([_vf()])])
+        assert card.severity_accuracy is None
+        assert "severity_accuracy" not in DEFAULT_THRESHOLDS   # report-only
+
+    def test_real_corpus_severities_are_exact(self):
+        cases = load_corpus(CORPUS, ["regression", "false-negative"])
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = [run_case(c, Path(tmp) / c.id) for c in cases]
+        card = score_corpus(cases, runs)
+        assert card.counts["severity_labels"] >= 7
+        assert card.severity_accuracy == 1.0
+
+
+# ------------------------------------------------------ T04 · fix usefulness
+class TestFixUsefulness:
+    def _fx(self, *findings, fix=True):
+        case = Case(id="FIX-U", layer="regression", title="t",
+                    provenance="hand-authored", diff_path=Path("pr.diff"),
+                    expect=Expect(findings=(_lab(),)), case_dir=Path("."),
+                    fix_expected=fix)
+        return score_corpus((case,), [_run(list(findings))])
+
+    def test_case_level_satisfied_by_one_posted_matched_suggestion(self):
+        card = self._fx(_vf(suggestion=True))
+        assert (card.counts["fix_cases"], card.counts["fix_hits"]) == (1, 1)
+        assert card.fix_usefulness == 1.0
+
+    def test_no_suggestion_is_a_report_only_shortfall_not_a_failure(self):
+        card = self._fx(_vf(suggestion=False))
+        assert card.fix_usefulness == 0.0
+        assert card.counts["failed"] == 0 and card.recall == 1.0
+
+    def test_unmatched_findings_cannot_satisfy_the_case(self):
+        card = self._fx(_vf(line=99, suggestion=True))    # not the labeled one
+        assert card.fix_usefulness is None or card.fix_usefulness == 0.0
+
+    def test_bounded_at_one_even_with_many_suggestions(self):
+        card = self._fx(_vf(suggestion=True), _vf(line=7, suggestion=True))
+        assert card.fix_usefulness == 1.0
+
+    def test_unlabeled_cases_do_not_enter_the_denominator(self):
+        assert self._fx(_vf(suggestion=True), fix=False).fix_usefulness is None
+
+    def test_suggestion_presence_means_non_blank_string(self):
+        from eval.harness.runner import _finding_dict
+        from ai_pr_reviewer.models import Finding
+        def mk(sugg):
+            return _finding_dict(Finding(
+                file="a.py", line=1, severity="high", category="bug",
+                title="t", explanation="e", suggestion=sugg), "reported")
+        assert mk("x = 1")["has_suggestion"] is True
+        assert mk("   \n ")["has_suggestion"] is False
+        assert mk("")["has_suggestion"] is False
+        assert mk(None)["has_suggestion"] is False
+
+
+# ----------------------------------------------- T05 · verification metric
+class TestVerificationMetric:
+    def _score(self, expected, actual):
+        label = _lab(verification=expected)
+        case = _case(Expect(findings=(label,)))
+        return score_corpus((case,), [_run([_vf(verification=actual)])])
+
+    def test_correct_verdicts_score_one(self):
+        for status in ("resolved", "still_present", "unable_to_verify"):
+            card = self._score(status, status)
+            assert card.verification_accuracy == 1.0, status
+            assert card.counts["misverify"] == card.counts["missverify"] == 0
+
+    @pytest.mark.parametrize("expected,actual,premature", [
+        ("still_present", "resolved", True),       # D2 class
+        ("unable_to_verify", "resolved", True),    # D2 class
+        ("resolved", "still_present", False),
+        ("unable_to_verify", "still_present", False),
+    ])
+    def test_wrongly_confirmed_counts_as_misverify(self, expected, actual,
+                                                   premature):
+        card = self._score(expected, actual)
+        assert card.counts["misverify"] == 1
+        assert card.counts["premature_resolved"] == (1 if premature else 0)
+        assert card.counts["missverify"] == 0
+        assert card.verification_accuracy == 0.0
+
+    @pytest.mark.parametrize("expected,actual", [
+        ("resolved", "unable_to_verify"), ("still_present", None),
+        ("resolved", None)])
+    def test_missed_verification_counts_as_missverify_not_misverify(
+            self, expected, actual):
+        card = self._score(expected, actual)
+        assert card.counts["missverify"] == 1
+        assert card.counts["misverify"] == 0
+
+    def test_expecting_unable_and_getting_none_is_incorrect_but_uncounted(self):
+        card = self._score("unable_to_verify", None)
+        assert card.verification_accuracy == 0.0
+        assert card.counts["misverify"] == card.counts["missverify"] == 0
+
+    def test_real_replay_covers_all_three_statuses_with_zero_misverify(self):
+        cases = [c for c in load_corpus(CORPUS, ["regression"])
+                 if c.id.startswith("VERIFY-")]
+        assert len(cases) == 3
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = [run_case(c, Path(tmp) / c.id) for c in cases]
+        got = {c.id: [f["verification_status"] for f in r.findings]
+               for c, r in zip(cases, runs)}
+        assert got == {"VERIFY-001": ["still_present"],
+                       "VERIFY-002": ["resolved"],
+                       "VERIFY-003": ["unable_to_verify"]}
+        card = score_corpus(tuple(cases), runs)
+        assert card.verification_accuracy == 1.0
+        assert card.counts["misverify"] == 0
+
+    def test_d2_premature_resolve_would_be_caught(self, monkeypatch):
+        """Negative control: if verification wrongly said 'resolved' for the
+        out-of-hunk finding, the replay case must report a misverify."""
+        import ai_pr_reviewer.verification as ver
+        real = ver.verify_findings
+        def liar(findings, *a, **kw):
+            out = real(findings, *a, **kw)
+            for f in out or findings:
+                if getattr(f, "verification_status", None) == "unable_to_verify":
+                    f.verification_status = "resolved"
+            return out
+        monkeypatch.setattr(ver, "verify_findings", liar)
+        monkeypatch.setattr(
+            "ai_pr_reviewer.orchestrator.verify_findings", liar,
+            raising=False)
+        case = load_case(CORPUS / "regression" / "VERIFY-003")
+        with tempfile.TemporaryDirectory() as tmp:
+            run = run_case(case, Path(tmp) / case.id)
+        card = score_corpus((case,), [run])
+        assert card.counts["misverify"] == 1
+        assert card.counts["premature_resolved"] == 1
+
+
+# --------------------------------------------------------- T09 · the gates
+_V4_METRICS = {"precision": 1.0, "recall": 1.0, "false_positive_rate": 0.0,
+               "recall_critical_high": 1.0, "relevance_at_10": 1.0,
+               "verification_accuracy": 1.0}
+
+
+class TestV4Gates:
+    def test_any_misverify_fails_even_against_an_identical_baseline(self):
+        counts = {"misverify": 1, "failed": 0, "errors": 0, "violations": 0}
+        current, baseline = _baseline(_V4_METRICS, counts=counts)
+        result = check_gate(current, baseline, "h" * 64)
+        assert not result.ok
+        assert any("misverify=1" in f and "not baselinable" in f
+                   for f in result.failures)
+
+    def test_zero_misverify_passes(self):
+        current, baseline = _baseline(_V4_METRICS, counts={"misverify": 0})
+        assert check_gate(current, baseline, "h" * 64).ok
+
+    def test_verification_accuracy_regression_fails(self):
+        current, baseline = _baseline(_V4_METRICS)
+        current["scorecard"]["metrics"]["verification_accuracy"] = 0.5
+        result = check_gate(current, baseline, "h" * 64)
+        assert not result.ok
+        assert any("verification_accuracy" in f for f in result.failures)
+
+    def test_report_only_metrics_never_block(self):
+        current, baseline = _baseline({**_V4_METRICS, "severity_accuracy": 1.0,
+                                       "fix_usefulness": 1.0})
+        current["scorecard"]["metrics"].update(severity_accuracy=0.0,
+                                               fix_usefulness=0.0)
+        assert check_gate(current, baseline, "h" * 64).ok
+
+    def test_a_v3_baseline_without_the_new_keys_still_gates(self):
+        """Back-compat: an older committed baseline (no V4 thresholds) must
+        keep working — new metrics are additive."""
+        v3 = {k: v for k, v in _V4_METRICS.items()
+              if k not in ("verification_accuracy",)}
+        current, baseline = _baseline(v3)
+        baseline["thresholds"].pop("verification_accuracy", None)
+        assert check_gate(current, baseline, "h" * 64).ok
+
+    def test_relevance_floor_and_precision_floor_still_enforced(self):
+        current, baseline = _baseline({**_V4_METRICS, "relevance_at_10": 0.6})
+        baseline["scorecard"]["metrics"]["relevance_at_10"] = 0.6
+        assert not check_gate(current, baseline, "h" * 64).ok
+
+    def test_perf_budget_blocks_only_on_real_over_budget_evidence(self):
+        current, baseline = _baseline(_V4_METRICS)
+        ok = {"budgets": {"index_p95_ms": {"verdict": "ok", "limit": 2000.0}},
+              "index_build_ms": {"p95": 1.0}}
+        slow = {"budgets": {"index_p95_ms": {"verdict": "over_budget",
+                                             "limit": 2000.0}},
+                "index_build_ms": {"p95": 2500.0}}
+        none = {"budgets": {"index_p95_ms": {"verdict": "no_data",
+                                             "limit": 2000.0}},
+                "index_build_ms": {"p95": None}}
+        assert check_gate(current, baseline, "h" * 64, perf=ok).ok
+        assert check_gate(current, baseline, "h" * 64, perf=none).ok
+        result = check_gate(current, baseline, "h" * 64, perf=slow)
+        assert not result.ok and any("index build p95" in f
+                                     for f in result.failures)
+
+    def test_ci_blocks_on_exactly_the_gate_these_checks_live_in(self):
+        """T09: CI's evaluation job runs `--gate`; the V4 floors, zero-count
+        and perf budget are all inside that one command, so no workflow edit
+        is needed for CI to enforce them."""
+        wf = yaml.safe_load((ROOT / ".github" / "workflows" / "ci.yml")
+                            .read_text(encoding="utf-8"))
+        runs = [s["run"] for s in wf["jobs"]["evaluation"]["steps"]
+                if "run" in s]
+        assert runs[-1] == "python -m eval.harness --gate"
+        gate_src = (ROOT / "eval" / "harness" / "gate.py").read_text(
+            encoding="utf-8")
+        for needle in ("ZERO_COUNTS", "verification_accuracy", "perf_budget",
+                       "relevance_at_10", "precision"):
+            assert needle in gate_src
+
+    def test_committed_baseline_has_the_v4_thresholds_and_metrics(self):
+        base = json.loads(BASELINE_PATH.read_text(encoding="utf-8"))
+        assert "verification_accuracy" in base["thresholds"]
+        m = base["scorecard"]["metrics"]
+        for key in ("severity_accuracy", "fix_usefulness",
+                    "verification_accuracy"):
+            assert key in m
+        assert base["scorecard"]["counts"]["misverify"] == 0
+
+
+# -------------------------------------------- T03 · relevance discriminates
+class TestRelevanceDiscriminates:
+    def _measure(self, ids):
+        cases = tuple(c for c in load_corpus(CORPUS, ["quality"])
+                      if c.id in ids)
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = [run_case(c, Path(tmp) / c.id) for c in cases]
+        return score_corpus(cases, runs).relevance_at_10
+
+    def test_new_fixtures_are_big_enough_for_the_top10_cut_to_matter(self):
+        for cid in ("RELEV-003", "RELEV-004", "RELEV-005"):
+            case = load_case(CORPUS / "quality" / cid)
+            n = sum(1 for p in case.checkout_dir.rglob("*") if p.is_file())
+            assert n > 10, f"{cid}: only {n} files - cannot discriminate"
+        for cid in ("RELEV-001", "RELEV-002"):      # the vacuous originals
+            case = load_case(CORPUS / "quality" / cid)
+            n = sum(1 for p in case.checkout_dir.rglob("*") if p.is_file())
+            assert n <= 10
+
+    def test_mutation_path_only_ordering_collapses_relevance(self, monkeypatch):
+        """The proof the gate can bite: neutralize ADR-017's reason-priority
+        ranking (path order only) and relevance@10 must fall below the
+        0.70 floor — driven by the new fixtures; the old tiny ones stay 1.0
+        either way."""
+        from ai_pr_reviewer import selection
+        floor = 0.70
+        assert self._measure({"RELEV-003", "RELEV-004", "RELEV-005"}) == 1.0
+        monkeypatch.setattr(selection, "_sort_key", lambda f: (f.path,))
+        assert self._measure({"RELEV-001", "RELEV-002"}) == 1.0   # vacuous
+        mutated = self._measure({"RELEV-001", "RELEV-002", "RELEV-003",
+                                 "RELEV-004", "RELEV-005"})
+        assert mutated < floor, mutated
+
+
+# ------------------------------------------------- T06 · perf (not stable)
+class TestPerf:
+    def test_perf_covers_index_and_pipeline_and_is_not_in_the_report(self):
+        cases = load_corpus(CORPUS, ["quality"])
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = [run_case(c, Path(tmp) / c.id) for c in cases]
+        perf = build_perf(runs)
+        assert perf["index_build_ms"]["n"] == 5          # RELEV-001..005
+        assert perf["pipeline_ms"]["n"] == 5
+        assert perf["budgets"]["index_p95_ms"]["verdict"] == "ok"
+        assert perf["budgets"]["index_p95_ms"]["enforced_by_gate"] is True
+        assert perf["budgets"]["pipeline_p95_ms"]["enforced_by_gate"] is False
+        assert perf_budget_failures(perf) == []
+        scorecard = dumps_scorecard(score_corpus(cases, runs))
+        assert "index_build" not in scorecard and "timings" not in scorecard
+
+    def test_no_data_is_never_reported_as_a_pass(self):
+        perf = build_perf([])
+        assert perf["budgets"]["index_p95_ms"]["verdict"] == "no_data"
+        assert perf["index_build_ms"]["p95"] is None
+
+    def test_over_budget_is_detected(self):
+        slow = CaseRun("S", "quality", "ran",
+                       timings_ms={"index_build": INDEX_P95_BUDGET_MS + 50,
+                                   "pipeline": 10.0})
+        perf = build_perf([slow])
+        assert perf["budgets"]["index_p95_ms"]["verdict"] == "over_budget"
+        assert perf_budget_failures(perf)
+
+    def test_default_run_and_json_report_stay_byte_stable_despite_timing(
+            self, tmp_path):
+        outs = []
+        for i in range(2):
+            path = tmp_path / f"r{i}.json"
+            proc = subprocess.run(
+                [sys.executable, "-m", "eval.harness", "--json", str(path)],
+                cwd=ROOT, capture_output=True, text=True,
+                env=_offline_env(), timeout=120)
+            assert proc.returncode == 0, proc.stderr
+            stdout = "\n".join(l for l in proc.stdout.splitlines()
+                               if not l.startswith("report written:"))
+            outs.append((stdout, path.read_bytes()))
+        assert outs[0] == outs[1]          # stdout + report bytes identical
+        assert "perf:" not in outs[0][0]           # opt-in only
+
+    def test_perf_flag_prints_and_perf_json_is_written(self, tmp_path):
+        out = tmp_path / "perf.json"
+        proc = subprocess.run(
+            [sys.executable, "-m", "eval.harness", "--perf", "--perf-json",
+             str(out)], cwd=ROOT, capture_output=True, text=True,
+            env=_offline_env(), timeout=120)
+        assert proc.returncode == 0, proc.stderr
+        assert "perf: index_build n=5" in proc.stdout
+        assert "(gate)" in proc.stdout and "(report-only)" in proc.stdout
+        assert json.loads(out.read_text(encoding="utf-8"))["schema_version"] == 1
+
+
+# ------------------------------------------------------ T08 · Tier B (live)
+def _canned_runner(findings_by_case, tokens=100, engine="claude"):
+    """A stand-in for ``run_case`` that returns canned provider results
+    through the real scoring path — no network."""
+    def runner(case, workdir, *, engine=engine, engine_config=None):
+        assert engine_config, "Tier B must pass explicit provider config"
+        findings = findings_by_case.get(case.id, [])
+        return CaseRun(
+            case.id, case.layer, "ran", engine=engine, findings=findings,
+            telemetry={"usage": {"state": "ok", "input_tokens": tokens,
+                                 "output_tokens": tokens, "duration_ms": 50},
+                       "calls": [{"duration_ms": 40}, {"duration_ms": 60}],
+                       "cost": {"state": "unpriced", "currency": "USD",
+                                "low": None, "high": None,
+                                "display_only": True}})
+    return runner
+
+
+class TestTierB:
+    ENV = {"ANTHROPIC_API_KEY": "sk-ant-fixture", "OPENAI_API_KEY": "k",
+           "GEMINI_API_KEY": "g"}
+
+    def _cases(self):
+        return load_corpus(CORPUS)
+
+    def test_config_requires_credentials_and_explicit_model_where_needed(self):
+        assert engine_config("claude", None, {})[0] is None
+        cfg, why = engine_config("openai", None, {"OPENAI_API_KEY": "k"})
+        assert cfg is None and "explicit --model" in why
+        cfg, _ = engine_config("openai", "some-model", {"OPENAI_API_KEY": "k"})
+        assert cfg == {"openai_api_key": "k", "model": "some-model"}
+        cfg, _ = engine_config("claude", None, self.ENV)
+        assert cfg == {"anthropic_api_key": "sk-ant-fixture"}   # no model forced
+        cfg, _ = engine_config("openai", "m", {"OPENAI_BASE_URL": "http://x"})
+        assert cfg["openai_base_url"] == "http://x"        # keyless local ok
+        assert engine_config("mystery", "m", self.ENV)[0] is None
+
+    def test_no_credentials_is_not_measured_never_a_fake_number(self, tmp_path):
+        rep = run_tier_b(self._cases(), "claude", tmp_path, environ={})
+        assert rep["verdict"] == "not_measured"
+        assert rep["metrics"] is None and "credentials" in rep["reason"]
+        assert rep["reporting_only"] is True
+
+    def test_only_cases_listing_the_engine_run(self, tmp_path):
+        seen = []
+        def runner(case, wd, *, engine, engine_config):
+            seen.append(case.id)
+            return CaseRun(case.id, case.layer, "ran", engine=engine)
+        run_tier_b(self._cases(), "gemini", tmp_path, model="m",
+                   environ=self.ENV, repeat=1, runner=runner)
+        assert sorted(seen) == ["TIERB-001", "TIERB-002", "TIERB-003"]
+
+    def test_floor_verdicts_meets_and_below(self, tmp_path):
+        cases = self._cases()
+        good = {"TIERB-001": [
+            _vf(file="src/users.py", line=3, severity="high"),
+            _vf(file="src/users.py", line=6, severity="high")],
+            "TIERB-003": [_vf(file="src/deploy.py", line=4, severity="high",
+                              title="Shell injection")]}
+        rep = run_tier_b(cases, "claude", tmp_path, environ=self.ENV,
+                         repeat=1, runner=_canned_runner(good))
+        assert rep["verdict"] == "meets_floor"
+        assert rep["metrics"]["precision"] == 1.0
+        noisy = dict(good)
+        noisy["TIERB-002"] = [_vf(file="src/slug.py", line=4,
+                                  category="bug", title=f"noise {i}")
+                              for i in range(3)]
+        rep = run_tier_b(cases, "claude", tmp_path, environ=self.ENV,
+                         repeat=1, runner=_canned_runner(noisy))
+        assert rep["verdict"] == "below_floor"
+        assert rep["metrics"]["precision"] < TIER_B_PRECISION_FLOOR
+
+    def test_repetitions_are_scored_as_separate_runs(self, tmp_path):
+        rep = run_tier_b(self._cases(), "claude", tmp_path, environ=self.ENV,
+                         repeat=3, runner=_canned_runner({}))
+        assert rep["counts"]["runs"] == 9 and rep["repeat"] == 3
+
+    def test_token_budget_stops_further_runs_visibly(self, tmp_path):
+        rep = run_tier_b(self._cases(), "claude", tmp_path, environ=self.ENV,
+                         repeat=2, budget_tokens=150,
+                         runner=_canned_runner({}, tokens=100))
+        assert rep["counts"]["ran"] == 1            # 200 tokens >= 150 cap
+        assert rep["counts"]["skipped"] == 5
+        assert "--budget-tokens exhausted" in rep["skipped_reasons"]
+        assert rep["tokens"] == 200
+
+    def test_cost_and_latency_are_reported_display_only(self, tmp_path):
+        rep = run_tier_b(self._cases(), "claude", tmp_path, environ=self.ENV,
+                         repeat=1, runner=_canned_runner({}))
+        assert rep["cost"]["display_only"] is True
+        assert rep["latency_ms"]["per_call_ms"]["n"] == 6
+        assert rep["latency_ms"]["per_run_ms"]["p50"] == 50
+
+    def test_silent_static_fallback_is_never_scored_as_a_provider_result(
+            self, tmp_path):
+        """Real pipeline, no credentials: the orchestrator falls back to the
+        static engine. A Tier-B run must refuse to score that as 'claude'."""
+        case = load_case(CORPUS / "quality" / "TIERB-001")
+        run = run_case(case, tmp_path / "x", engine="claude",
+                       engine_config={"anthropic_api_key": ""})
+        assert run.run_status == "skipped"
+        assert "never scored as a provider result" in run.skipped_reason
+
+    def test_engine_not_in_matrix_is_skipped_not_run(self, tmp_path):
+        case = load_case(CORPUS / "regression" / "GOLDEN-SEC-001")
+        run = run_case(case, tmp_path / "g", engine="claude",
+                       engine_config={"anthropic_api_key": "k"})
+        assert run.run_status == "skipped"
+        assert "does not include 'claude'" in run.skipped_reason
+
+    def test_cli_is_reporting_only_exit_zero_and_rejects_gate(self):
+        env = _offline_env()
+        proc = subprocess.run(
+            [sys.executable, "-m", "eval.harness", "--engine", "openai"],
+            cwd=ROOT, capture_output=True, text=True, env=env, timeout=120)
+        assert proc.returncode == 0
+        assert "not_measured" in proc.stdout
+        both = subprocess.run(
+            [sys.executable, "-m", "eval.harness", "--engine", "claude",
+             "--gate"], cwd=ROOT, capture_output=True, text=True, env=env,
+            timeout=120)
+        assert both.returncode == 2 and "reporting-only" in both.stderr
+
+    def test_gate_and_default_run_never_touch_tier_b(self):
+        main_src = (ROOT / "eval" / "harness" / "__main__.py").read_text(
+            encoding="utf-8")
+        gate_src = (ROOT / "eval" / "harness" / "gate.py").read_text(
+            encoding="utf-8")
+        assert "tier_b" not in gate_src
+        assert "if args.engine:" in main_src          # only on explicit opt-in
+
+    def test_no_model_ids_are_hardcoded_in_the_eval_harness(self):
+        for path in (ROOT / "eval" / "harness").glob("*.py"):
+            text = path.read_text(encoding="utf-8")
+            for banned in ("claude-", "gpt-", "gemini-"):
+                assert banned not in text, f"{path.name} hard-codes {banned}"

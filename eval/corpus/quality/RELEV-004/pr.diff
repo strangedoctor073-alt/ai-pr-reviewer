@@ -1,0 +1,8 @@
+diff --git a/src/lib/format.js b/src/lib/format.js
+--- a/src/lib/format.js
++++ b/src/lib/format.js
+@@ -1,3 +1,3 @@
+ export function fmt(n) {
+-  return n.toFixed(1);
++  return n.toFixed(2);
+ }

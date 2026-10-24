@@ -1,0 +1,26 @@
+id: RELEV-003
+layer: quality
+title: 'Pricing change: importer, test and config must outrank 12 same-directory distractors'
+provenance: hand-authored
+diff: pr.diff
+context:
+  files:
+  - checkout/shop/cart.py
+  - checkout/tests/test_pricing.py
+  - checkout/pyproject.toml
+  impact:
+  - shop/cart.py
+  - tests/test_pricing.py
+expect:
+  findings: []
+  no_findings:
+  - file: shop/pricing.py
+    category: security
+  - file: shop/pricing.py
+    category: bug
+notes: 'V4-E11-T03 discriminating fixture: 17 checkout files, so the top-10 cut really excludes
+  some. Ordered by path alone, tests/ and pyproject.toml fall behind 14 shop/ files and relevance@10
+  drops; with reason-priority ranking (importer > config_of > adjacent) all three labeled
+  files stay inside the top 10. The older RELEV-001/002 fixtures have <= 5 files and cannot
+  discriminate. no_findings traps are category-scoped: the low-severity TEST001 test-gap note
+  is expected below threshold and is not what this case measures.'

@@ -17,6 +17,7 @@ from ai_pr_reviewer.config import Config
 from ai_pr_reviewer.findings import apply_lifecycle
 from ai_pr_reviewer.github_client import GitHubError
 from ai_pr_reviewer.github_sync import (MAX_SYNC_ERRORS, STATE_MARKERS,
+                                        EngineIdentity, OwnershipLedger,
                                         comment_key, link_comment_ids,
                                         record_comment_ids,
                                         render_finding_comment,
@@ -25,6 +26,17 @@ from ai_pr_reviewer.models import Finding, PRContext, ReviewResult
 
 HEAD = "h" * 40
 PR = PRContext(repo="acme/api", pr_number=7, head_sha=HEAD)
+
+# V4-E10-T01: linking now adopts a comment only when it was authored by the
+# account the engine learned from its own POST response (fail closed
+# otherwise), so the V3 link tests run with an explicit engine identity and
+# author their fixture comments as that account.
+ENGINE_USER = {"login": "github-actions[bot]", "id": 41898282}
+
+
+def _engine_ledger() -> OwnershipLedger:
+    return OwnershipLedger(EngineIdentity(login=ENGINE_USER["login"],
+                                          user_id=ENGINE_USER["id"]))
 
 
 def _finding(title: str = "SQL injection", line: int | None = 5,
@@ -142,9 +154,10 @@ def test_link_comment_ids_matches_path_line_commit_and_exact_first_line():
     gh = FakeGH(comments=[{
         "id": 555, "path": "app/main.py", "line": 5, "commit_id": HEAD,
         "body": render_finding_comment(f), "created_at": "2026-01-01T00:00:00Z",
+        "user": ENGINE_USER,
     }])
 
-    linked, warnings = link_comment_ids(gh, 7, [f], HEAD)
+    linked, warnings = link_comment_ids(gh, 7, [f], HEAD, ledger=_engine_ledger())
 
     assert linked == 1 and f.github_comment_id == 555
     assert warnings == []
@@ -155,9 +168,10 @@ def test_a_humans_comment_on_the_same_line_is_never_claimed():
     gh = FakeGH(comments=[{
         "id": 555, "path": "app/main.py", "line": 5, "commit_id": HEAD,
         "body": "LGTM — can you add a test?", "created_at": "2026-01-01T00:00:00Z",
+        "user": {"login": "alice", "id": 1},
     }])
 
-    linked, _ = link_comment_ids(gh, 7, [f], HEAD)
+    linked, _ = link_comment_ids(gh, 7, [f], HEAD, ledger=_engine_ledger())
 
     assert linked == 0 and f.github_comment_id is None
 
@@ -167,9 +181,10 @@ def test_a_comment_on_another_commit_is_never_claimed():
     gh = FakeGH(comments=[{
         "id": 555, "path": "app/main.py", "line": 5, "commit_id": "other" * 8,
         "body": render_finding_comment(f), "created_at": "2026-01-01T00:00:00Z",
+        "user": ENGINE_USER,
     }])
 
-    linked, _ = link_comment_ids(gh, 7, [f], HEAD)
+    linked, _ = link_comment_ids(gh, 7, [f], HEAD, ledger=_engine_ledger())
 
     assert linked == 0 and f.github_comment_id is None
 
@@ -179,9 +194,10 @@ def test_linking_never_claims_a_comment_at_another_location():
     gh = FakeGH(comments=[{
         "id": 555, "path": "app/main.py", "line": 99, "commit_id": HEAD,
         "body": render_finding_comment(f), "created_at": "2026-01-01T00:00:00Z",
+        "user": ENGINE_USER,
     }])
 
-    linked, _ = link_comment_ids(gh, 7, [f], HEAD)
+    linked, _ = link_comment_ids(gh, 7, [f], HEAD, ledger=_engine_ledger())
 
     assert linked == 0 and f.github_comment_id is None
 
@@ -206,7 +222,7 @@ def test_linking_failure_becomes_a_warning_not_an_exception():
     f = _finding()
     gh = FakeGH(list_error=GitHubError("forbidden", status_code=403))
 
-    linked, warnings = link_comment_ids(gh, 7, [f], HEAD)
+    linked, warnings = link_comment_ids(gh, 7, [f], HEAD, ledger=_engine_ledger())
 
     assert linked == 0
     assert warnings and "could not list GitHub review comments" in warnings[0]

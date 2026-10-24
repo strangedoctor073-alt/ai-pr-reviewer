@@ -366,7 +366,7 @@ def test_load_settings_cannot_remove_baseline_from_existing_file(monkeypatch, tm
 
 # ------------------------------------------------- V3-E02-T04 · telemetry rows
 def _tel_row(state="ok", in_tok=100, out_tok=50, call_ms=1000,
-             provider="claude"):
+             provider="claude", cost=None):
     return {
         "schema": 1, "provider": provider, "model": "claude-sonnet-4-6",
         "batch_count": 1, "fallback_used": False,
@@ -374,6 +374,9 @@ def _tel_row(state="ok", in_tok=100, out_tok=50, call_ms=1000,
                   "input_tokens": in_tok, "output_tokens": out_tok,
                   "duration_ms": call_ms, "state": state},
         "calls": [], "events": [],
+        # V4-E11-T07: None (or a well-formed block) — sanitize_telemetry
+        # carries a consistent estimate through, recomputes otherwise.
+        "cost": cost,
     }
 
 
@@ -767,8 +770,15 @@ def _t05_reports() -> list[dict]:
 
 
 def _t05_seed_telemetry(storage):
-    storage.save_telemetry("acme/widgets#7@a",
-                           _tel_row(in_tok=100, out_tok=50, call_ms=1000))
+    # Row 1 carries a well-formed estimated cost band (V4-E11-T07) — the
+    # sanitizer must carry it through, so the golden can pin nonzero
+    # totals; row 2 has no cost block and recomputes to its own state.
+    storage.save_telemetry(
+        "acme/widgets#7@a",
+        _tel_row(in_tok=100, out_tok=50, call_ms=1000,
+                 cost={"state": "estimated", "currency": "USD",
+                       "low": 0.0042, "high": 0.0061,
+                       "display_only": True}))
     storage.save_telemetry("acme/other#1@c",
                            _tel_row(state="unavailable", in_tok=None,
                                     out_tok=None, call_ms=500))
@@ -808,6 +818,12 @@ def _t05_golden_metrics() -> dict:
                 "acme/other": {"runs": 1, "input_tokens": 0,
                                "output_tokens": 0, "call_ms": 500},
             },
+            # V4-E11-T07 (debt 9): display-only cost — row 1's carried
+            # band, row 2's recomputed "unavailable" (no bounds); a row
+            # without a cost block would contribute to no state at all.
+            "cost": {"states": {"estimated": 1, "unpriced": 0,
+                                "unavailable": 1, "n/a": 0},
+                     "low_total": 0.0042, "high_total": 0.0061},
         },
     }
 

@@ -29,7 +29,7 @@ from dataclasses import dataclass
 
 from .graph import build_import_edges
 from .inventory import walk_inventory
-from .limits import IndexLimits, is_contained
+from .limits import BuildDeadline, IndexLimits, is_contained
 from .symbols import extract_symbols
 
 log = logging.getLogger(__name__)
@@ -206,19 +206,24 @@ def build_index(root: str, *, expected_repo: str = "", changed_paths=(),
         entries: list[FileEntry] = []
         bytes_read = 0
         exhausted = False
+        deadline = BuildDeadline()  # V4-E08: wall-clock bound on the whole build
         for walk in walked:
             symbols: list[tuple[str, str, int]] = []
             imports: list[str] = []
             truncated = False
             if walk.size > limits.max_file_bytes:
                 pass  # giant file: inventory entry only, no read
-            elif exhausted or bytes_read + walk.size > limits.max_bytes:
+            elif (exhausted or deadline.expired()
+                  or bytes_read + walk.size > limits.max_bytes):
                 if not exhausted:
                     exhausted = True
                     state = "exhausted"
-                    warnings.append(
-                        f"index: byte budget ({limits.max_bytes}) exhausted — "
-                        f"symbol extraction stopped after {len(entries)} file(s)")
+                    if deadline.expired():
+                        warnings.append(deadline.warning(len(entries), len(walked)))
+                    else:
+                        warnings.append(
+                            f"index: byte budget ({limits.max_bytes}) exhausted — "
+                            f"symbol extraction stopped after {len(entries)} file(s)")
             else:
                 if not is_contained(root, walk.path):
                     warnings.append(

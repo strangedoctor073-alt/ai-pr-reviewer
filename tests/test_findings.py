@@ -284,3 +284,86 @@ def test_merged_finding_carries_both_attributions_into_report_rows():
     row = deduplicate([a, b])[0].to_dict()
     assert {s["engine"] for s in row["provenance_sources"]} == {"claude", "static"}
     assert row["merged_fingerprints"] == [fingerprint_finding(b)]
+
+
+# ---------------------------------------------------------------------------
+# V4-E05 hardening (audit of the as-built occurrence-key pass)
+#
+# Two defects found when the shipped T02/T03 were probed with realistic
+# provider output; both are pinned here so they cannot return:
+#   1. the cross-engine merge let INPUT ORDER decide which rendering won, and
+#      the pipeline calls deduplicate() on raw provider output (providers are
+#      not trusted to arrive sorted -- defect D5), so a critical rendering
+#      could be swallowed by a medium one that merely came first;
+#   2. a sentence-final period split the occurrence key ("... key" vs
+#      "... key."), i.e. the most trivial cross-engine formatting difference.
+# ---------------------------------------------------------------------------
+
+def test_cross_engine_merge_never_downgrades_severity_whatever_the_input_order():
+    medium = _v4_finding(severity="medium")
+    critical = _v4_finding(title='Possible SQL injection in "users" table',
+                           severity="critical")
+    assert fingerprint_finding(medium) != fingerprint_finding(critical)
+
+    for order in ([medium, critical], [critical, medium]):
+        out = deduplicate(list(order))
+        assert len(out) == 1
+        assert out[0].severity == "critical"
+        # the survivor's storage key is the critical rendering's v1 fingerprint
+        assert fingerprint_finding(out[0]) == fingerprint_finding(critical)
+        assert fingerprint_finding(medium) in out[0].merged_fingerprints
+
+
+def test_equal_severity_cross_engine_merge_still_keeps_first_in_input_order():
+    """Documented tie-break is unchanged: equal severity -> first wins."""
+    a = _v4_finding(severity="high")
+    b = _v4_finding(title='Possible SQL injection in "users" table',
+                    severity="high")
+    assert fingerprint_finding(deduplicate([a, b])[0]) == fingerprint_finding(a)
+    assert fingerprint_finding(deduplicate([b, a])[0]) == fingerprint_finding(b)
+
+
+def test_dedup_keeps_input_order_of_survivors_and_unanchored_findings():
+    """Winner selection is by severity but the returned list stays in input
+    order of the *surviving* renderings (nothing is re-sorted)."""
+    plain = _v4_finding(title="The logic looks wrong here", severity="low")
+    med = _v4_finding(severity="medium")
+    other = _v4_finding(file="app/other.py", title="Weak hash md5() used",
+                        severity="high")
+    crit = _v4_finding(title='Possible SQL injection in "users" table',
+                       severity="critical")
+    out = deduplicate([plain, med, other, crit])
+    # `crit` outranks `med` (same occurrence key) so `med` is merged away;
+    # survivors appear in the input order of the renderings that survived.
+    assert [f.title for f in out] == [plain.title, other.title, crit.title]
+    assert fingerprint_finding(med) in out[2].merged_fingerprints
+
+
+def test_unknown_severity_ranks_like_medium_in_the_merge():
+    """models.from_dict coerces unknown severities to 'medium'; a hand-built
+    Finding with a junk severity must neither crash nor mis-rank: it outranks
+    'low' (it is treated as medium) and loses to 'high'."""
+    junk = _v4_finding(severity="bogus")
+    low = _v4_finding(title='Possible SQL injection in "users" table',
+                      severity="low")
+    high = _v4_finding(title='Possible SQL injection in "users" table',
+                       severity="high")
+    for order in ([junk, low], [low, junk]):
+        out = deduplicate(list(order))
+        assert len(out) == 1 and out[0].severity == "bogus"
+    for order in ([junk, high], [high, junk]):
+        out = deduplicate(list(order))
+        assert len(out) == 1 and out[0].severity == "high"
+
+
+def test_occurrence_key_ignores_edge_punctuation_but_keeps_dotted_names():
+    a = _v4_finding(title="Hardcoded API key in config_loader")
+    b = _v4_finding(title="Hardcoded API key in config_loader.")
+    c = _v4_finding(title="Hardcoded API key in config_loader...")
+    assert fingerprint_finding(a) != fingerprint_finding(b)      # v1 unchanged
+    assert occurrence_key(a) == occurrence_key(b) == occurrence_key(c) != ""
+
+    # interior dots are part of a name and still discriminate
+    d = _v4_finding(title="Use of os.system() on user input")
+    e = _v4_finding(title="Use of os_system() on user input")
+    assert occurrence_key(d) != occurrence_key(e)

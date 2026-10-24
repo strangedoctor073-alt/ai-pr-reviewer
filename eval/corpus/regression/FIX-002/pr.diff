@@ -1,0 +1,6 @@
+diff --git a/src/client.py b/src/client.py
+--- a/src/client.py
++++ b/src/client.py
+@@ -1,1 +1,2 @@
+ def post(requests, url, body):
++    return requests.post(url, data=body, verify=False)

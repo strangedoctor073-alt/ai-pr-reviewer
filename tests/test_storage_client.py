@@ -115,6 +115,30 @@ def test_dashboard_storage_client_success():
     notes = client.get_repo_memory("acme/api", ["app.py"])
     assert notes == ["Safe eval only"]
 
+    # 6. save_telemetry (V4-E11-T06: debt 15) — the sanitized row rides
+    # POST /api/telemetry behind the same token as every other write.
+    captured = {}
+
+    def capture(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and str(request.url).endswith(
+                "/api/telemetry"):
+            captured["path"] = str(request.url)
+            captured["token"] = request.headers.get("X-Dashboard-Token")
+            captured["body"] = json.loads(request.content)
+            return httpx.Response(200, json={"stored": True})
+        return httpx.Response(404, json={"detail": "not found"})
+
+    telem_client = DashboardStorageClient(
+        "https://dashboard.example.com", "secret-token",
+        client=httpx.Client(transport=httpx.MockTransport(capture),
+                            base_url="https://dashboard.example.com",
+                            headers={"X-Dashboard-Token": "secret-token"}))
+    telem_client.save_telemetry("acme/api#42@new_sha", {"schema": 1})
+    assert captured["path"].endswith("/api/telemetry")
+    assert captured["token"] == "secret-token"
+    assert captured["body"] == {"review_id": "acme/api#42@new_sha",
+                                "telemetry": {"schema": 1}}
+
 
 def test_dashboard_storage_client_resilience_on_errors():
     def broken_handler(request: httpx.Request) -> httpx.Response:
@@ -129,6 +153,7 @@ def test_dashboard_storage_client_resilience_on_errors():
     client.set_last_reviewed_sha("a/b", 1, "sha")  # does not raise
     assert client.get_previous_findings("a/b", 1) == []
     client.save_findings("a/b#1@sha", [])  # does not raise
+    client.save_telemetry("a/b#1@sha", {})  # does not raise (drop-safe)
     assert client.get_repo_memory("a/b", ["file.py"]) == []
     assert client.get_dismissed_fingerprints("a/b") == set()  # does not raise
 
@@ -434,8 +459,9 @@ def test_t04_has_capability_declared_inferred_and_none():
 
 def test_t04_backends_declare_full_capability_set():
     """Both real engine backends declare the full contract — including the
-    two formerly-undeclared capabilities — and the HTTP client's absences
-    (telemetry, pruning) are explicit, not silent."""
+    two formerly-undeclared capabilities — and the HTTP client's absence
+    (pruning) is explicit, not silent. V4-E11-T06 added the HTTP client's
+    ``save_telemetry`` (debt 15), so only remote deletion stays absent."""
     from ai_pr_reviewer.storage import has_capability
     from ai_pr_reviewer.storage_schema import (CAP_DISMISSED_FINGERPRINTS,
                                                CAP_LIST_REPO_MEMORY,
@@ -447,7 +473,7 @@ def test_t04_backends_declare_full_capability_set():
         assert CAP_LIST_REPO_MEMORY in cls.capabilities, cls
         assert CAP_DISMISSED_FINGERPRINTS in cls.capabilities, cls
 
-    assert CAP_TELEMETRY not in DashboardStorageClient.capabilities
+    assert CAP_TELEMETRY in DashboardStorageClient.capabilities   # V4-E11-T06
     assert CAP_PRUNE not in DashboardStorageClient.capabilities
     assert has_capability(LocalReviewStorage(":memory:"), CAP_TELEMETRY)
     assert has_capability(LocalReviewStorage(":memory:"), CAP_PRUNE)

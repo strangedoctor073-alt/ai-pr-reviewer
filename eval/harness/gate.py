@@ -57,6 +57,10 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     "false_positive_rate": 0.0,
     # V4 (E02-T04): no regression vs the baseline's recorded relevance.
     "relevance_at_10": 0.0,
+    # V4-E11-T05: verification accuracy may not regress vs the recorded
+    # baseline. (severity_accuracy / fix_usefulness are deliberately NOT
+    # here: report-only per §8 #4/#7 — "never auto-regrades severity".)
+    "verification_accuracy": 0.0,
 }
 # Metrics where a *higher* value is worse (allowed rise, not drop).
 _INVERTED = ("false_positive_rate",)
@@ -70,6 +74,15 @@ _INVERTED = ("false_positive_rate",)
 FLOORS: dict[str, float] = {
     "precision": 0.90,          # §8 #1 — ">= 0.90 at V4 release"
     "relevance_at_10": 0.70,    # §8 #5 — ">= 0.70"
+}
+
+
+# V4-E11-T05 (§8 #6 "0 known misverification"): counts that must be ZERO on
+# every run, independent of any baseline (a baseline can never legitimize
+# a wrongly-confirmed verification).
+ZERO_COUNTS: dict[str, str] = {
+    "misverify": "wrongly-confirmed verifications (engine asserted "
+                 "resolved/still_present contrary to adjudication)",
 }
 
 
@@ -120,8 +133,8 @@ class GateResult:
     failures: tuple[str, ...]
 
 
-def check_gate(current: dict, baseline: dict,
-               corpus_digest: str) -> GateResult:
+def check_gate(current: dict, baseline: dict, corpus_digest: str,
+               perf: dict | None = None) -> GateResult:
     """Compare a freshly built baseline payload against the committed one.
 
     ``current`` is ``build_baseline(...)`` output for this run;
@@ -188,6 +201,14 @@ def check_gate(current: dict, baseline: dict,
                 f"engine or the corpus labels; floors are not baselinable")
 
     cur_counts = (current.get("scorecard") or {}).get("counts", {})
+    for key, message in ZERO_COUNTS.items():
+        if cur_counts.get(key, 0) > 0:
+            failures.append(
+                f"{key}={cur_counts[key]}: {message} — the V4 gate is 0 "
+                f"(TESTING_EVALUATION_PLAN §8 #6); not baselinable")
+    if perf is not None:
+        from .perf import perf_budget_failures
+        failures.extend(perf_budget_failures(perf))
     for key, message in (
         ("violations", "must_not_report / no_findings violations"),
         ("errors", "cases that errored"),

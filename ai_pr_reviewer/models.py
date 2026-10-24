@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable
 
-from .security import redact_secrets
+from .security import redact_secrets, sanitize_warnings
 from .storage_schema import format_review_id
 from .telemetry import RunTelemetry, sanitize_telemetry
 
@@ -117,6 +117,63 @@ MAX_EVIDENCE_LOCATOR_CHARS = 200
 # Bounded attribution: one finding can cite a handful of engines/models
 # (V4 merge), never an unbounded list.
 MAX_PROVENANCE_SOURCES = 8
+# V4-E04 hardening: every free-text provenance/evidence *metadata* string is
+# redacted, single-line and bounded -- the same posture MAX_RULE_ID_CHARS
+# gives rule_id. A tampered stored row or a directly-constructed record
+# cannot inflate a report row, smuggle a credential, or inject a markdown
+# line through engine/model/origin/agent/check_type/content_hash.
+MAX_PROVENANCE_FIELD_CHARS = 200
+MAX_EVIDENCE_CHECK_TYPE_CHARS = 64
+MAX_EVIDENCE_HASH_CHARS = 64
+# Attribution ids for the deterministic rule engine (model_router's static
+# usage record already reports the same version id).
+STATIC_ENGINE_ID = "static"
+STATIC_RULE_ENGINE_VERSION = "static-rules-v1"
+# Why a finding has no provenance, for renderers that must say so
+# explicitly (T04: "unavailable (reason)", never a crash, never a blank).
+PROVENANCE_UNAVAILABLE_REASON = "provenance was not recorded for this finding"
+
+# The scalar provenance attributes on Finding (sanitized on assignment).
+_PROVENANCE_SCALARS = frozenset((
+    "provenance_engine", "provenance_model", "provenance_agent",
+    "provenance_origin"))
+
+# C0/C1 control characters and the Unicode line/paragraph separators: none of
+# them belong in a one-line identifier, and a newline would let a locator or
+# model string start its own markdown line.
+_CONTROL_TABLE = {c: " " for c in (*range(0x20), 0x7F, *range(0x80, 0xA0),
+                                   0x2028, 0x2029)}
+
+
+def _safe_line(value: Any, limit: int) -> str | None:
+    """Redacted, single-line, bounded text for provenance/evidence metadata.
+
+    None/blank -> None. Redaction runs BEFORE control characters are
+    collapsed (a PEM private-key block spans newlines and must still match),
+    and before the bound (a secret is never cut in half and left behind).
+    Idempotent; never raises.
+    """
+    if value is None:
+        return None
+    text = redact_secrets(str(_enum_value(value)))
+    text = text.translate(_CONTROL_TABLE).strip()[:limit].strip()
+    return text or None
+
+
+def _bounded_redacted(text: str, limit: int) -> str:
+    """Redact then bound free text, iterated to a fixed point.
+
+    One pass is not enough in a contrived case: cutting a longer token at
+    the bound can leave a string that *now* matches a secret pattern. The
+    fixed point makes this function idempotent, so ``EvidenceRecord.create``
+    can hash exactly the text ``__post_init__`` will later leave alone.
+    """
+    for _ in range(3):
+        nxt = redact_secrets(text)[:limit]
+        if nxt == text:
+            break
+        text = nxt
+    return text
 
 
 @dataclass(frozen=True)
@@ -135,6 +192,32 @@ class EvidenceRecord:
     summary: str
     content_hash: str
     check_type: str | None = None
+
+    def __post_init__(self) -> None:
+        """Structural redaction (V4-E04-T05): every construction route --
+        ``create``, ``from_dict``, ``dataclasses.replace`` or a plain
+        ``EvidenceRecord(...)`` call that bypasses ``create`` -- ends with
+        redacted, single-line, bounded text. Without this, redaction lived
+        only in ``create`` and a direct constructor call serialized a raw
+        credential straight into the report JSON.
+
+        Text only: ``content_hash`` is left as given (modulo the same
+        sanitizer), so a record whose summary was altered here no longer
+        matches its hash and ``integrity_ok`` says so instead of the
+        mismatch being papered over. Idempotent; never raises (evidence is
+        a bonus, never fatal).
+        """
+        put = object.__setattr__            # frozen dataclass
+        put(self, "kind", _safe_line(self.kind, 32) or "")
+        put(self, "locator",
+            _safe_line(self.locator, MAX_EVIDENCE_LOCATOR_CHARS) or "")
+        put(self, "summary", _bounded_redacted(
+            str(self.summary if self.summary is not None else ""),
+            MAX_EVIDENCE_SUMMARY_CHARS))
+        put(self, "content_hash",
+            _safe_line(self.content_hash, MAX_EVIDENCE_HASH_CHARS) or "")
+        put(self, "check_type",
+            _safe_line(self.check_type, MAX_EVIDENCE_CHECK_TYPE_CHARS))
 
     @classmethod
     def create(
@@ -164,10 +247,12 @@ class EvidenceRecord:
         text = redact_secrets(str(summary))
         if scrub is not None:
             loc, text = scrub(loc), scrub(text)
-        loc = loc[:MAX_EVIDENCE_LOCATOR_CHARS].strip()
+        loc = _safe_line(loc, MAX_EVIDENCE_LOCATOR_CHARS) or ""
         if not loc:
             raise ValueError("evidence locator must be non-empty")
-        text = text[:MAX_EVIDENCE_SUMMARY_CHARS]
+        # The same fixed-point finalizer __post_init__ applies, so the hash
+        # commits to exactly the text the record will hold.
+        text = _bounded_redacted(text, MAX_EVIDENCE_SUMMARY_CHARS)
         digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
         return cls(kind=k, locator=loc, summary=text, content_hash=digest,
                    check_type=_opt_str(check_type))
@@ -207,18 +292,21 @@ class EvidenceRecord:
         kind = str(_enum_value(kind)).strip().lower()
         if kind not in EVIDENCE_KINDS:
             return None
-        summary = redact_secrets(str(d.get("summary") or ""))
-        locator = redact_secrets(locator)[:MAX_EVIDENCE_LOCATOR_CHARS].strip()
+        summary = _bounded_redacted(str(d.get("summary") or ""),
+                                    MAX_EVIDENCE_SUMMARY_CHARS)
+        locator = _safe_line(locator, MAX_EVIDENCE_LOCATOR_CHARS)
         if not locator:
             return None
-        digest = _opt_str(d.get("content_hash")) or hashlib.sha256(
-            summary.encode("utf-8")).hexdigest()[:16]
+        digest = _safe_line(d.get("content_hash"), MAX_EVIDENCE_HASH_CHARS) \
+            or hashlib.sha256(summary.encode("utf-8")).hexdigest()[:16]
         return cls(
             kind=kind,
             locator=locator,
-            summary=summary[:MAX_EVIDENCE_SUMMARY_CHARS],
+            summary=summary,
             content_hash=digest,
-            check_type=_opt_str(d.get("check_type")),
+            # redacted + bounded by __post_init__ (and idempotently here)
+            check_type=_safe_line(d.get("check_type"),
+                                  MAX_EVIDENCE_CHECK_TYPE_CHARS),
         )
 
 
@@ -236,6 +324,15 @@ class ProvenanceSource:
     model: str | None = None
     origin: str | None = None
     agent: str | None = None
+
+    def __post_init__(self) -> None:
+        """Redacted, single-line, bounded on every construction route (a
+        tampered stored row is the realistic source of junk here; see
+        ``MAX_PROVENANCE_FIELD_CHARS``). Idempotent; never raises."""
+        put = object.__setattr__            # frozen dataclass
+        for name in ("engine", "model", "origin", "agent"):
+            put(self, name, _safe_line(getattr(self, name),
+                                       MAX_PROVENANCE_FIELD_CHARS))
 
     def key(self) -> tuple[str | None, str | None, str | None, str | None]:
         """Dedup key: two records with the same key are one attribution."""
@@ -288,6 +385,119 @@ def _str_tuple(v: Any) -> tuple[str, ...]:
     if not isinstance(v, (list, tuple)):
         return ()
     return tuple(str(x) for x in v if isinstance(x, str) and x)[:16]
+
+
+def _is_rule_engine_finding(finding: Any) -> bool:
+    """True when the deterministic rule engine produced this finding.
+
+    The signal is a ``rule_ref`` evidence record: evidence is pipeline-owned
+    (``from_untrusted_dict`` strips it), and only the static engine attaches
+    ``rule_ref``. ``rule_id`` is deliberately NOT the signal -- it is plain
+    content a model can emit, so keying on it would let model output pose as
+    the rule engine.
+    """
+    for e in tuple(getattr(finding, "evidence", ()) or ()):
+        if getattr(e, "kind", None) == "rule_ref":
+            return True
+    return False
+
+
+def derive_provenance_source(finding: Any, *, outcome_engine: Any,
+                             outcome_model: Any) -> ProvenanceSource:
+    """The concrete attribution for ONE finding of an analysis outcome
+    (V4-E04-T03). Pure; pipeline code calls it, model output never does.
+
+    ``outcome_engine`` describes the *outcome*, which can be a blend: a
+    provider that fell back to the rule engine for some batches reports
+    ``"claude+static"`` for all of them. Stamping that blend on every
+    finding mislabelled rule-engine output as an AI review (and credited the
+    AI model with it), and put a composite string into the key a V5 merge
+    would dedup on. Per finding the answer is concrete:
+
+    * pure ``static`` outcome -> static / the outcome's model / ``static``
+    * ``<ai>+static`` outcome -> a finding the rule engine produced is
+      ``static`` / ``static-rules-v1`` / ``static``; every other finding is
+      ``<ai>`` / the outcome's model / ``ai``
+    * anything else -> the outcome's engine and model, origin ``ai``
+      (unchanged from the original stamping)
+    """
+    engine = (_safe_line(outcome_engine, MAX_PROVENANCE_FIELD_CHARS) or "").lower()
+    model = _safe_line(outcome_model, MAX_PROVENANCE_FIELD_CHARS)
+    if engine == STATIC_ENGINE_ID:
+        return ProvenanceSource(engine=STATIC_ENGINE_ID, model=model,
+                                origin="static", agent=None)
+    suffix = "+" + STATIC_ENGINE_ID
+    if engine.endswith(suffix):
+        if _is_rule_engine_finding(finding):
+            return ProvenanceSource(engine=STATIC_ENGINE_ID,
+                                    model=STATIC_RULE_ENGINE_VERSION,
+                                    origin="static", agent=None)
+        return ProvenanceSource(engine=engine[:-len(suffix)] or None,
+                                model=model, origin="ai", agent=None)
+    return ProvenanceSource(engine=engine or None, model=model, origin="ai",
+                            agent=None)
+
+
+def describe_provenance(finding: Any) -> dict[str, Any]:
+    """Display-safe provenance/evidence view of one finding (V4-E04-T04).
+
+    The single place a Python renderer (PR comment, step summary, CLI)
+    should ask "why was I told this?". Works on any Finding-like object --
+    pre-V4 findings, hand-built doubles, tampered rows -- and NEVER raises:
+    a finding with nothing recorded answers ``available: False`` plus a
+    ``reason``, so it renders as "provenance unavailable", not a crash and
+    not a silent blank.
+
+    Everything returned is redacted, single-line and bounded. Evidence is
+    *cited*, not quoted: ``kind``/``locator``/``check_type`` and an
+    integrity flag, never the summary text (which can quote untrusted
+    code). Locators have backticks neutralised so a renderer can wrap them
+    in a markdown code span without the span being escapable.
+    """
+    def field(obj: Any, name: str) -> str | None:
+        return _safe_line(getattr(obj, name, None), MAX_PROVENANCE_FIELD_CHARS)
+
+    raw_sources = getattr(finding, "provenance_sources", None)
+    sources = []
+    for s in (tuple(raw_sources) if isinstance(raw_sources, (list, tuple))
+              else ())[:MAX_PROVENANCE_SOURCES]:
+        sources.append({k: field(s, k)
+                        for k in ("engine", "model", "origin", "agent")})
+    engine = field(finding, "provenance_engine")
+    model = field(finding, "provenance_model")
+    origin = field(finding, "provenance_origin")
+    available = bool(engine or model or origin or sources)
+
+    raw_evidence = getattr(finding, "evidence", None)
+    evidence_all = (tuple(raw_evidence)
+                    if isinstance(raw_evidence, (list, tuple)) else ())
+    evidence = []
+    for e in evidence_all[:MAX_EVIDENCE_PER_FINDING]:
+        locator = _safe_line(getattr(e, "locator", None),
+                             MAX_EVIDENCE_LOCATOR_CHARS)
+        if not locator:
+            continue
+        try:
+            intact = bool(e.integrity_ok)
+        except Exception:               # noqa: BLE001 - a double without it
+            intact = False
+        evidence.append({
+            "kind": _safe_line(getattr(e, "kind", None), 32) or "",
+            "locator": locator.replace("`", "'"),
+            "check_type": _safe_line(getattr(e, "check_type", None),
+                                     MAX_EVIDENCE_CHECK_TYPE_CHARS),
+            "integrity_ok": intact,
+        })
+    merged = getattr(finding, "merged_fingerprints", None)
+    return {
+        "available": available,
+        "reason": None if available else PROVENANCE_UNAVAILABLE_REASON,
+        "engine": engine, "model": model, "origin": origin,
+        "sources": sources,
+        "evidence": evidence,
+        "evidence_total": len(evidence_all),
+        "merged_count": len(merged) if isinstance(merged, (list, tuple)) else 0,
+    }
 
 # Verification statuses (V3 C4). ``None``/"" means "not verified", which is
 # distinct from VERIFICATION_UNVERIFIED ("checked, inconclusive").
@@ -376,6 +586,20 @@ class Finding:
     # dedup (V4-E05) -- an audit trail so a merge is never silent.
     merged_fingerprints: tuple[str, ...] = ()
 
+    def __setattr__(self, name: str, value: Any) -> None:
+        """V4-E04: the scalar provenance strings are redacted, single-line
+        and bounded on EVERY assignment -- the constructor, ``replace`` and
+        the orchestrator's plain ``f.provenance_model = ...`` alike.
+
+        ``to_dict`` sanitizes the report boundary, but renderers that read
+        the attribute directly (the PR-comment ``source: engine (model)``
+        suffix) would otherwise see the raw value. Clean values are stored
+        unchanged. Nothing else about assignment changes.
+        """
+        if name in _PROVENANCE_SCALARS:
+            value = _safe_line(value, MAX_PROVENANCE_FIELD_CHARS)
+        object.__setattr__(self, name, value)
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "file": self.file,
@@ -397,10 +621,18 @@ class Finding:
             "verification_status": self.verification_status,
             "verification_reason": self.verification_reason,
             "verified_at": self.verified_at,
-            "provenance_engine": self.provenance_engine,
-            "provenance_model": self.provenance_model,
-            "provenance_agent": self.provenance_agent,
-            "provenance_origin": self.provenance_origin,
+            # V4-E04: redacted/single-line/bounded at the report boundary
+            # too (clean values pass through byte-identically): the
+            # orchestrator assigns these attributes directly, so no
+            # constructor ever saw them.
+            "provenance_engine": _safe_line(
+                self.provenance_engine, MAX_PROVENANCE_FIELD_CHARS),
+            "provenance_model": _safe_line(
+                self.provenance_model, MAX_PROVENANCE_FIELD_CHARS),
+            "provenance_agent": _safe_line(
+                self.provenance_agent, MAX_PROVENANCE_FIELD_CHARS),
+            "provenance_origin": _safe_line(
+                self.provenance_origin, MAX_PROVENANCE_FIELD_CHARS),
             # V4-E04 T02/T03 (additive): multi-source provenance and the
             # embedded evidence records, serialized in stable order.
             "provenance_sources": [s.to_dict() for s in self.provenance_sources],
@@ -487,10 +719,14 @@ class Finding:
             verification_status=vstatus if vstatus in VERIFICATION_STATUSES else None,
             verification_reason=_opt_str(d.get("verification_reason")),
             verified_at=_opt_str(d.get("verified_at")),
-            provenance_engine=_opt_str(d.get("provenance_engine")),
-            provenance_model=_opt_str(d.get("provenance_model")),
-            provenance_agent=_opt_str(d.get("provenance_agent")),
-            provenance_origin=_opt_str(d.get("provenance_origin")),
+            provenance_engine=_safe_line(d.get("provenance_engine"),
+                                         MAX_PROVENANCE_FIELD_CHARS),
+            provenance_model=_safe_line(d.get("provenance_model"),
+                                        MAX_PROVENANCE_FIELD_CHARS),
+            provenance_agent=_safe_line(d.get("provenance_agent"),
+                                        MAX_PROVENANCE_FIELD_CHARS),
+            provenance_origin=_safe_line(d.get("provenance_origin"),
+                                         MAX_PROVENANCE_FIELD_CHARS),
             provenance_sources=_sources_from_any(d.get("provenance_sources")),
             evidence=_evidence_from_any(d.get("evidence")),
             merged_fingerprints=_str_tuple(d.get("merged_fingerprints")),
@@ -578,9 +814,11 @@ class ReviewResult:
             "pr": {
                 "repo": self.pr.repo,
                 "number": self.pr.pr_number,
-                "title": self.pr.pr_title,
-                "author": self.pr.author,
-                "branch": self.pr.branch,
+                # V4-E08-T05: PR metadata is author-controlled free text that
+                # reaches the report, the dashboard push and the artifact.
+                "title": redact_secrets(self.pr.pr_title or ""),
+                "author": redact_secrets(self.pr.author or ""),
+                "branch": redact_secrets(self.pr.branch or ""),
                 "base": self.pr.base,
                 "head_sha": self.pr.head_sha,
                 "url": self.pr.url,
@@ -595,7 +833,8 @@ class ReviewResult:
             "stats": self.stats.to_dict(),
             "posted_inline": self.posted_inline,
             "suppressed": self.suppressed,
-            "warnings": self.warnings,
+            # V4-E08-T04: report JSON + dashboard push read warnings here.
+            "warnings": sanitize_warnings(self.warnings),
             "health_score": self.health_score,
             "health_grade": self.health_grade,
             # V3-E02-T06: the report boundary re-applies the same
@@ -604,7 +843,68 @@ class ReviewResult:
             # even if a caller set the field directly. None stays None.
             "telemetry": sanitize_telemetry(self.telemetry)
             if self.telemetry is not None else None,
+            # V4-E04-T04 (D10): PR-level risk (C8) and fix-verification
+            # counts (C4) — both already rendered by the markdown summary
+            # (reporter._risk_row / _verification_row), now surfaced in
+            # JSON additively. Always present: None when the orchestrator
+            # did not compute them (null-with-reason, E04-T01), so
+            # consumers see one stable shape, never key-existence branches.
+            "risk": _risk_json(getattr(self, "risk", None)),
+            "verification": _verification_json(
+                getattr(self, "verification", None)),
+            # V4-E09: absent unless feedback.enabled (byte-identical to V3).
+            **(getattr(self, "feedback_report_fields", None) or {}),
         }
+
+
+# ------------------------------------------- V4-E04-T04 · D10 surfacing
+# `risk` / `verification` reach the report as bounded, closed-vocab blocks:
+# the same data the markdown summary renders, with the same "absent is
+# null, never a crash" contract the report boundary applies everywhere.
+
+_RISK_LEVELS = frozenset({"low", "high"})
+
+
+def _risk_json(risk: object) -> dict | None:
+    """``ReviewRisk`` -> ``{"level", "reasons"}``; None when uncomputed.
+
+    * level folds to the closed vocab ``{"low", "high"}`` —
+      ``classify_risk`` only ever produces those two; anything else reads
+      as "low", matching the markdown row's not-high-is-green semantics;
+    * reasons are free text embedding diff paths, so each passes through
+      ``redact_secrets()`` like every other stored free text (V4 security
+      invariant), each is length-bounded, and the list is capped — a
+      report field can never grow without bound.
+    """
+    if risk is None:
+        return None
+    level = str(getattr(risk, "level", "") or "low")
+    reasons: list[str] = []
+    for raw in (getattr(risk, "reasons", None) or [])[:10]:
+        text = redact_secrets(str(raw)).strip()
+        if text:
+            reasons.append(text[:500])
+    return {"level": level if level in _RISK_LEVELS else "low",
+            "reasons": reasons}
+
+
+def _verification_json(verification: object) -> dict | None:
+    """``verification_counts()`` dict -> the three C4 keys as non-negative
+    ints; None when uncomputed. Unknown keys are dropped (allowlist) and
+    malformed values become 0 — a count can never read back negative or
+    smuggle a payload. The key literals mirror
+    ``reporter._verification_row`` (the same C4 vocabulary the markdown
+    row reads)."""
+    if not isinstance(verification, dict):
+        return None
+    out: dict[str, int] = {}
+    for key in ("resolved", "still_present", "unable_to_verify"):
+        try:
+            count = int(verification.get(key, 0))
+        except (TypeError, ValueError):
+            count = 0
+        out[key] = max(0, count)
+    return out
 
 
 @dataclass
