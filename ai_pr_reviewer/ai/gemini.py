@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-import re
 import time
 from typing import TYPE_CHECKING
 
@@ -11,10 +9,13 @@ from ..models import Finding
 from ..retry import RetryPolicy
 from ..security import scan_prompt_injection, wrap_untrusted_diff
 from ..telemetry import RunTelemetry, UsageRecord, summarize_calls
-from .claude import (SYSTEM_PROMPT, _batch_with_files, _memory_notes,
-                     _impact_section, _repo_context_entries, assemble_user_prompt,
-                     build_untrusted_impact_block, build_untrusted_memory_block,
-                     build_untrusted_repo_context_block)
+# V4.0-E02-T01: prompt text and JSON parsing come from the shared layer —
+# this module contains none of its own.
+from .claude import (_batch_with_files, _impact_section, _memory_notes,
+                     _repo_context_entries, build_untrusted_impact_block)
+from .prompting import (SYSTEM_PROMPT, assemble_user_prompt,
+                        build_untrusted_memory_block,
+                        build_untrusted_repo_context_block, extract_json)
 
 if TYPE_CHECKING:
     from ..context import ReviewContext
@@ -198,20 +199,7 @@ class GeminiProvider:
         self.total_output_tokens += _as_total(usage.get("candidatesTokenCount"))
 
         text = data["candidates"][0]["content"]["parts"][0]["text"]
-        result = self._extract_json(text)
+        result = extract_json(text)
         if not isinstance(result, dict):
             raise ValueError("model response was not a JSON object")
         return result
-
-    @staticmethod
-    def _extract_json(text: str) -> dict:
-        cleaned = text.strip()
-        cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", cleaned, flags=re.S).strip()
-        try:
-            return json.loads(cleaned)
-        except json.JSONDecodeError:
-            pass
-        start, end = cleaned.find("{"), cleaned.rfind("}")
-        if start != -1 and end > start:
-            return json.loads(cleaned[start:end + 1])
-        raise ValueError("model response contained no JSON object")
