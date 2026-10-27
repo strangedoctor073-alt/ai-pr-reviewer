@@ -413,3 +413,177 @@ def parse_feedback_iso(value) -> datetime | None:
     if moment.tzinfo is None:
         moment = moment.replace(tzinfo=timezone.utc)
     return moment.astimezone(timezone.utc)
+
+
+# =====================================================================
+# V4.4-E05 · team/repository analytics projections schema contract
+#
+# One additive table, scoped per (repo, UTC date): a running aggregate
+# updated incrementally in the same transaction/write as each report
+# upsert ("aggregation-at-write", V4.4-E05-T01) so that trend/hotspot
+# reads (V4.4-E05-T04) touch only the small number of projection rows
+# for the requested window, never the full `reports` table/directory
+# ("replace O(all) reads"). Both dashboard backends (DbStorage,
+# JsonStorage) write and read through this one field list so they can
+# never drift apart; the field names are also the schema guard asserted
+# by ``tests/test_dashboard_storage.py`` (V4.4-E05-T03).
+#
+# HARD, FAMILY-WIDE INVARIANT (V5_FAMILY_MASTER_IMPLEMENTATION_PLAN.md
+# §C.3 non-goals; repeated at every later analytics epic): no individual
+# developer rankings, quality scores, or per-author analytics anywhere,
+# ever. This projection is scoped to (repo, date) only — it has no
+# author/user/committer dimension, and none may ever be added to it.
+
+ANALYTICS_PROJECTIONS_TABLE = "repo_daily_metrics"
+
+#: One row per (repo, date). Severity/category breakdowns are small,
+#: bounded dicts (five severities; categories are already normalized by
+#: dashboard.storage._normalize_category before they reach here), not a
+#: per-item list, so a row stays O(1) size regardless of review volume.
+ANALYTICS_PROJECTION_FIELDS = (
+    "id", "repo", "date",
+    "reviews_count", "findings_count",
+    "severity_counts", "category_counts",
+    "duration_ms_sum", "health_score_sum", "fallback_count",
+    "updated_at",
+)
+
+#: Column/field names that would turn this aggregate into a per-person
+#: signal. Asserted absent from ``ANALYTICS_PROJECTION_FIELDS`` and from
+#: the live ORM model by test — not merely documented (V4.4-E05-T03).
+#: Deliberately broad (includes near-miss spellings) since the cost of a
+#: false positive here (a legitimate field renamed) is a one-line test
+#: fix, while the cost of a false negative is a privacy regression.
+BANNED_INDIVIDUAL_DIMENSIONS = frozenset({
+    "author", "authors", "user", "username", "user_id", "userid",
+    "committer", "committer_email", "committer_name", "assignee",
+    "assignees", "developer", "developer_id", "actor", "login",
+    "handle", "email", "contributor", "reviewer", "pr_author",
+    "owner_id", "account", "account_id",
+})
+
+
+def assert_no_individual_dimension(field_names) -> None:
+    """Raise ``ValueError`` if any name in ``field_names`` is a banned
+    per-individual dimension (case-insensitive). Called by the schema
+    guard test against both the live ORM model and the JSON backend's
+    field list, so the same rule holds for every storage backend."""
+    offending = sorted(
+        n for n in field_names
+        if str(n).strip().lower() in BANNED_INDIVIDUAL_DIMENSIONS
+    )
+    if offending:
+        raise ValueError(
+            "analytics projection schema carries a banned per-individual "
+            f"dimension: {offending}"
+        )
+
+
+#: Proposed baseline (plan §G.7): minimum reviews a (repo) cohort needs
+#: in a window before it is surfaced in a ranked hotspot view, so a
+#: single-PR repository (which can otherwise reveal one person's single
+#: review) never appears alone in a ranking. This is a product default,
+#: not a promoted quality gate — promoting it to a blocking CI gate is a
+#: separate, human-approved decision per §F; changing this constant is
+#: not that approval.
+MIN_COHORT_SIZE = 5
+
+
+def analytics_projection_key(repo: str, date: str) -> str:
+    """``owner/repo#YYYY-MM-DD`` — the id a daily projection row persists
+    under; the single writer and the single reader share this format."""
+    return f"{repo}#{date}"
+
+
+def analytics_date(reviewed_at) -> str:
+    """UTC ``YYYY-MM-DD`` bucket for a report's ``reviewed_at`` timestamp.
+
+    Unparseable/blank input buckets to ``"unknown"`` rather than raising
+    or silently dropping the review from every projection — a malformed
+    timestamp is still a real review that happened.
+    """
+    text = str(reviewed_at or "").strip()
+    if not text:
+        return "unknown"
+    try:
+        moment = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return "unknown"
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(timezone.utc).date().isoformat()
+
+
+#: Declared alongside the other optional capabilities (V3-E04-T04
+#: convention): callers branch on ``has_capability`` rather than probing
+#: with ``getattr``. Both dashboard backends implement both methods, so
+#: this is always set on them — declared anyway so a future backend that
+#: *doesn't* implement analytics is caught structurally, not by surprise.
+CAP_ANALYTICS_PROJECTIONS = "trends"
+
+
+# =====================================================================
+# V4.6-E01-T03 · CI run records (payload-first, additive)
+#
+# One additive table. Payload-first per the family's storage rule (§B.7 C6):
+# the normalized run record lives as JSON in ``payload`` and only the columns
+# a lookup needs are real columns. ``test_failures`` and the other roadmap
+# tables are NOT created here — they are normalized later, in the generation
+# that has query evidence for them.
+#
+# Lifecycle: the engine-local backend creates the table lazily on the first
+# ``save_ci_runs`` (never on open), so a database that never ingests CI data
+# is never altered, and a build without this code ignores the table entirely.
+# The dashboard backends do not implement CI storage in this increment (the
+# storage-consolidation ADR gates that seam).
+# =====================================================================
+CI_RUNS_TABLE = "ci_runs"
+
+#: Declared by ``LocalReviewStorage`` only. Names the write method; the read
+#: method (``get_ci_runs``) travels with it.
+CAP_CI_RUNS = "save_ci_runs"
+
+#: Rows kept per repository (oldest ``ingested_at`` dropped first — a ring
+#: buffer, so CI data can never grow without bound). PROPOSED baseline.
+MAX_CI_RUNS_PER_REPO = 2_000
+#: Serialized payload ceiling (characters); also a DB-level CHECK.
+MAX_CI_RUN_PAYLOAD_CHARS = 32_768
+#: Most head SHAs one ``get_ci_runs`` call may filter by.
+MAX_CI_HEAD_SHAS_PER_QUERY = 250
+
+CI_RUN_COLUMNS = (
+    "repo", "run_id", "run_attempt", "head_sha", "status", "conclusion",
+    "created_at", "ingested_at", "payload",
+)
+
+CI_RUN_CHECKS = (
+    ("ck_ci_runs_attempt", "run_attempt >= 1"),
+    ("ck_ci_runs_sha_len", "length(head_sha) IN (40, 64)"),
+    ("ck_ci_runs_payload_len",
+     f"length(payload) <= {MAX_CI_RUN_PAYLOAD_CHARS}"),
+)
+
+
+def ci_runs_local_ddl() -> str:
+    """SQLite DDL for ``ci_runs`` (idempotent, additive)."""
+    checks = ",\n    ".join(f"CONSTRAINT {n} CHECK ({s})"
+                           for n, s in CI_RUN_CHECKS)
+    return f"""
+CREATE TABLE IF NOT EXISTS {CI_RUNS_TABLE} (
+    repo TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    run_attempt INTEGER NOT NULL DEFAULT 1,
+    head_sha TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'unknown',
+    conclusion TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT '',
+    ingested_at TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    PRIMARY KEY (repo, run_id, run_attempt),
+    {checks}
+);
+CREATE INDEX IF NOT EXISTS ix_ci_runs_repo_sha
+    ON {CI_RUNS_TABLE} (repo, head_sha);
+CREATE INDEX IF NOT EXISTS ix_ci_runs_repo_ingested
+    ON {CI_RUNS_TABLE} (repo, ingested_at);
+"""

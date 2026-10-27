@@ -6,7 +6,9 @@ import datetime as _dt
 import json
 import os
 import uuid
+from collections.abc import Mapping
 
+from . import provider_registry
 from .models import (ReviewResult, SEVERITY_EMOJI, SEVERITY_ORDER,
                      describe_provenance)
 from .security import markdown_safe_inline, sanitize_warnings
@@ -20,29 +22,26 @@ CLOSED_STATES = frozenset({"resolved", "dismissed", "muted"})
 # every job's step summary.
 MAX_MARKDOWN_FINDINGS = 8
 
-# Report header text per engine. Static-only output is NEVER labelled as AI
-# (README promise): the rule engine is deterministic static analysis.
-_ENGINE_TITLE = {
-    "claude": "Claude",
-    "openai": "OpenAI",
-    "gemini": "Gemini",
-    "static": "Static Fallback",
-    "claude+static": "Claude + Static Fallback",
-    "openai+static": "OpenAI + Static Fallback",
-    "gemini+static": "Gemini + Static Fallback",
-}
-_ENGINE_FOOTER = {
-    "claude": "review by Claude (AI)",
-    "openai": "review by OpenAI (AI)",
-    "gemini": "review by Google Gemini (AI)",
-    "static": "rule-based static analysis — not an AI review",
-    "claude+static": ("review by Claude (AI); batches Claude could not review "
-                      "were covered by rule-based static analysis (not AI)"),
-    "openai+static": ("review by OpenAI (AI); batches OpenAI could not review "
-                      "were covered by rule-based static analysis (not AI)"),
-    "gemini+static": ("review by Google Gemini (AI); batches Gemini could not review "
-                      "were covered by rule-based static analysis (not AI)"),
-}
+# Report header/footer text per engine, read from the provider registry on
+# every access so a registered backend is labelled without touching this
+# module. Static-only output is NEVER labelled as AI (README promise): the
+# rule engine is deterministic static analysis.
+class _EngineLabels(Mapping):
+    def __init__(self, load):
+        self._load = load
+
+    def __getitem__(self, engine):
+        return self._load()[engine]
+
+    def __iter__(self):
+        return iter(self._load())
+
+    def __len__(self):
+        return len(self._load())
+
+
+_ENGINE_TITLE = _EngineLabels(provider_registry.engine_titles)
+_ENGINE_FOOTER = _EngineLabels(provider_registry.engine_footers)
 
 # Optional Finding attributes carried into the report JSON when the Finding
 # has them and Finding.to_dict() did not already emit them.
@@ -104,7 +103,7 @@ def resolve_engine(obj) -> str:
     if engine in _ENGINE_TITLE:
         return engine
     mode = str(getattr(obj, "mode", "") or "").lower()
-    if mode in ("claude", "openai", "gemini"):
+    if mode in provider_registry.ai_backend_names():
         return mode
     return "static"
 

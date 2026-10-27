@@ -2,13 +2,13 @@
 
 > Status: planning document (v1) — created during remediation to resolve BLOCK-01.
 > Repository state: commit `2841b23`.
-> Canonical stage structure: Phase 0/"V3.x", V4, V5, V6, V7, V8, V9, V10.
+> Canonical stage structure: Phase 0/"V3.x", V4, V4.0, V4.2, V4.4, V4.6, V4.8, V4.10.
 
 ---
 
 ## 1. Security design stance
 
-Security is **continuous**, not stage-gated. Every stage that adds a new untrusted input surface must upgrade injection screening, redaction, and authorization **in that stage**. V6 (security engine) does not absorb later stages' security work. This is the principle from `MASTER_VISION.md` §5 capability T and `V4_V10_ROADMAP.md` §0 deviation #8.
+Security is **continuous**, not stage-gated. Every stage that adds a new untrusted input surface must upgrade injection screening, redaction, and authorization **in that stage**. V4.2 (security engine) does not absorb later stages' security work. This is the principle from `MASTER_VISION.md` §5 capability T and `V4_STAGES_ROADMAP.md` §0 deviation #8.
 
 ---
 
@@ -43,11 +43,11 @@ Security is **continuous**, not stage-gated. Every stage that adds a new untrust
 | `base_sha` never populated → repo context at PR head | HIGH (D1) | Phase 0 (V3-E01) |
 | Injection screening is signature-based; novel phrasings pass | MEDIUM | Continuous |
 | `redact_secrets` false positives on 40-char SHAs | LOW | Phase 0 (document) |
-| Badge/sandbox unauthenticated | MEDIUM | V9 (badge), V10 (sandbox) |
-| Content-Length-only body cap (chunked requests bypass) | MEDIUM | V9 |
-| No webhook auth (no webhooks yet) | N/A | V9 (when webhooks land) |
-| Dashboard rate limiter is per-process (single-worker) | MEDIUM | V9 (when multi-worker) |
-| Policy trust depends on consumer checkout behavior | MEDIUM | V9 (enforce in Action) |
+| Badge/sandbox unauthenticated | MEDIUM | V4.8 (badge), V4.10 (sandbox) |
+| Content-Length-only body cap (chunked requests bypass) | MEDIUM | V4.8 |
+| No webhook auth (no webhooks yet) | N/A | V4.8 (when webhooks land) |
+| Dashboard rate limiter is per-process (single-worker) | MEDIUM | V4.8 (when multi-worker) |
+| Policy trust depends on consumer checkout behavior | MEDIUM | V4.8 (enforce in Action) |
 
 ---
 
@@ -57,8 +57,8 @@ Security is **continuous**, not stage-gated. Every stage that adds a new untrust
 
 | Threat | Current control | Required evolution |
 |---|---|---|
-| PR diff contains prompt injection | Nonce fencing + injection screening | V4: index content is also fenced; V5: agent prompts fenced per-agent |
-| PR modifies `.ai-pr-reviewer.yml` | Warning on policy file change | V9: enforce base-revision policy in Action |
+| PR diff contains prompt injection | Nonce fencing + injection screening | V4: index content is also fenced; V4.0: agent prompts fenced per-agent |
+| PR modifies `.ai-pr-reviewer.yml` | Warning on policy file change | V4.8: enforce base-revision policy in Action |
 | PR contains secrets | `redact_secrets` on everything stored/posted | Continuous: extend patterns as needed |
 | PR is huge (DoS) | `batch_chars` 80k, `max_comments` 20, 1000-file cap | V4: budget caps as DoS control (V4-E08) |
 | PR contains path traversal in file paths | `_safe_repo_path` | Continuous |
@@ -76,41 +76,41 @@ Security is **continuous**, not stage-gated. Every stage that adds a new untrust
 
 | Threat | Current control | Required evolution |
 |---|---|---|
-| Issue body contains injection | Not applicable (no issue ingestion yet) | V7: fence issue bodies as untrusted |
-| Comment contains injection | Not applicable (no comment ingestion yet) | V7: fence comment bodies as untrusted |
+| Issue body contains injection | Not applicable (no issue ingestion yet) | V4.4: fence issue bodies as untrusted |
+| Comment contains injection | Not applicable (no comment ingestion yet) | V4.4: fence comment bodies as untrusted |
 
 ### 3.4 Malicious memory
 
 | Threat | Current control | Required evolution |
 |---|---|---|
-| Memory note contains injection | Memory fenced + screened | V7: authority model (ADR-003); AI cannot write memory |
+| Memory note contains injection | Memory fenced + screened | V4.4: authority model (ADR-003); AI cannot write memory |
 | Memory note contains secrets | `redact_secrets` on memory | Continuous |
-| Memory poisoning (AI tries to write) | Engine has no `add_repo_memory` path | V7: authority model enforces human-only writes |
-| Memory row is a mute (dismissal) | `fingerprint:` prefix; write-protected in dashboard | V7: mute rows are human-authored only |
+| Memory poisoning (AI tries to write) | Engine has no `add_repo_memory` path | V4.4: authority model enforces human-only writes |
+| Memory row is a mute (dismissal) | `fingerprint:` prefix; write-protected in dashboard | V4.4: mute rows are human-authored only |
 
 ### 3.5 Malicious model output
 
 | Threat | Current control | Required evolution |
 |---|---|---|
 | Model sets lifecycle fields | `from_untrusted_dict` strips `LIFECYCLE_FIELDS` | Continuous: provenance fields also pipeline-owned |
-| Model claims "resolved" | Deterministic verification; `_unverify` revert | V6: verification tiers; AI cannot claim T2+ |
+| Model claims "resolved" | Deterministic verification; `_unverify` revert | V4.2: verification tiers; AI cannot claim T2+ |
 | Model output contains secrets | `redact_secrets` on everything posted/stored | Continuous |
-| Model output is huge | `MAX_FINDINGS_PER_BATCH` 200; `max_tokens` tiers | V5: per-agent budget caps |
+| Model output is huge | `MAX_FINDINGS_PER_BATCH` 200; `max_tokens` tiers | V4.0: per-agent budget caps |
 
-### 3.6 Malicious plugin (V10)
+### 3.6 Malicious plugin (V4.10)
 
 | Threat | Current control | Required evolution |
 |---|---|---|
-| Plugin escapes sandbox | N/A (no plugins yet) | V10: out-of-process sandbox; capability IPC; no tokens by default |
-| Plugin exfiltrates data | N/A | V10: network egress control; manifest signing |
-| Plugin is supply-chain attack | N/A | V10: plugin signing + API-range; curated registry |
+| Plugin escapes sandbox | N/A (no plugins yet) | V4.10: out-of-process sandbox; capability IPC; no tokens by default |
+| Plugin exfiltrates data | N/A | V4.10: network egress control; manifest signing |
+| Plugin is supply-chain attack | N/A | V4.10: plugin signing + API-range; curated registry |
 
 ### 3.7 Compromised provider
 
 | Threat | Current control | Required evolution |
 |---|---|---|
-| Provider returns malicious content | Model output is untrusted; validated | Continuous: per-agent fencing (V5) |
-| Provider is down | Circuit breaker + failover + static fallback | V5: per-task breakers |
+| Provider returns malicious content | Model output is untrusted; validated | Continuous: per-agent fencing (V4.0) |
+| Provider is down | Circuit breaker + failover + static fallback | V4.0: per-task breakers |
 | Provider leaks secrets | Secrets never in URLs; warnings sanitized | Continuous |
 
 ### 3.8 Secret leakage
@@ -152,37 +152,37 @@ Security is **continuous**, not stage-gated. Every stage that adds a new untrust
 | Fake authority | Injection screening | Continuous |
 | Fence spoofing | Nonce fencing; spoofed tags neutralized | Continuous |
 | Fake chat turn | Injection screening | Continuous |
-| Novel phrasings | **Gap**: signature-based screening misses novel phrasings | V6: defense-in-depth (nonce fence is primary; screening is forensic) |
+| Novel phrasings | **Gap**: signature-based screening misses novel phrasings | V4.2: defense-in-depth (nonce fence is primary; screening is forensic) |
 
 ### 3.12 Context poisoning
 
 | Threat | Current control | Required evolution |
 |---|---|---|
 | Repo content poisons context | Fenced + screened | V4: index content fenced; provenance tracked |
-| Memory poisons context | Fenced + screened; human-authored only | V7: authority model |
-| Model output poisons next prompt | Model output is untrusted; never fed back as instructions | V5: per-agent fencing |
+| Memory poisons context | Fenced + screened; human-authored only | V4.4: authority model |
+| Model output poisons next prompt | Model output is untrusted; never fed back as instructions | V4.0: per-agent fencing |
 
-### 3.13 Tenant isolation failure (V10)
-
-| Threat | Current control | Required evolution |
-|---|---|---|
-| Cross-tenant data leak | N/A (single-tenant) | V10: row-level scope; scope matrix as CI invariant |
-| Cross-tenant policy leak | N/A | V10: org policy scoping |
-
-### 3.14 Webhook spoofing (V9)
+### 3.13 Tenant isolation failure (V4.10)
 
 | Threat | Current control | Required evolution |
 |---|---|---|
-| Forged webhook | N/A (no webhooks yet) | V9: HMAC signature validation; timestamp/replay window |
-| Replay attack | N/A | V9: nonce/timestamp store |
+| Cross-tenant data leak | N/A (single-tenant) | V4.10: row-level scope; scope matrix as CI invariant |
+| Cross-tenant policy leak | N/A | V4.10: org policy scoping |
+
+### 3.14 Webhook spoofing (V4.8)
+
+| Threat | Current control | Required evolution |
+|---|---|---|
+| Forged webhook | N/A (no webhooks yet) | V4.8: HMAC signature validation; timestamp/replay window |
+| Replay attack | N/A | V4.8: nonce/timestamp store |
 
 ### 3.15 Supply-chain attack
 
 | Threat | Current control | Required evolution |
 |---|---|---|
-| Malicious dependency | `requirements.txt` pinned minimums; Dependabot | Continuous: audit deps; V6-E06 dependency intelligence |
+| Malicious dependency | `requirements.txt` pinned minimums; Dependabot | Continuous: audit deps; V4.2-E06 dependency intelligence |
 | Malicious GitHub Action | Pinned actions (`@v7`) | Continuous |
-| Malicious plugin | N/A | V10: signing + curated registry |
+| Malicious plugin | N/A | V4.10: signing + curated registry |
 
 ---
 
@@ -210,7 +210,7 @@ Security is **continuous**, not stage-gated. Every stage that adds a new untrust
 | Audit requirements | Evidence provenance recorded |
 | Failure mode | Evidence fetch fails → finding posted without evidence (degraded) |
 
-### 4.3 Specialist agents (V5)
+### 4.3 Specialist agents (V4.0)
 
 | Attribute | Value |
 |---|---|
@@ -221,7 +221,7 @@ Security is **continuous**, not stage-gated. Every stage that adds a new untrust
 | Audit requirements | Per-agent provenance recorded |
 | Failure mode | Agent fails → skipped; merger proceeds with remaining agents |
 
-### 4.4 Security engine (V6-E01)
+### 4.4 Security engine (V4.2-E01)
 
 | Attribute | Value |
 |---|---|
@@ -232,7 +232,7 @@ Security is **continuous**, not stage-gated. Every stage that adds a new untrust
 | Audit requirements | Security findings carry evidence |
 | Failure mode | Advisory fetch fails → skip advisory checks; pattern checks still run |
 
-### 4.5 Test/CI ingestion (V6-E03, V8-E01)
+### 4.5 Test/CI ingestion (V4.2-E03, V4.6-E01)
 
 | Attribute | Value |
 |---|---|
@@ -243,7 +243,7 @@ Security is **continuous**, not stage-gated. Every stage that adds a new untrust
 | Audit requirements | Ingestion logged; correlation evidence recorded |
 | Failure mode | Ingestion fails → skip correlation; review proceeds without CI context |
 
-### 4.6 Memory hierarchy (V7-E02)
+### 4.6 Memory hierarchy (V4.4-E02)
 
 | Attribute | Value |
 |---|---|
@@ -254,7 +254,7 @@ Security is **continuous**, not stage-gated. Every stage that adds a new untrust
 | Audit requirements | Authority + provenance on every memory entry |
 | Failure mode | Memory load fails → continue without memory (current behavior) |
 
-### 4.7 Event platform (V8-E07)
+### 4.7 Event platform (V4.6-E07)
 
 | Attribute | Value |
 |---|---|
@@ -265,7 +265,7 @@ Security is **continuous**, not stage-gated. Every stage that adds a new untrust
 | Audit requirements | Event log is append-only |
 | Failure mode | Event write fails → warning; review proceeds |
 
-### 4.8 Webhooks (V9)
+### 4.8 Webhooks (V4.8)
 
 | Attribute | Value |
 |---|---|
@@ -276,7 +276,7 @@ Security is **continuous**, not stage-gated. Every stage that adds a new untrust
 | Audit requirements | Rejected webhooks logged |
 | Failure mode | Invalid signature → reject + log |
 
-### 4.9 Versioned API (V9-E03)
+### 4.9 Versioned API (V4.8-E03)
 
 | Attribute | Value |
 |---|---|
@@ -287,7 +287,7 @@ Security is **continuous**, not stage-gated. Every stage that adds a new untrust
 | Audit requirements | Audit log for all writes |
 | Failure mode | Auth failure → 401; rate limit → 429 |
 
-### 4.10 Plugins (V10-E01)
+### 4.10 Plugins (V4.10-E01)
 
 | Attribute | Value |
 |---|---|
@@ -298,7 +298,7 @@ Security is **continuous**, not stage-gated. Every stage that adds a new untrust
 | Audit requirements | Plugin id+version in provenance |
 | Failure mode | Plugin crash → isolated; sandbox escape → denied + logged |
 
-### 4.11 Hosted multi-tenancy (V10-E03)
+### 4.11 Hosted multi-tenancy (V4.10-E03)
 
 | Attribute | Value |
 |---|---|
@@ -332,59 +332,59 @@ Security is **continuous**, not stage-gated. Every stage that adds a new untrust
 | Provenance unforgeable | V4-E04 | Evidence spoofing |
 | Identity inputs pipeline-owned | V4-E05 | Model setting identity |
 
-### 5.3 V5 (V5-E01..E08)
+### 5.3 V4.0 (V4.0-E01..E08)
 
 | Work item | Epic | Threat addressed |
 |---|---|---|
-| Per-agent fencing | V5-E01 | Agent prompt injection |
-| Cross-agent output re-validation | V5-E01 | Malicious agent output |
-| Agents never post directly | V5-E01 | Uncontrolled autonomous actions |
-| Budget pre-flight | V5-E07 | Cost explosion |
+| Per-agent fencing | V4.0-E01 | Agent prompt injection |
+| Cross-agent output re-validation | V4.0-E01 | Malicious agent output |
+| Agents never post directly | V4.0-E01 | Uncontrolled autonomous actions |
+| Budget pre-flight | V4.0-E07 | Cost explosion |
 
-### 5.4 V6 (V6-E01..E08)
-
-| Work item | Epic | Threat addressed |
-|---|---|---|
-| Security engine | V6-E01 | Security findings with evidence |
-| AI security v2 | V6-E02 | Context provenance tagging; poison defenses |
-| Strict manifest parsing | V6-E06 | Dependency risk |
-| Policy evaluator re-enforces baseline | V6-E07 | Policy removing privacy baseline |
-
-### 5.5 V7 (V7-E01..E07)
+### 5.4 V4.2 (V4.2-E01..E08)
 
 | Work item | Epic | Threat addressed |
 |---|---|---|
-| Memory authority model | V7-E02 | Memory poisoning |
-| Memory security | V7-E07 | Authority enforcement |
-| Git read-only execution | V7-E01 | Command injection via git |
-| No author-dimension queries | V7-E05 | Individual rankings |
+| Security engine | V4.2-E01 | Security findings with evidence |
+| AI security v2 | V4.2-E02 | Context provenance tagging; poison defenses |
+| Strict manifest parsing | V4.2-E06 | Dependency risk |
+| Policy evaluator re-enforces baseline | V4.2-E07 | Policy removing privacy baseline |
 
-### 5.6 V8 (V8-E01..E07)
-
-| Work item | Epic | Threat addressed |
-|---|---|---|
-| CI log redaction at ingest | V8-E01 | Secret leakage via CI logs |
-| Parse-never-execute | V8-E01 | CI log injection |
-| Event log append-only | V8-E07 | Event tampering |
-
-### 5.7 V9 (V9-E01..E07)
+### 5.5 V4.4 (V4.4-E01..E07)
 
 | Work item | Epic | Threat addressed |
 |---|---|---|
-| Webhook HMAC + replay window | V9-E04 | Webhook spoofing; replay |
-| Scope matrix as CI invariant | V9-E03 | Cross-tenant/policy leak |
-| Scoped tokens | V9-E03 | Token abuse |
-| API contract snapshots | V9-E03 | Breaking changes |
-| Badge/sandbox auth | V9-E03 | Unauthenticated info leak |
+| Memory authority model | V4.4-E02 | Memory poisoning |
+| Memory security | V4.4-E07 | Authority enforcement |
+| Git read-only execution | V4.4-E01 | Command injection via git |
+| No author-dimension queries | V4.4-E05 | Individual rankings |
 
-### 5.8 V10 (V10-E01..E06)
+### 5.6 V4.6 (V4.6-E01..E07)
 
 | Work item | Epic | Threat addressed |
 |---|---|---|
-| Plugin sandbox + escape suite | V10-E01 | Plugin escape |
-| Plugin signing + API-range | V10-E01 | Supply-chain attack |
-| Tenant isolation | V10-E03 | Cross-tenant data leak |
-| RBAC + SSO | V10-E03 | Unauthorized access |
+| CI log redaction at ingest | V4.6-E01 | Secret leakage via CI logs |
+| Parse-never-execute | V4.6-E01 | CI log injection |
+| Event log append-only | V4.6-E07 | Event tampering |
+
+### 5.7 V4.8 (V4.8-E01..E07)
+
+| Work item | Epic | Threat addressed |
+|---|---|---|
+| Webhook HMAC + replay window | V4.8-E04 | Webhook spoofing; replay |
+| Scope matrix as CI invariant | V4.8-E03 | Cross-tenant/policy leak |
+| Scoped tokens | V4.8-E03 | Token abuse |
+| API contract snapshots | V4.8-E03 | Breaking changes |
+| Badge/sandbox auth | V4.8-E03 | Unauthenticated info leak |
+
+### 5.8 V4.10 (V4.10-E01..E06)
+
+| Work item | Epic | Threat addressed |
+|---|---|---|
+| Plugin sandbox + escape suite | V4.10-E01 | Plugin escape |
+| Plugin signing + API-range | V4.10-E01 | Supply-chain attack |
+| Tenant isolation | V4.10-E03 | Cross-tenant data leak |
+| RBAC + SSO | V4.10-E03 | Unauthorized access |
 
 ---
 

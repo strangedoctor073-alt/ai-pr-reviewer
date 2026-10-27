@@ -57,6 +57,18 @@ MAX_LIST_ENTRIES = 50
 KNOWN_TOP_LEVEL_KEYS = frozenset({"review", "rules", "exclude", "focus",
                                   "context", "feedback"})
 
+# V4.2-E04 (architecture intelligence): additive, separate from the v1 key
+# set above so unrelated schema additions merge mechanically. The section is
+# validated and consumed by ``ai_pr_reviewer.architecture`` — this parser
+# only recognises the key so a valid section is not warned about as unknown.
+KNOWN_TOP_LEVEL_KEYS = KNOWN_TOP_LEVEL_KEYS | frozenset({"architecture"})
+
+# V4.2-E07-T01: the additive ``policy`` section is parsed by
+# ``ai_pr_reviewer.policy`` (its own loader, same precedent as ``feedback``);
+# it is listed here only so a v2 config does not trigger the unknown-key
+# warning. Nothing in this module reads or changes it.
+KNOWN_TOP_LEVEL_KEYS = KNOWN_TOP_LEVEL_KEYS | frozenset({"policy"})
+
 
 @dataclass
 class ReviewPolicy:

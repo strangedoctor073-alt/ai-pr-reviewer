@@ -16,7 +16,8 @@ from dashboard.app import SlidingWindowLimiter
 from dashboard.storage import DbStorage, JsonStorage, choose_storage, summarize
 
 
-def _report(repo="acme/widgets", number=7, n_findings=3):
+def _report(repo="acme/widgets", number=7, n_findings=3,
+            reviewed_at="2026-09-19T00:00:00Z"):
     findings = [
         {"file": "a.py", "line": 1, "severity": "critical", "category": "security",
          "title": "t1", "explanation": "e1", "confidence": "high"},
@@ -30,7 +31,7 @@ def _report(repo="acme/widgets", number=7, n_findings=3):
         "pr": {"repo": repo, "number": number, "title": "Fix things",
                "author": "dev", "branch": "feat/x"},
         "mode": "static", "model": "static-rules-v1",
-        "reviewed_at": "2026-09-19T00:00:00Z", "duration_ms": 12,
+        "reviewed_at": reviewed_at, "duration_ms": 12,
         "summary": "s", "findings": findings,
         "stats": {"files": 2, "additions": 10, "deletions": 1, "hunks": 2},
     }
@@ -1164,3 +1165,231 @@ def test_t05_json_expansion_falls_back_to_light_column(db_storage,
     assert calls, "the fallback path was never exercised (vacuous test)"
     assert {c[1] for c in calls} == {"reports"}
 
+
+
+# =============================================== V4.4-E05 · team/repo analytics
+# Aggregation-at-write projections (T01), reproducibility (T02), no
+# individual dimension + small-cohort suppression (T03), trend/hotspot
+# reads (T04). ``db_storage`` fixture is defined above.
+
+@pytest.fixture()
+def json_storage(tmp_path):
+    storage = JsonStorage(tmp_path / "reports", data_dir=tmp_path)
+    storage.init()
+    return storage
+
+
+def _brute_force_trends(reports: list[dict]) -> dict:
+    """Recompute the daily (repo, date) aggregate directly from raw report
+    dicts, with no projection involved — the independent "ground truth"
+    T02's reproducibility tests check the projection against."""
+    from ai_pr_reviewer import storage_schema as schema
+
+    by_key: dict[str, dict] = {}
+    for r in reports:
+        pr = r.get("pr", {})
+        repo = pr.get("repo", "")
+        date = schema.analytics_date(r.get("reviewed_at", ""))
+        key = schema.analytics_projection_key(repo, date)
+        agg = by_key.setdefault(key, {
+            "repo": repo, "date": date, "reviews_count": 0,
+            "findings_count": 0, "severity_counts": {}, "health_score_sum": 0.0,
+        })
+        agg["reviews_count"] += 1
+        findings = r.get("findings", [])
+        agg["findings_count"] += len(findings)
+        for f in findings:
+            s = f.get("severity")
+            agg["severity_counts"][s] = agg["severity_counts"].get(s, 0) + 1
+        health = r.get("health_score", 100)
+        agg["health_score_sum"] += float(health) if isinstance(health, (int, float)) else 100.0
+    return by_key
+
+
+@pytest.mark.parametrize("backend_fixture", ["db_storage", "json_storage"])
+def test_e05_t01_projection_updates_at_write(backend_fixture, request):
+    """T01: upserting a report updates the (repo, date) projection row in
+    the same call — no separate backfill/reindex step is needed to see it."""
+    storage = request.getfixturevalue(backend_fixture)
+    storage.upsert(_report(reviewed_at="2026-10-01T12:00:00Z"))
+
+    trends = storage.trends(repo="acme/widgets", days=365)
+    assert len(trends["series"]) == 1
+    day = trends["series"][0]
+    assert day["date"] == "2026-10-01"
+    assert day["reviews_count"] == 1
+    assert day["findings_count"] == 3
+    assert day["severity_counts"] == {"critical": 1, "high": 1, "low": 1}
+
+
+@pytest.mark.parametrize("backend_fixture", ["db_storage", "json_storage"])
+def test_e05_t02_reupsert_same_id_does_not_double_count(backend_fixture, request):
+    """T02: re-upserting the same report id (an edit, or a retried write)
+    must net to the SAME projection as a single write — not double it.
+    This is exactly test_*_upsert_is_idempotent's scenario, extended to
+    the projection."""
+    storage = request.getfixturevalue(backend_fixture)
+    r = _report(reviewed_at="2026-10-01T12:00:00Z")
+    storage.upsert(r)
+    r = {**r, "summary": "updated"}
+    storage.upsert(r)
+
+    trends = storage.trends(repo="acme/widgets", days=365)
+    assert len(trends["series"]) == 1
+    assert trends["series"][0]["reviews_count"] == 1
+    assert trends["series"][0]["findings_count"] == 3
+
+
+@pytest.mark.parametrize("backend_fixture", ["db_storage", "json_storage"])
+def test_e05_t02_reupsert_moving_date_relocates_contribution(backend_fixture, request):
+    """T02: if an edit changes which day a report belongs to, the OLD
+    day's row must lose the contribution and the NEW day's row must gain
+    it — the projection stays a faithful mirror of current report state,
+    not an append-only log of every write that ever happened."""
+    storage = request.getfixturevalue(backend_fixture)
+    r = _report(reviewed_at="2026-10-01T12:00:00Z")
+    storage.upsert(r)
+    r = {**r, "reviewed_at": "2026-10-05T12:00:00Z"}
+    storage.upsert(r)
+
+    trends = storage.trends(repo="acme/widgets", days=365)
+    by_date = {d["date"]: d for d in trends["series"]}
+    assert "2026-10-01" not in by_date
+    assert by_date["2026-10-05"]["reviews_count"] == 1
+
+
+@pytest.mark.parametrize("backend_fixture", ["db_storage", "json_storage"])
+def test_e05_t02_trends_reproducible_against_brute_force(backend_fixture, request):
+    """T02 reproducibility: the aggregation-at-write projection must equal
+    a from-scratch recomputation over the raw reports, for a dataset
+    spanning several repos and several days."""
+    storage = request.getfixturevalue(backend_fixture)
+    reports = [
+        _report(repo="acme/widgets", number=1, n_findings=3,
+                reviewed_at="2026-10-01T09:00:00Z"),
+        _report(repo="acme/widgets", number=2, n_findings=1,
+                reviewed_at="2026-10-01T15:00:00Z"),
+        _report(repo="acme/widgets", number=3, n_findings=2,
+                reviewed_at="2026-10-02T09:00:00Z"),
+        _report(repo="acme/other", number=1, n_findings=2,
+                reviewed_at="2026-10-01T09:00:00Z"),
+    ]
+    for r in reports:
+        storage.upsert(r)
+
+    truth = _brute_force_trends(reports)
+    trends = storage.trends(days=365)  # all repos
+    got = {f"{d['repo']}#{d['date']}": d for d in trends["series"]}
+
+    assert set(got) == set(truth)
+    for key, expected in truth.items():
+        assert got[key]["reviews_count"] == expected["reviews_count"], key
+        assert got[key]["findings_count"] == expected["findings_count"], key
+        assert got[key]["severity_counts"] == expected["severity_counts"], key
+        expected_avg = round(expected["health_score_sum"] / expected["reviews_count"], 1)
+        assert got[key]["avg_health_score"] == expected_avg, key
+
+
+def test_e05_t03_schema_has_no_individual_dimension():
+    """T03: neither the shared field list nor the live ORM model may ever
+    carry a per-individual (author/user/committer/...) column — this is a
+    family-wide non-goal, not just this ticket's concern."""
+    from ai_pr_reviewer import storage_schema as schema
+    from dashboard.models_db import RepoDailyMetricsRow
+
+    # The shared field list itself.
+    schema.assert_no_individual_dimension(schema.ANALYTICS_PROJECTION_FIELDS)
+
+    # The live table actually matches that field list (catches drift
+    # where someone edits the ORM model but not the shared contract).
+    live_columns = {c.name for c in RepoDailyMetricsRow.__table__.columns}
+    assert live_columns == set(schema.ANALYTICS_PROJECTION_FIELDS)
+    schema.assert_no_individual_dimension(live_columns)
+
+    # The guard itself actually rejects a banned name (not a vacuous check).
+    with pytest.raises(ValueError):
+        schema.assert_no_individual_dimension(["repo", "date", "author"])
+
+
+@pytest.mark.parametrize("backend_fixture", ["db_storage", "json_storage"])
+def test_e05_t03_hotspots_suppresses_small_cohort(backend_fixture, request):
+    """T03: a repo with fewer than MIN_COHORT_SIZE reviews in the window
+    must never appear in the ranked hotspot output, so a single-PR repo
+    can't surface one person's single review as a 'hotspot'."""
+    from ai_pr_reviewer import storage_schema as schema
+
+    storage = request.getfixturevalue(backend_fixture)
+    assert schema.MIN_COHORT_SIZE > 1  # the test below would be vacuous otherwise
+
+    # Below-threshold repo: one review, several critical findings.
+    storage.upsert(_report(repo="acme/tiny", number=1, n_findings=3,
+                            reviewed_at="2026-10-01T09:00:00Z"))
+    # At-threshold repo: MIN_COHORT_SIZE reviews, fewer findings each.
+    for i in range(schema.MIN_COHORT_SIZE):
+        storage.upsert(_report(repo="acme/active", number=i,
+                                n_findings=1, reviewed_at="2026-10-01T09:00:00Z"))
+
+    result = storage.hotspots(days=365, limit=10)
+    repos = {h["repo"] for h in result["hotspots"]}
+    assert "acme/tiny" not in repos
+    assert "acme/active" in repos
+    assert result["suppressed_small_cohorts"] >= 1
+
+
+@pytest.mark.parametrize("backend_fixture", ["db_storage", "json_storage"])
+def test_e05_t04_hotspots_ranks_by_critical_high_findings(backend_fixture, request):
+    """T04: hotspots ranks repos by critical+high finding volume, highest
+    first — the whole point of the view is to surface where attention is
+    needed."""
+    from ai_pr_reviewer import storage_schema as schema
+
+    storage = request.getfixturevalue(backend_fixture)
+    for i in range(schema.MIN_COHORT_SIZE):
+        storage.upsert(_report(repo="acme/hot", number=i, n_findings=3,
+                                reviewed_at="2026-10-01T09:00:00Z"))
+    for i in range(schema.MIN_COHORT_SIZE):
+        storage.upsert(_report(repo="acme/calm", number=i, n_findings=1,
+                                reviewed_at="2026-10-01T09:00:00Z"))
+
+    result = storage.hotspots(days=365, limit=10)
+    order = [h["repo"] for h in result["hotspots"]]
+    assert order.index("acme/hot") < order.index("acme/calm")
+
+
+def test_e04_t04_analytics_capability_declared_on_both_backends(db_storage, tmp_path):
+    """Declared-capability convention (V3-E04-T04): branch on
+    has_capability, never getattr-probe for trends/hotspots."""
+    from ai_pr_reviewer.storage import has_capability
+    from ai_pr_reviewer.storage_schema import CAP_ANALYTICS_PROJECTIONS
+
+    json_storage = JsonStorage(tmp_path / "jreports", data_dir=tmp_path / "jdata")
+    json_storage.init()
+
+    assert has_capability(db_storage, CAP_ANALYTICS_PROJECTIONS)
+    assert has_capability(json_storage, CAP_ANALYTICS_PROJECTIONS)
+
+
+def test_e05_t04_analytics_endpoints_serve_trends_and_hotspots(monkeypatch, tmp_path, db_storage):
+    """T04 acceptance: GET /api/analytics/trends and /api/analytics/hotspots
+    serve projection data under the same read-auth posture as every other
+    GET under /api (V4.6-E01's rate-limit/token handling, untouched)."""
+    from ai_pr_reviewer import storage_schema as schema
+
+    for i in range(schema.MIN_COHORT_SIZE):
+        db_storage.upsert(_report(repo="acme/widgets", number=i, n_findings=3,
+                                   reviewed_at="2026-10-01T09:00:00Z"))
+    headers = _memory_app(monkeypatch, tmp_path, db_storage)
+
+    with TestClient(dashboard_app.app) as client:
+        trends_resp = client.get("/api/analytics/trends",
+                                  params={"repo": "acme/widgets", "days": 365},
+                                  headers=headers)
+        hotspots_resp = client.get("/api/analytics/hotspots",
+                                    params={"days": 365}, headers=headers)
+        unauth_resp = client.get("/api/analytics/trends")
+
+    assert trends_resp.status_code == 200
+    assert trends_resp.json()["series"][0]["reviews_count"] == schema.MIN_COHORT_SIZE
+    assert hotspots_resp.status_code == 200
+    assert hotspots_resp.json()["hotspots"][0]["repo"] == "acme/widgets"
+    assert unauth_resp.status_code == 401  # read auth is not bypassed

@@ -849,7 +849,7 @@ def test_tm_5_4_inline_comment_volume_respects_the_configured_cap(monkeypatch):
 # ===========================================================================
 
 #: Documented, intentionally open (SECURITY_ROADMAP.md: "Badge/sandbox
-#: unauthenticated", MEDIUM, V9/V10): runs only the static analyzer on a
+#: unauthenticated", MEDIUM, V4.8/V4.10): runs only the static analyzer on a
 #: size-capped diff, writes nothing. Anything NOT listed must authenticate.
 _UNAUTHENTICATED_BY_DESIGN = {"/api/sandbox/simulate"}
 

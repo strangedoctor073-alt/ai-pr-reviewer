@@ -805,6 +805,47 @@ async def get_metrics(request: Request):
     return JSONResponse(get_storage().metrics())
 
 
+# --------------------------------------- V4.4-E05 · team/repo analytics
+# Trend/hotspot views over the aggregation-at-write projections (T01).
+# Same read auth posture as every other GET under /api — no new surface.
+def _analytics_days(request: Request, default: int = 30, cap: int = 365) -> int:
+    raw = request.query_params.get("days", "")
+    try:
+        days = int(raw) if raw else default
+    except ValueError:
+        days = default
+    return max(1, min(cap, days))
+
+
+@app.get("/api/analytics/trends")
+async def get_analytics_trends(request: Request):
+    _check_reads(request)
+    repo = (request.query_params.get("repo") or "").strip()
+    days = _analytics_days(request)
+    storage = get_storage()
+    from ai_pr_reviewer.storage import has_capability
+    if not has_capability(storage, _schema().CAP_ANALYTICS_PROJECTIONS):
+        raise HTTPException(501, "analytics projections not supported by this storage backend")
+    return JSONResponse(storage.trends(repo=repo, days=days))
+
+
+@app.get("/api/analytics/hotspots")
+async def get_analytics_hotspots(request: Request):
+    _check_reads(request)
+    days = _analytics_days(request)
+    raw_limit = request.query_params.get("limit", "")
+    try:
+        limit = int(raw_limit) if raw_limit else 10
+    except ValueError:
+        limit = 10
+    limit = max(1, min(50, limit))
+    storage = get_storage()
+    from ai_pr_reviewer.storage import has_capability
+    if not has_capability(storage, _schema().CAP_ANALYTICS_PROJECTIONS):
+        raise HTTPException(501, "analytics projections not supported by this storage backend")
+    return JSONResponse(storage.hotspots(days=days, limit=limit))
+
+
 # ------------------------------------------------- telemetry ingestion
 # V4-E11-T06 (debt 15). Accepts one run's telemetry row from an engine or a
 # script and stores it through the *existing* ``save_telemetry`` seam (same
@@ -814,7 +855,7 @@ async def get_metrics(request: Request):
 # SCOPE — LAN / trusted-network only. Auth is the same single shared
 # ``X-Dashboard-Token`` every other write uses. There is NO network-grade
 # authentication here (no TLS termination, per-client identity, signing or
-# replay protection); that is explicitly deferred to V5 (ships as v4.5.0)
+# replay protection); that is explicitly deferred to a later V4 stage (ships as v4.5.0)
 # and must not be assumed or claimed. Do not expose this route to an
 # untrusted network. Rate limiting (per-IP write window), the audit log and
 # the body cap apply as for every write.

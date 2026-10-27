@@ -1,4 +1,4 @@
-# DATA MODEL — Future conceptual model (V3 → V10)
+# DATA MODEL — Future conceptual model (V3 → V4.10)
 
 > Status: planning document (v1) — describes repo state at commit `2841b23`
 > (`CURRENT_ARCHITECTURE.md`, verified 2026-10-03). Entities marked with stages
@@ -49,37 +49,37 @@ append-only fact about something that happened.
 
 | Entity | Class | Home | Arrives | Seed today / notes |
 |---|---|---|---|---|
-| Organization | real (V9) | relational (SQLite now, Postgres-later) | V9 | today only implied by the `owner/` prefix of `repo` strings (`review_state` PK); becomes a real row when org policy/memory arrive; optional multi-tenant scoping per ADR-010 |
-| Team | real (V7) | relational (Postgres-later) | V7 | no team concept exists; seed = grouping of GitHub logins/repos; **no individual rankings** may be derived from it |
-| User | real (V7, minimal) | relational (Postgres-later) | V7 | today just `ReportRow.author` (string) and PR author in `PRContext`; store login only where audit/analytics need it; analytics path should prefer hashed/stable pseudonyms |
-| Repository | real | relational (SQLite now) | exists (implicit) | today a TEXT column repeated on every table (`repo`); V4 turns it into an indexed row with index metadata; org = prefix until V9 |
+| Organization | real (V4.8) | relational (SQLite now, Postgres-later) | V4.8 | today only implied by the `owner/` prefix of `repo` strings (`review_state` PK); becomes a real row when org policy/memory arrive; optional multi-tenant scoping per ADR-010 |
+| Team | real (V4.4) | relational (Postgres-later) | V4.4 | no team concept exists; seed = grouping of GitHub logins/repos; **no individual rankings** may be derived from it |
+| User | real (V4.4, minimal) | relational (Postgres-later) | V4.4 | today just `ReportRow.author` (string) and PR author in `PRContext`; store login only where audit/analytics need it; analytics path should prefer hashed/stable pseudonyms |
+| Repository | real | relational (SQLite now) | exists (implicit) | today a TEXT column repeated on every table (`repo`); V4 turns it into an indexed row with index metadata; org = prefix until V4.8 |
 | RepositoryComponent | projection | relational + payload JSON; **future graph storage — revisit (ADR-002)** | V4 | units of the deterministic index (packages/dirs/symbols) feeding change-impact; JSON rows under the repository index; never a graph DB on aspiration |
 | PullRequest | real | relational (SQLite now) | exists (implicit) | keyed `repo#pr_number` (PK of `review_state` in `ai_pr_reviewer/storage.py`, `ReviewStateRow` in `dashboard/models_db.py`); V4 adds index metadata (intent, scope) as payload |
-| Commit | projection | relational + payload JSON | V4 (V7 deepens) | today only `last_reviewed_sha`/`base_sha` strings; index stores a bounded set of relevant commits; full history intelligence is V7, still bounded |
+| Commit | projection | relational + payload JSON | V4 (V4.4 deepens) | today only `last_reviewed_sha`/`base_sha` strings; index stores a bounded set of relevant commits; full history intelligence is V4.4, still bounded |
 | Review | real | relational (SQLite now) | exists | the *report*: `dashboard/models_db.py: ReportRow` (PK = `{slug}-pr{n}-{yyyymmdd}-{uuid6}` from `reporter.py: new_report_id`), engine-side `review-report.json` |
-| ReviewRun | real | relational (SQLite now) + telemetry records | Phase 0 (seed) / V5 | the *execution*: provider, model, duration, usage, fallback, queue/inline mode. Today scattered (`duration_ms`, `engine`, `fallback_used` in report JSON; provider counters unreported — C6). Split from Review because N runs can precede one posted review |
+| ReviewRun | real | relational (SQLite now) + telemetry records | Phase 0 (seed) / V4.0 | the *execution*: provider, model, duration, usage, fallback, queue/inline mode. Today scattered (`duration_ms`, `engine`, `fallback_used` in report JSON; provider counters unreported — C6). Split from Review because N runs can precede one posted review |
 | Finding | real | relational, **payload JSON inside row** (exists) | exists | PK `(repo, pr_number, fingerprint)`; payload = full `Finding.to_dict()`. Stays one table for ALL intelligence types (security/test/architecture are categories, not tables — rule 2) |
-| FindingEvidence | real (V4-E04) | payload JSON first → own table when cross-finding evidence queries ship (V5/V6) | V4 | array of content-addressed records inside the finding payload — `{id, kind, locator, retrieved_at, content_hash, summary}` per ADR-004; promotion justified when merge/tier queries filter by evidence type across findings |
-| FindingRelation | real (V7-E03) | relational from day one (join-shaped; integrity matters) + **graph revisit (ADR-002)** | V7 | typed edges between finding identities (`caused_by`, `regression_of`, `duplicates`, …); requires identity v2 (V4-E05); small volume, but rule 2(b) applies |
-| Verification | event record | payload fields now → append rows when V6 tiers ship history queries | exists (fields) / V6 tiers | today: `verification_status`/`verification_reason`/`verified_at` on the Finding payload (`ai_pr_reviewer/models.py`); deterministic coverage check only (`verification.py`). Tiers (V6) keep the deterministic result as floor; history becomes rows when a query needs "verification over time" |
-| MemoryEntry | real | relational (exists) | exists | `repo_memory` (engine, read-only for engine) + `RepoMemoryRow` (dashboard CRUD); V7 (V7-E02) adds `scope` (org▸team▸repo▸component▸PR), `authority` class, `origin` columns — additive, per ADR-003; mute rows (`fingerprint:<fp>` path_pattern) are *decisions*, a subtype, not notes |
-| Policy | real (document-authoritative) | file in repo (`.ai-pr-reviewer.yml` @ base revision) + cached row; org copy relational (V9) | exists (repo) / V6 engine / V9 org | the document is the source of truth; rows are projections; privacy baseline in `rules.py` is non-removable in *code*, not data |
-| PolicyEvaluation | event record | payload JSON in review payload → relational when V6+ queries ship | V6 | `{policy_ref, subject, decision, reasons, evaluated_at}` per review; explainability record; promotion when dashboards filter decisions across reviews |
-| Provider | real (config-declared) | config now → registry row (V5) | exists / V5 registry | today hardcoded wiring sites (`AI_BACKENDS`, `select_backend`); capability registry (V5) makes it queryable data |
-| Model | real (V5) | registry row (relational) | V5 | model id, provider, capability/cost/context-window metadata; **no retired model IDs stored as defaults** (release-test invariant) |
+| FindingEvidence | real (V4-E04) | payload JSON first → own table when cross-finding evidence queries ship (V4.0/V4.2) | V4 | array of content-addressed records inside the finding payload — `{id, kind, locator, retrieved_at, content_hash, summary}` per ADR-004; promotion justified when merge/tier queries filter by evidence type across findings |
+| FindingRelation | real (V4.4-E03) | relational from day one (join-shaped; integrity matters) + **graph revisit (ADR-002)** | V4.4 | typed edges between finding identities (`caused_by`, `regression_of`, `duplicates`, …); requires identity v2 (V4-E05); small volume, but rule 2(b) applies |
+| Verification | event record | payload fields now → append rows when V4.2 tiers ship history queries | exists (fields) / V4.2 tiers | today: `verification_status`/`verification_reason`/`verified_at` on the Finding payload (`ai_pr_reviewer/models.py`); deterministic coverage check only (`verification.py`). Tiers (V4.2) keep the deterministic result as floor; history becomes rows when a query needs "verification over time" |
+| MemoryEntry | real | relational (exists) | exists | `repo_memory` (engine, read-only for engine) + `RepoMemoryRow` (dashboard CRUD); V4.4 (V4.4-E02) adds `scope` (org▸team▸repo▸component▸PR), `authority` class, `origin` columns — additive, per ADR-003; mute rows (`fingerprint:<fp>` path_pattern) are *decisions*, a subtype, not notes |
+| Policy | real (document-authoritative) | file in repo (`.ai-pr-reviewer.yml` @ base revision) + cached row; org copy relational (V4.8) | exists (repo) / V4.2 engine / V4.8 org | the document is the source of truth; rows are projections; privacy baseline in `rules.py` is non-removable in *code*, not data |
+| PolicyEvaluation | event record | payload JSON in review payload → relational when V4.2+ queries ship | V4.2 | `{policy_ref, subject, decision, reasons, evaluated_at}` per review; explainability record; promotion when dashboards filter decisions across reviews |
+| Provider | real (config-declared) | config now → registry row (V4.0) | exists / V4.0 registry | today hardcoded wiring sites (`AI_BACKENDS`, `select_backend`); capability registry (V4.0) makes it queryable data |
+| Model | real (V4.0) | registry row (relational) | V4.0 | model id, provider, capability/cost/context-window metadata; **no retired model IDs stored as defaults** (release-test invariant) |
 | ContextArtifact | real (V4) | object/artifact storage + metadata row | V4 | bounded context pieces with provenance (what text, from which revision, budget cost); replaces bare character budgets (C7); large blobs never ride relational rows |
-| TestEvidence | event record | payload JSON → object storage for raw output (V6) | V6 | test names/status/durations/coverage pointers tied to findings; raw logs in artifact storage, summary in payload |
-| CIResult | event record (V8-E01) | payload JSON first; relational when correlation queries ship (V8+) | V8 | run id, workflow, status, conclusion, timing, commit; correlation to PRs/findings via keys; raw logs to artifact storage |
-| Dependency | projection | relational + payload JSON (snapshot per index refresh) | V6 | derived from manifests/lockfiles; version, ecosystem, advisories; a cache of source-of-truth files, refreshable |
-| SecurityFinding | projection (Finding specialization) | **inside the Finding table** (category + provenance) | V6 | never a parallel store: `category='security'` (+ engine/rule provenance) keeps identity, lifecycle, dedup and comment sync working unchanged |
-| ArchitectureFinding | projection (Finding specialization) | inside the Finding table | V6 | same rule as SecurityFinding; architecture intelligence emits normal findings with a distinct category/provenance |
-| Event | event record | append-only file/outbox (relational) now-formalized → event store (V8) | V8 platform (schema earlier) | envelope `{schema_version, event_id, type, occurred_at, source, repo, subject, payload}` (`TARGET_ARCHITECTURE.md` §7.4); retention-bounded; immutable |
-| AuditRecord | event record | append-only file now → relational (Postgres-later) | exists | `dashboard/data/audit.jsonl` (append-only, token-auth actions); grows to memory/policy/org actions (V7 memory security, V9 org audit); never contains secrets/diff content |
-| Plugin | real (V9 contract, V10 runtime) | registry row (relational) | V9/V10 | declared capabilities + version + trust class; plugin *output* enters as FindingEvidence-like records — plugins own no core tables |
+| TestEvidence | event record | payload JSON → object storage for raw output (V4.2) | V4.2 | test names/status/durations/coverage pointers tied to findings; raw logs in artifact storage, summary in payload |
+| CIResult | event record (V4.6-E01) | payload JSON first; relational when correlation queries ship (V4.6+) | V4.6 | run id, workflow, status, conclusion, timing, commit; correlation to PRs/findings via keys; raw logs to artifact storage |
+| Dependency | projection | relational + payload JSON (snapshot per index refresh) | V4.2 | derived from manifests/lockfiles; version, ecosystem, advisories; a cache of source-of-truth files, refreshable |
+| SecurityFinding | projection (Finding specialization) | **inside the Finding table** (category + provenance) | V4.2 | never a parallel store: `category='security'` (+ engine/rule provenance) keeps identity, lifecycle, dedup and comment sync working unchanged |
+| ArchitectureFinding | projection (Finding specialization) | inside the Finding table | V4.2 | same rule as SecurityFinding; architecture intelligence emits normal findings with a distinct category/provenance |
+| Event | event record | append-only file/outbox (relational) now-formalized → event store (V4.6) | V4.6 platform (schema earlier) | envelope `{schema_version, event_id, type, occurred_at, source, repo, subject, payload}` (`TARGET_ARCHITECTURE.md` §7.4); retention-bounded; immutable |
+| AuditRecord | event record | append-only file now → relational (Postgres-later) | exists | `dashboard/data/audit.jsonl` (append-only, token-auth actions); grows to memory/policy/org actions (V4.4 memory security, V4.8 org audit); never contains secrets/diff content |
+| Plugin | real (V4.8 contract, V4.10 runtime) | registry row (relational) | V4.8/V4.10 | declared capabilities + version + trust class; plugin *output* enters as FindingEvidence-like records — plugins own no core tables |
 
 ## 3. What deliberately does NOT become a table (yet)
 
-- **Any V6+ intelligence output as its own store.** Security, architecture,
+- **Any V4.2+ intelligence output as its own store.** Security, architecture,
   test, dependency intelligence all emit `Finding` rows with categories and
   provenance. Separate stores would fork identity/lifecycle/dedup (C4) and
   create storage implementation #4 — the exact disease of `CURRENT_ARCHITECTURE`
@@ -91,7 +91,7 @@ append-only fact about something that happened.
   for graph revisit (ADR-002) but live relationally until a real traversal
   query proves relational insufficient.
 - **Search index.** Built only when shipped queries need full-text/faceted
-  retrieval (dashboard finding browser is the first candidate, V9-era); until
+  retrieval (dashboard finding browser is the first candidate, V4.8-era); until
   then SQL + payload JSON is the index.
 - **Telemetry as core rows.** Usage/latency records stay append-only and
   disposable — they feed aggregation, not entity state (`ARCHITECTURE_EVOLUTION`
@@ -103,7 +103,7 @@ Minimal stable core (bold) plus how later entities attach. `(P)` = payload JSON
 inside another row; `[n]` = stage of arrival.
 
 ```
- Organization [V9] ──────────────┐  (derived from repo "owner/" prefix until V9)
+ Organization [V4.8] ──────────────┐  (derived from repo "owner/" prefix until V4.8)
                                  ▼
                        ┌──────────────────────┐
                        │ **Repository**       │ key: owner/name (string today)
@@ -112,8 +112,8 @@ inside another row; `[n]` = stage of arrival.
           ┌───────────────────────┼─────────────────────────┐
           ▼                       ▼                         ▼
  ┌─────────────────┐   ┌──────────────────────┐   ┌──────────────────────┐
- │ **PullRequest** │   │ RepositoryComponent  │   │ Dependency [V6] (P)  │
- │ key: repo#pr    │   │ [V4] (P) ──┐         │   │ Commit [V4/V7] (P)   │
+ │ **PullRequest** │   │ RepositoryComponent  │   │ Dependency [V4.2] (P)  │
+ │ key: repo#pr    │   │ [V4] (P) ──┐         │   │ Commit [V4/V4.4] (P)   │
  └────────┬────────┘   └────────────┼─────────┘   └──────────────────────┘
           │                         │  both: projection; graph storage
           │                         └── revisit (ADR-002) ──┘
@@ -122,31 +122,31 @@ inside another row; `[n]` = stage of arrival.
  │ **Review / ReviewRun**                     │
  │  report id  slug-prN-YYYYMMDD-uuid6        │
  │  review_id  owner/repo#pr@sha12            │
- │  run: provider, model [V5], usage [Ph0]    │
+ │  run: provider, model [V4.0], usage [Ph0]    │
  └───────┬───────────────────────┬────────────┘
          │                       │
          ▼                       ▼
  ┌──────────────────┐   ┌────────────────────┐    ┌──────────────────────┐
- │ **Finding**      │   │ ContextArtifact    │    │ CIResult [V8] (P)    │
- │ key: repo#pr#fp  │   │ [V4] (artifact +   │    │ TestEvidence [V6] (P)│
- │ payload JSON     │   │  metadata row)     │    │ PolicyEvaluation[V6] │
+ │ **Finding**      │   │ ContextArtifact    │    │ CIResult [V4.6] (P)    │
+ │ key: repo#pr#fp  │   │ [V4] (artifact +   │    │ TestEvidence [V4.2] (P)│
+ │ payload JSON     │   │  metadata row)     │    │ PolicyEvaluation[V4.2] │
  └───┬──────┬───────┘   └────────────────────┘    └──────────────────────┘
      │      │
      │      ├─ FindingEvidence [V4] (P → table on query evidence)
-     │      ├─ Verification (fields → tiers rows [V6])
-     │      ├─ FindingRelation [V7]  ← anchors on identity v2 (V4-E05)
-     │      └─ SecurityFinding / ArchitectureFinding [V6]  (same table,
+     │      ├─ Verification (fields → tiers rows [V4.2])
+     │      ├─ FindingRelation [V4.4]  ← anchors on identity v2 (V4-E05)
+     │      └─ SecurityFinding / ArchitectureFinding [V4.2]  (same table,
      │           category + provenance — not separate stores)
      │
-     ├──────────────► **MemoryEntry** (repo scope today → hierarchy [V7],
+     ├──────────────► **MemoryEntry** (repo scope today → hierarchy [V4.4],
      │                authority per ADR-003; mute = decision subtype)
      ▼
- **Policy** (file @ base revision; engine [V6]; org scope [V9])
-     └─ PolicyEvaluation [V6]
+ **Policy** (file @ base revision; engine [V4.2]; org scope [V4.8])
+     └─ PolicyEvaluation [V4.2]
 
  Cross-cutting (no FK to core; attach by keys):
-   Provider/Model [V5] · Event [V8] · AuditRecord (now) · Plugin [V9/V10]
-   Team/User [V7] (group Repository/author — no individual rankings)
+   Provider/Model [V4.0] · Event [V4.6] · AuditRecord (now) · Plugin [V4.8/V4.10]
+   Team/User [V4.4] (group Repository/author — no individual rankings)
 ```
 
 ## 5. Identity and keys
@@ -185,7 +185,7 @@ inside another row; `[n]` = stage of arrival.
 | report id | `{repo-slug}-pr{n}-{YYYYMMDD}-{uuid6}` | `reporter.py: new_report_id` | append-only artifact key (String(140) PK) |
 | review state key | `owner/repo#pr` | PK of `review_state` / `ReviewStateRow` | one row per PR; `base_sha` + `last_reviewed_sha` (defect D1: populate `base_sha`) |
 | local runs | `pr_number == 0` → `is_persistable()` guard (`review_state.py`) | | local runs never collide with PR state |
-| org scope (V9) | derived `owner/` prefix → real Organization key | | additive migration; existing keys stay valid |
+| org scope (V4.8) | derived `owner/` prefix → real Organization key | | additive migration; existing keys stay valid |
 
 ### 5.3 Key strategy
 
@@ -212,7 +212,7 @@ lifecycle behavior before enabling (see hazard below).
 | `review_state` | retained while PR is open + 90 days after close | incremental-diff anchor |
 | Repo memory (human-authored) | retained indefinitely (subject to user deletion) | it is the project's knowledge; engine never auto-writes |
 | Audit records | 400 days minimum (compliance-shaped), append-only | accountability for token/policy/memory actions |
-| Event records (V8+) | 90 days hot (relational), then aggregate or drop | events are facts, not state |
+| Event records (V4.6+) | 90 days hot (relational), then aggregate or drop | events are facts, not state |
 | Context artifacts / raw CI logs / test evidence blobs | 30–90 days (proposed baseline) | large, re-derivable; provenance pointers keep the *record* even after blob expiry |
 | Telemetry records (Phase 0) | 90 days raw, aggregates longer | measurement, disposable |
 
@@ -228,11 +228,11 @@ and never cascades into `github_comment_id` history needed by open PRs.
 
 | Decision | Home | Trigger to revisit |
 |---|---|---|
-| payload-in-row for Finding/evidence/CI/test/policy-eval | relational (SQLite now / Postgres-later) | shipped query needs cross-row filter/aggregate (rule 2a) — first candidates: dashboard finding browser, V5 merge analytics |
+| payload-in-row for Finding/evidence/CI/test/policy-eval | relational (SQLite now / Postgres-later) | shipped query needs cross-row filter/aggregate (rule 2a) — first candidates: dashboard finding browser, V4.0 merge analytics |
 | artifacts (reports, context, logs) | object/artifact storage + metadata row | blob count/size exceeds single-node comfort (Phase C) |
 | `FindingRelation`, `RepositoryComponent` | relational; **graph revisit (ADR-002)** | a real traversal query (depth/impact walk) cannot be served relationally within latency budget |
-| full-text/faceted search | none until built | shipped search UX needs it (V9-era dashboard/API) |
-| event store | outbox/append-only → event store (V8, ADR-008) | consumer count/volume makes polling outbox insufficient |
+| full-text/faceted search | none until built | shipped search UX needs it (V4.8-era dashboard/API) |
+| event store | outbox/append-only → event store (V4.6, ADR-008) | consumer count/volume makes polling outbox insufficient |
 | Postgres promotion | SQLite now; `DATABASE_URL` already supported by `DbStorage` (ADR-011) | triggers B1/B2 in `TARGET_ARCHITECTURE.md` §6 |
 | telemetry/aggregates | append-only + aggregation tables | analytics queries load operational rows in Python (C9 pattern) |
 
@@ -247,8 +247,8 @@ Ground truth for the existing rows/payloads: `CURRENT_ARCHITECTURE.md` §7
 (storage model), §11 (C3/C4/C9 defects constraining identity and retention).
 
 Epics (`EPIC_BACKLOG.md`): **V4-E04** evidence → FindingEvidence; **V4-E05**
-identity → §5.1; **V7-E02** memory hierarchy → MemoryEntry; **V7-E03**
-relations → FindingRelation; **V8-E01** CI results → CIResult; **V9-E03**
+identity → §5.1; **V4.4-E02** memory hierarchy → MemoryEntry; **V4.4-E03**
+relations → FindingRelation; **V4.6-E01** CI results → CIResult; **V4.8-E03**
 public API → Organization/API scoping. Defect epics V3-E01..E06 gate Phase 0.
 
 Decisions (`ADR_INDEX.md`): **ADR-002** (repository graph as derived
@@ -264,6 +264,6 @@ shapes telemetry records; **ADR-015** (policy evaluation at engine, base
 revision) shapes the Policy/PolicyEvaluation homes.
 
 Retention §6 is a **proposed baseline**, not implemented behavior. Epic IDs
-(V4-E04, V4-E05, V7-E02, V7-E03, V8-E01, V9-E03, V3-E01..E06) are taken from
+(V4-E04, V4-E05, V4.4-E02, V4.4-E03, V4.6-E01, V4.8-E03, V3-E01..E06) are taken from
 the engagement brief — `EPIC_BACKLOG.md` was not yet in the tree when this
 document was written; verify the IDs against it when it lands.

@@ -70,3 +70,18 @@ context:
 # a typo can never silently activate it.
 feedback:
   enabled: false
+
+# Optional (V4.2-E04, opt-in, default OFF): architecture layers. Checked
+# deterministically against the repository import graph; findings cite the
+# offending import edge. Remove or set `enabled: false` to turn it off.
+# architecture:
+#   enabled: true
+#   severity: medium          # info | low | medium | high
+#   max_findings: 20
+#   layers:
+#     - name: api
+#       paths: ["src/api/**"]
+#     - name: domain
+#       paths: ["src/domain/**"]
+#   allow:                    # importer layer -> layers it may import
+#     api: [domain]

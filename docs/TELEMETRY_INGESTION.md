@@ -37,7 +37,7 @@ The response and the audit log never echo payload content.
   `X-Dashboard-Token` every other dashboard write uses.
 * There is **no network-grade authentication**: no per-client identity, no
   request signing, no replay protection, no TLS termination in the app. That is
-  deferred to V5 (ships publicly as v4.5.0) and must not be assumed.
+  deferred to a later V4 stage (ships publicly as v4.5.0) and must not be assumed.
 * Do not expose this route, or the dashboard, to an untrusted network.
 * The token holder *asserts* token counts, durations and the cost estimate. The
   server can bound and sanitize them but cannot verify them.

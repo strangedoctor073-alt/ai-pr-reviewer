@@ -67,21 +67,21 @@ non-blocking · **weekly** = scheduled, non-blocking, costlier models ·
 |---|---|---|---|---|
 | 1 | Unit | exists (Phase 0) | CI | yes |
 | 2 | Integration | exists (Phase 0), formalized | CI | yes |
-| 3 | GitHub contract | Phase 0 (recorded) / V8 (live) | CI + nightly live | CI yes |
-| 4 | Provider contract | Phase 0 (fake servers) / V5 (live) | CI + weekly live | CI yes |
+| 3 | GitHub contract | Phase 0 (recorded) / V4.6 (live) | CI + nightly live | CI yes |
+| 4 | Provider contract | Phase 0 (fake servers) / V4.0 (live) | CI + weekly live | CI yes |
 | 5 | Security | exists (Phase 0), grows every stage | CI | yes |
-| 6 | Prompt-injection | Phase 0 corpus → V6-E08 | CI (static) + nightly (AI) | CI yes (static part) |
+| 6 | Prompt-injection | Phase 0 corpus → V4.2-E08 | CI (static) + nightly (AI) | CI yes (static part) |
 | 7 | Regression corpus | V3-E03 | CI | yes |
 | 8 | Known-bug corpus | V3-E03 | CI | yes |
-| 9 | False-positive corpus | V3-E03 → V5-E08 | CI (static) + nightly (AI) | CI yes (static part) |
-| 10 | False-negative corpus | V3-E03 → V6-E08 | CI (static) + weekly (AI) | CI yes (static part) |
+| 9 | False-positive corpus | V3-E03 → V4.0-E08 | CI (static) + nightly (AI) | CI yes (static part) |
+| 10 | False-negative corpus | V3-E03 → V4.2-E08 | CI (static) + weekly (AI) | CI yes (static part) |
 | 11 | Model evaluation | V3-E03 | nightly/weekly, **never per-PR** | no (trend gate, §5.4) |
-| 12 | Review-quality benchmark | V3-E03 + V5-E08 | weekly + manual | no (trend gate) |
-| 13 | Performance | Phase 0 (smoke) → V5 (budgets) | CI smoke + nightly profile | smoke yes (proposed) |
-| 14 | Load | V9 (C9 single-worker ceiling) | manual + pre-release | no |
-| 15 | Failure-injection | Phase 0 (in-process) → V8 (network) | CI + nightly | CI yes |
-| 16 | Migration | Phase 0 (schema-copy) → V9 (rehearsal) | CI + manual rehearsal | CI yes |
-| 17 | End-to-end GitHub | V8 (real Action run) | nightly/manual on a fixture repo | no |
+| 12 | Review-quality benchmark | V3-E03 + V4.0-E08 | weekly + manual | no (trend gate) |
+| 13 | Performance | Phase 0 (smoke) → V4.0 (budgets) | CI smoke + nightly profile | smoke yes (proposed) |
+| 14 | Load | V4.8 (C9 single-worker ceiling) | manual + pre-release | no |
+| 15 | Failure-injection | Phase 0 (in-process) → V4.6 (network) | CI + nightly | CI yes |
+| 16 | Migration | Phase 0 (schema-copy) → V4.8 (rehearsal) | CI + manual rehearsal | CI yes |
+| 17 | End-to-end GitHub | V4.6 (real Action run) | nightly/manual on a fixture repo | no |
 
 Cost rule (hard): **layers 11, 12, and the AI portions of 6/9/10 spend real
 API tokens and must never run on every PR.** They run from a scheduled workflow
@@ -104,8 +104,8 @@ with a fixed token budget fed by V3-E02 telemetry.
 - **Exercises:** `ReviewOrchestrator.run` with fake provider + fake GitHub +
   temp SQLite (`tests/test_pipeline.py` already builds fixtures via
   `demo/make_fixtures`).
-- **Lands / runs:** exists; CI. Grow with every new pipeline stage (V5 fan-out,
-  V6 security branch).
+- **Lands / runs:** exists; CI. Grow with every new pipeline stage (V4.0 fan-out,
+  V4.2 security branch).
 - **Hermetic:** fake provider objects, `tmp_path` storage, monkeypatched
   `github_client`.
 
@@ -117,7 +117,7 @@ with a fixed token budget fed by V3-E02 telemetry.
   **recorded HTTP fixtures** (JSON cassettes of real responses, sanitized).
 - **Lands:** Phase 0 — cassette recorder + replay harness (likely module:
   `tests/contract/github_cassettes.py` or `eval/harness/`); live
-  contract-smoke (one read-only API call against a public fixture repo) from V8.
+  contract-smoke (one read-only API call against a public fixture repo) from V4.6.
 - **Runs:** CI replays cassettes (free); nightly live smoke against a dedicated
   public test repository (rate-limit aware — C8 has no `X-RateLimit-*`
   handling yet).
@@ -133,7 +133,7 @@ with a fixed token budget fed by V3-E02 telemetry.
   format, including usage fields, streaming edge cases, malformed JSON,
   429/5xx).
 - **Lands:** Phase 0 (stub servers from today's hand-written `FakeResponse`
-  set); live contract smoke (one cheapest-model call per provider) from V5
+  set); live contract smoke (one cheapest-model call per provider) from V4.0
   alongside the capability registry.
 - **Runs:** CI (stubs, free); weekly live smoke with a hard token budget.
 - **Hermetic:** stubs are the source of truth for CI; live smoke exists only to
@@ -147,8 +147,8 @@ with a fixed token budget fed by V3-E02 telemetry.
   no retired model IDs (already enforced by
   `tests/test_release_hardening.py::test_no_retired_model_ids_are_hardcoded_in_the_engine`).
 - **Lands / runs:** exists; CI. **New invariant added at every stage that adds
-  an untrusted input surface** (V4 index, V5 agents, V7 memory writes, V8 CI
-  content, V9 webhooks, V10 plugins — `MASTER_VISION.md` §5-T).
+  an untrusted input surface** (V4 index, V4.0 agents, V4.4 memory writes, V4.6 CI
+  content, V4.8 webhooks, V4.10 plugins — `MASTER_VISION.md` §5-T).
 - **Hermetic:** pure functions + TestClient.
 
 ### L6 · Prompt-injection
@@ -160,7 +160,7 @@ with a fixed token budget fed by V3-E02 telemetry.
   cannot set lifecycle fields.
 - **Lands:** static/deterministic half in Phase 0; behavioral half (did the
   model *obey* an injection?) requires V3-E03 replay infrastructure; adversarial
-  agent-level tests at V5-E08.
+  agent-level tests at V4.0-E08.
 - **Runs:** CI (static); nightly for behavioral runs (AI tokens).
 - **Hermetic:** replayed model responses + stubs; no live model needed for the
   deterministic assertions.
@@ -196,7 +196,7 @@ with a fixed token budget fed by V3-E02 telemetry.
   removal, generated code, test fixtures, intentional `# type: ignore`,
   deliberate `except: pass` in tests, feature flags) with
   `expected: no_findings` labels; scored against static + AI engines.
-- **Lands:** V3-E03 (static first), V5-E08 (per-agent and council FP rate).
+- **Lands:** V3-E03 (static first), V4.0-E08 (per-agent and council FP rate).
 - **Runs:** CI static portion; nightly AI portion (tokens).
 - **Hermetic:** corpus is synthetic (no real PRs — CONTRIBUTING.md:10); AI runs
   use recorded/canned responses for CI, live models only in scheduled runs.
@@ -206,7 +206,7 @@ with a fixed token budget fed by V3-E02 telemetry.
 - **Exercises:** synthetic code with planted issues (injection sinks, unbounded
   loops, obvious race, missing null check) each with
   `expected_findings: [{file, line_hint, category, severity_min}]`.
-- **Lands:** V3-E03 (general), **V6-E08 security evaluation corpus** (security
+- **Lands:** V3-E03 (general), **V4.2-E08 security evaluation corpus** (security
   class: OWASP-style seeded vulnerabilities, detection recall is the headline
   metric).
 - **Runs:** CI static; weekly for AI (tokens budgeted).
@@ -215,11 +215,11 @@ with a fixed token budget fed by V3-E02 telemetry.
 
 ### L11 · Model evaluation
 - **Purpose:** compare models/modes/review depths on the same corpus before
-  changing defaults (feeds V5-E04 adaptive depth, V5-E07 cost arbitration).
+  changing defaults (feeds V4.0-E04 adaptive depth, V4.0-E07 cost arbitration).
 - **Exercises:** whole corpus run through a specific `(provider, model,
   review_mode, batch strategy)` tuple; outputs scored by deterministic matcher
   (L9/L10 labels) — judge models are *not* required for the core metrics.
-- **Lands:** V3-E03 harness; model registry sweeps from V5 (capability
+- **Lands:** V3-E03 harness; model registry sweeps from V4.0 (capability
   registry).
 - **Runs:** **nightly/weekly scheduled workflow with a fixed token budget;
   never on PRs.** Manual runs via `python -m eval.harness --layer model
@@ -236,7 +236,7 @@ with a fixed token budget fed by V3-E02 telemetry.
   scored by (a) deterministic measures (severity ordering vs planted severity,
   cap behavior D5, comment correctness), (b) LLM-judge with a fixed rubric,
   (c) human spot-check sample (monthly, manual).
-- **Lands:** V3-E03 (deterministic scores) + V5-E08 (multi-agent variants).
+- **Lands:** V3-E03 (deterministic scores) + V4.0-E08 (multi-agent variants).
 - **Runs:** weekly (judge tokens) + manual before model/default changes.
 - **Hermetic:** input hermetic; judge runs are budgeted and their prompts are
   versioned in-repo. Judge disagreement with humans is itself tracked (judge
@@ -249,7 +249,7 @@ with a fixed token budget fed by V3-E02 telemetry.
   (small/medium/large), dashboard query latency with seeded row counts
   (1k/10k/100k — C9 says dashboard reads are O(all) rows).
 - **Lands:** Phase 0 smoke (assert stage budgets on synthetic PRs, provider
-  stubbed so only our code is measured); V5 adds per-batch/per-agent latency
+  stubbed so only our code is measured); V4.0 adds per-batch/per-agent latency
   telemetry (V3-E02 fields).
 - **Runs:** CI smoke (thresholds **proposed baseline**: e.g. pipeline (stubbed)
   p95 < 5 s on a medium synthetic PR; dashboard `/api/metrics` < 500 ms at 10k
@@ -264,7 +264,7 @@ with a fixed token budget fed by V3-E02 telemetry.
 - **Exercises:** N concurrent API clients against a seeded dashboard; M
   sequential engine runs against one SQLite file; memory/fd growth (C9:
   connections opened per call, never closed).
-- **Lands:** V9 (with `V9-E07` observability platform and storage evolution,
+- **Lands:** V4.8 (with `V4.8-E07` observability platform and storage evolution,
   ADR-011) — nothing to load-test meaningfully before then.
 - **Runs:** manual + pre-release; not CI.
 - **Hermetic:** local process only, no external services; seeds are synthetic.
@@ -276,9 +276,9 @@ with a fixed token budget fed by V3-E02 telemetry.
   mid-stream disconnects, malformed JSON, circuit open/half-open races; GitHub
   500/timeout on each endpoint (`get_pr`, `compare_commits`, `post_review`);
   storage disk-full / locked DB; dashboard unreachable (stateless degrade);
-  later (V8): network-level fault proxy for batch worker paths.
+  later (V4.6): network-level fault proxy for batch worker paths.
 - **Lands:** Phase 0 (in-process injection — most of it exists); network-level
-  variants as V8 event paths land.
+  variants as V4.6 event paths land.
 - **Runs:** CI (in-process); nightly for proxy-based variants.
 - **Hermetic:** fake servers and monkeypatched transports; fault schedules are
   seeded and deterministic.
@@ -292,7 +292,7 @@ with a fixed token budget fed by V3-E02 telemetry.
   older release; report JSON (`review-report.json`) accepted by newer dashboard
   (forward compat) and vice versa (documented limits).
 - **Lands:** Phase 0 (golden schema files + migration test harness, cheap);
-  full rehearsal-on-copy at V9 (ADR-011 storage evolution).
+  full rehearsal-on-copy at V4.8 (ADR-011 storage evolution).
 - **Runs:** CI for golden-file migrations; manual for rehearsal.
 - **Hermetic:** temp SQLite files; golden copies committed (no real data —
   CONTRIBUTING.md:10).
@@ -305,7 +305,7 @@ with a fixed token budget fed by V3-E02 telemetry.
   open PR → run the Action (`--mock`/static mode by default; AI mode weekly
   with a repo secret key) → assert review posted, inline comment anchored,
   state markers, incremental re-run on second push.
-- **Lands:** V8 (CI/release intelligence stage owns Actions maturity); a
+- **Lands:** V4.6 (CI/release intelligence stage owns Actions maturity); a
   manual `workflow_dispatch` smoke can exist earlier if someone feels brave —
   not a Phase 0 commitment.
 - **Runs:** nightly on `--mock` (free) + weekly with a real provider key
@@ -327,7 +327,7 @@ inputs are missing — "no data" beats a fabricated number (vision §3.1).
 | Metric | Numerator | Denominator | Source | Proposed baseline |
 |---|---|---|---|---|
 | **Precision** | corpus findings posted by the engine that match an `expected_findings` label (file + line within tolerance + category overlap) | all findings the engine posted on corpus cases | harness L9/L10/L11 | ≥ 0.70 on synthetic corpus — **proposed baseline, uncalibrated** |
-| **Recall** | expected labels matched by a posted finding | all expected labels in corpus cases | harness L10/L11 | ≥ 0.75 general / ≥ 0.60 security (V6-E08) — **proposed baselines** |
+| **Recall** | expected labels matched by a posted finding | all expected labels in corpus cases | harness L10/L11 | ≥ 0.75 general / ≥ 0.60 security (V4.2-E08) — **proposed baselines** |
 | **False-positive rate** (project definition) | posted findings adjudicated wrong (corpus mismatch, or human "down" feedback, or muted as bogus) | findings actually posted | harness + dashboard feedback (`POST /api/findings/{fp}/feedback`) | ≤ 0.15 — **proposed baseline**. Note: classic FP/(FP+TN) is *undefined* for us — true negatives (correctly not-reported issues) cannot be enumerated; do not cite "FPR" without this definition |
 | **Verification accuracy** | findings whose `verification_status` matches manual adjudication of the current diff | findings that went through `verify_findings` | harness replay + human sample | ≥ 0.95; **premature-resolved rate** (D2 class) ≤ 0.01 — **proposed baselines** |
 | **Duplicate rate** | posted comments sharing a fingerprint, or (cross-engine) a normalized title+file pair already posted this run | comments posted | telemetry/report (`github_sync` counters) | ≤ 0.02 — **proposed baseline**; current cross-engine dedup gap is C4, expect worse pre-V4-E05 |
@@ -481,7 +481,7 @@ the §4 table is their design intent.
 
 ## 6. Extending the harness
 
-### 6.1 Multi-agent (V5, V5-E08)
+### 6.1 Multi-agent (V4.0, V4.0-E08)
 - **Per-agent corpora:** each specialist (security, correctness, style, perf…)
   gets its own recall expectation — a security agent scored against the style
   corpus is meaningless. `case.yaml.engine_matrix` becomes `agent_matrix`.
@@ -489,15 +489,15 @@ the §4 table is their design intent.
   the right agent; requires provenance fields, V4-E04/E05 / defect C3),
   *merge precision* (dedup correctness across agents — C4 fingerprints are
   title-based and documented to not dedup across engines), *fan-out cost*
-  (tokens per agent vs quality delta → feeds V5-E07 arbitration).
+  (tokens per agent vs quality delta → feeds V4.0-E07 arbitration).
 - **Budget-ablation runs:** same corpus under depth/budget variants to prove
-  V5-E04 adaptive depth loses nothing measurable on low-risk PRs
+  V4.0-E04 adaptive depth loses nothing measurable on low-risk PRs
   (**proposed baseline**: quality delta ≤ 3 pp — uncalibrated).
 - **Concurrency safety:** failure-injection L15 gains parallel-agent fault
   schedules (C5: breakers are process-global and sequential-assumption — tests
-  must expose that before V5 ships).
+  must expose that before V4.0 ships).
 
-### 6.2 Security engine (V6-E08)
+### 6.2 Security engine (V4.2-E08)
 - **Security evaluation corpus:** hand-authored seeded vulnerabilities across
   the agreed classes (injection, path traversal, SSRF, authz bypass, secrets,
   unsafe deserialization, race, crypto misuse), each with `severity_min` and
@@ -505,14 +505,14 @@ the §4 table is their design intent.
   secret but is a test placeholder) to score precision, not just recall.
 - **Headline metrics:** security recall (§4 proposed baseline ≥ 0.60),
   security FP rate on benign twins, redaction leak rate (**hard gate: 0**).
-- **Every new untrusted surface adds injection cases** (V4 index rows, V5
-  agent-to-agent messages, V7 ingested history, V8 CI logs, V9 webhook payloads,
-  V10 plugin output) — the corpus is the security regression contract.
+- **Every new untrusted surface adds injection cases** (V4 index rows, V4.0
+  agent-to-agent messages, V4.4 ingested history, V4.6 CI logs, V4.8 webhook payloads,
+  V4.10 plugin output) — the corpus is the security regression contract.
 - **Adversarial model runs** (weekly, budgeted): live models seeded with
   maximally hostile diffs; scored on lifecycle-field integrity (pipeline-owned
   fields must never move — `Finding.from_untrusted_dict`) and fence survival.
 
-### 6.3 Memory poisoning & memory security (V7-E07)
+### 6.3 Memory poisoning & memory security (V4.4-E07)
 - **Poisoning corpus:** memory notes containing injection patterns, secrets, and
   authority-escalation attempts (e.g. a note claiming `authority=human` for an
   AI-observed pattern). Scored on: injection screening catches the pattern,
@@ -534,7 +534,7 @@ the §4 table is their design intent.
 - **Budget-exhaustion test:** a repo with a pathological import graph (deep
   chains, circular refs) must terminate within budget caps (V4-E08).
 
-### 6.5 Finding relations (V7-E03)
+### 6.5 Finding relations (V4.4-E03)
 - **Relations corpus:** fixture finding sets with known relations (duplicate,
   caused_by, fixed_by, regression_of). Scored on: relation precision/recall.
 - **Identity continuity test:** a finding that moves files or changes line
@@ -543,7 +543,7 @@ the §4 table is their design intent.
 - **Regression detection test:** a previously-resolved finding that reappears
   must be classified as `regression_of` the original, not as a new finding.
 
-### 6.6 Team/repository analytics (V7-E05)
+### 6.6 Team/repository analytics (V4.4-E05)
 - **No-individual-rankings invariant:** a code-level test that no analytics
   query groups by author or produces per-author scores. This is a **hard gate**
   — the invariant is architectural, not aspirational.
@@ -552,7 +552,7 @@ the §4 table is their design intent.
 - **Privacy test:** analytics output must not contain individual author names
   or identifiers (only aggregate counts and trends).
 
-### 6.7 Provider failover for capability registry (V5-E05)
+### 6.7 Provider failover for capability registry (V4.0-E05)
 - **Routing fail-closed test:** if the registry cannot select a provider for a
   task (no capability match, all breakers open), the router falls back to static
   with honest attribution — never to an error.
@@ -572,13 +572,13 @@ the §4 table is their design intent.
 Phase 0 (V3.x)   L7/L8/L9/L10 static scaffolding + L16 golden schemas + L15 in-process
                  (mostly exists) ──► V3-E03 harness core ──► V3-E02 telemetry fields
 V4               corpus grows with repository-intelligence features; L3 cassettes
-V5               L11/L12 AI evaluation cadence starts; V5-E08; V5-E07 cost scoring;
+V4.0               L11/L12 AI evaluation cadence starts; V4.0-E08; V4.0-E07 cost scoring;
                  L13 per-agent latency budgets
-V6               V6-E08 security corpus + adversarial runs; injection corpus expansion
-V7               memory-write evaluation (authority tests, ADR-003) as corpus layer
-V8               L17 e2e on fixture repo; L3/L4 live smokes promoted; L15 network faults
-V9               L14 load; L16 rehearsal; V9-E07 dashboards the metric trends
-V10              plugin conformance tests (ADR-009) become an 18th layer
+V4.2               V4.2-E08 security corpus + adversarial runs; injection corpus expansion
+V4.4               memory-write evaluation (authority tests, ADR-003) as corpus layer
+V4.6               L17 e2e on fixture repo; L3/L4 live smokes promoted; L15 network faults
+V4.8               L14 load; L16 rehearsal; V4.8-E07 dashboards the metric trends
+V4.10              plugin conformance tests (ADR-009) become an 18th layer
 ```
 
 No layer may ship without: a hermetic CI path (even if the interesting part is
@@ -620,5 +620,5 @@ Feature → metric mapping of record lives in the V4 ticket manifest
 ### Cross-references
 Cost of running all this: `COST_TOKEN_ARCHITECTURE.md` (§6 stage budgets) ·
 Decisions: `ADR_INDEX.md` (ADR-016 gate strategy, ADR-014 telemetry) ·
-Epics: `EPIC_BACKLOG.md` (V3-E02, V3-E03, V5-E07, V5-E08, V6-E08, V9-E07) ·
+Epics: `EPIC_BACKLOG.md` (V3-E02, V3-E03, V4.0-E07, V4.0-E08, V4.2-E08, V4.8-E07) ·
 What we refuse to build first: `DO_NOT_BUILD_YET.md` · Order: `MASTER_ROADMAP.md`

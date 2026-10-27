@@ -17,7 +17,7 @@
 | 2 | `CURRENT_ARCHITECTURE.md` | ✅ present | 311 |
 | 3 | `TARGET_ARCHITECTURE.md` | ✅ present | 393 |
 | 4 | `ARCHITECTURE_EVOLUTION.md` | ✅ present | 175 |
-| 5 | `V4_V10_ROADMAP.md` | ✅ present | 1,364 |
+| 5 | `V4_STAGES_ROADMAP.md` | ✅ present | 1,364 |
 | 6 | `MASTER_ROADMAP.md` | ✅ present | 153 |
 | 7 | `EPIC_BACKLOG.md` | ✅ present | 1,554 |
 | 8 | `DEPENDENCY_GRAPH.md` | ❌ **MISSING** | — |
@@ -45,7 +45,7 @@ All four were assigned to background drafting agents that failed with provider r
 
 | Dimension | Result |
 |---|---|
-| V4–V10 stage structure | ✅ Consistent (minor naming drift on V8) |
+| V4–V4.10 stage structure | ✅ Consistent (minor naming drift on V4.6) |
 | Epic ID integrity (57-epic scheme) | ✅ Clean — no non-canonical IDs, no duplicates, all 57 referenced |
 | Dependency integrity (hard/soft graph) | ✅ No cycles, no impossible orderings; ⚠ systematic soft→hard elevation tension |
 | Current architecture accuracy | ⚠ 3 factual errors, 4 imprecisions in `CURRENT_ARCHITECTURE.md` |
@@ -63,26 +63,26 @@ All four were assigned to background drafting agents that failed with provider r
 
 ---
 
-## 3. V4–V10 Consistency
+## 3. V4–V4.10 Consistency
 
 ### 3.1 Stage naming
 
-| Stage | `EPIC_BACKLOG.md` | `V4_V10_ROADMAP.md` | `MASTER_ROADMAP.md` | Consistent? |
+| Stage | `EPIC_BACKLOG.md` | `V4_STAGES_ROADMAP.md` | `MASTER_ROADMAP.md` | Consistent? |
 |---|---|---|---|---|
 | Phase 0 | "V3.x" | "V3.x" | "Foundation (Phase 0)" | ✅ |
 | V4 | Deep repository intelligence | Deep repository intelligence | Core intelligence | ✅ |
-| V5 | Multi-agent engineering review | Multi-agent engineering review | Specialist review | ✅ |
-| V6 | Security + testing + architecture intelligence | Security + testing + architecture intelligence | Verification intelligence | ✅ |
-| V7 | Historical / project / team intelligence | Historical / project / team intelligence | Historical intelligence | ✅ |
-| V8 | **CI / release / incident intelligence** | **CI/CD + release / incident intelligence** | Pipeline intelligence | ⚠ naming drift |
-| V9 | Organization platform | Organization platform | Organization platform | ✅ |
-| V10 | Ecosystem / platform | Ecosystem / platform | Ecosystem | ✅ |
+| V4.0 | Multi-agent engineering review | Multi-agent engineering review | Specialist review | ✅ |
+| V4.2 | Security + testing + architecture intelligence | Security + testing + architecture intelligence | Verification intelligence | ✅ |
+| V4.4 | Historical / project / team intelligence | Historical / project / team intelligence | Historical intelligence | ✅ |
+| V4.6 | **CI / release / incident intelligence** | **CI/CD + release / incident intelligence** | Pipeline intelligence | ⚠ naming drift |
+| V4.8 | Organization platform | Organization platform | Organization platform | ✅ |
+| V4.10 | Ecosystem / platform | Ecosystem / platform | Ecosystem | ✅ |
 
-**Finding STAGE-01 (LOW):** V8 stage name differs — "CI / release" vs "CI/CD + release". The canonical structure uses "CI/CD + release + incident intelligence". `EPIC_BACKLOG.md` drops the "CD".
+**Finding STAGE-01 (LOW):** V4.6 stage name differs — "CI / release" vs "CI/CD + release". The canonical structure uses "CI/CD + release + incident intelligence". `EPIC_BACKLOG.md` drops the "CD".
 
 ### 3.2 Capability placement
 
-All major capabilities from `MASTER_VISION.md` §5 (A–AK) are assigned to stages consistently across `V4_V10_ROADMAP.md`, `MASTER_ROADMAP.md`, and `EPIC_BACKLOG.md`. No capability appears in conflicting stages. The `V4_V10_ROADMAP.md` §0 "generation boundary rationale" documents 8 deliberate deviations from the naive V4–V10 hypothesis; all 8 are consistently reflected in the other two documents.
+All major capabilities from `MASTER_VISION.md` §5 (A–AK) are assigned to stages consistently across `V4_STAGES_ROADMAP.md`, `MASTER_ROADMAP.md`, and `EPIC_BACKLOG.md`. No capability appears in conflicting stages. The `V4_STAGES_ROADMAP.md` §0 "generation boundary rationale" documents 8 deliberate deviations from the naive V4–V4.10 hypothesis; all 8 are consistently reflected in the other two documents.
 
 ---
 
@@ -90,7 +90,7 @@ All major capabilities from `MASTER_VISION.md` §5 (A–AK) are assigned to stag
 
 ### 4.1 Canonical scheme verification
 
-- **57 epics** in canonical scheme: V3 (6) + V4 (8) + V5 (8) + V6 (8) + V7 (7) + V8 (7) + V9 (7) + V10 (6).
+- **57 epics** in canonical scheme: V3 (6) + V4 (8) + V4.0 (8) + V4.2 (8) + V4.4 (7) + V4.6 (7) + V4.8 (7) + V4.10 (6).
 - **Non-canonical IDs found:** 0
 - **Canonical IDs never referenced:** 0
 - **Duplicate epic headings in `EPIC_BACKLOG.md`:** 0 (71 headings = 57 epic entries in §2 + 14 "— tickets" breakdown headings in §3 — intentional structure, not duplication)
@@ -99,7 +99,7 @@ All major capabilities from `MASTER_VISION.md` §5 (A–AK) are assigned to stag
 
 ### 4.2 Epic ID references per document
 
-All 12 existing documents reference epic IDs from the canonical set. `EPIC_BACKLOG.md` and `V4_V10_ROADMAP.md` are the most complete (all 57 referenced). `MASTER_VISION.md` references 9. `COST_TOKEN_ARCHITECTURE.md` references 5. No document invents an ID outside the scheme.
+All 12 existing documents reference epic IDs from the canonical set. `EPIC_BACKLOG.md` and `V4_STAGES_ROADMAP.md` are the most complete (all 57 referenced). `MASTER_VISION.md` references 9. `COST_TOKEN_ARCHITECTURE.md` references 5. No document invents an ID outside the scheme.
 
 **Verdict:** Epic ID integrity is **clean**.
 
@@ -109,7 +109,7 @@ All 12 existing documents reference epic IDs from the canonical set. `EPIC_BACKL
 
 ### 5.1 Hard-dependency graph analysis
 
-Extracted all 57 epic dependency declarations from `EPIC_BACKLOG.md` and cross-checked against `V4_V10_ROADMAP.md` "Prerequisites & dependencies" and `MASTER_ROADMAP.md` "Key dependencies" columns.
+Extracted all 57 epic dependency declarations from `EPIC_BACKLOG.md` and cross-checked against `V4_STAGES_ROADMAP.md` "Prerequisites & dependencies" and `MASTER_ROADMAP.md` "Key dependencies" columns.
 
 - **Circular dependencies:** 0
 - **Impossible orderings** (earlier-stage epic hard-depends on later-stage epic): 0
@@ -117,26 +117,26 @@ Extracted all 57 epic dependency declarations from `EPIC_BACKLOG.md` and cross-c
 
 ### 5.2 Findings
 
-**Finding DEP-01 (MEDIUM):** Systematic soft→hard elevation tension. `V4_V10_ROADMAP.md` and `MASTER_ROADMAP.md` consistently elevate `EPIC_BACKLOG.md` *soft* dependencies to stage-level *hard* dependencies:
+**Finding DEP-01 (MEDIUM):** Systematic soft→hard elevation tension. `V4_STAGES_ROADMAP.md` and `MASTER_ROADMAP.md` consistently elevate `EPIC_BACKLOG.md` *soft* dependencies to stage-level *hard* dependencies:
 
 | Epic | EPIC_BACKLOG says | Roadmaps say | Tension |
 |---|---|---|---|
 | V4 stage | V3-E02 soft, V3-E03 soft | V3-E02 hard, V3-E03 hard | Roadmap stricter |
-| V5 stage | V3-E03 not listed on V5-E01 | V3-E03 hard | Roadmap stricter |
-| V6 stage | V4-E01 soft (V6-E01), V5-E02 soft | V4-E01 hard, V5-E02 hard | Roadmap stricter |
-| V8 stage | V6-E03 soft, V6-E07 soft | V6-E03 hard, V6-E07 hard | Roadmap stricter |
+| V4.0 stage | V3-E03 not listed on V4.0-E01 | V3-E03 hard | Roadmap stricter |
+| V4.2 stage | V4-E01 soft (V4.2-E01), V4.0-E02 soft | V4-E01 hard, V4.0-E02 hard | Roadmap stricter |
+| V4.6 stage | V4.2-E03 soft, V4.2-E07 soft | V4.2-E03 hard, V4.2-E07 hard | Roadmap stricter |
 
 This is not a logical contradiction (hard is stronger than soft), but it means `EPIC_BACKLOG.md` understates prerequisites. An implementer working only from the backlog would not know these are gating.
 
-**Finding DEP-02 (MEDIUM):** `V5-E01` (fan-out orchestration) does not list `V3-E03` (evaluation harness) as a dependency — neither hard nor soft. But `V4_V10_ROADMAP.md` V5 prerequisites say "Hard: V3-E02 telemetry + V3-E03 harness" and `V5-E08` hard-depends on `V3-E03`. The harness is a prerequisite for the *stage* but not for the *epic* that creates the multi-agent output the harness must measure.
+**Finding DEP-02 (MEDIUM):** `V4.0-E01` (fan-out orchestration) does not list `V3-E03` (evaluation harness) as a dependency — neither hard nor soft. But `V4_STAGES_ROADMAP.md` V4.0 prerequisites say "Hard: V3-E02 telemetry + V3-E03 harness" and `V4.0-E08` hard-depends on `V3-E03`. The harness is a prerequisite for the *stage* but not for the *epic* that creates the multi-agent output the harness must measure.
 
-**Finding DEP-03 (MEDIUM):** `V7-E02` (memory hierarchy) does not list `V4-E05` (finding identity v2) as a dependency. Memory entries reference findings by fingerprint; identity v2 changes the fingerprint model. Soft dependency on `V4-E04` (provenance) is listed but not `V4-E05`.
+**Finding DEP-03 (MEDIUM):** `V4.4-E02` (memory hierarchy) does not list `V4-E05` (finding identity v2) as a dependency. Memory entries reference findings by fingerprint; identity v2 changes the fingerprint model. Soft dependency on `V4-E04` (provenance) is listed but not `V4-E05`.
 
-**Finding DEP-04 (LOW):** `V6-E03` (test intelligence) lists `V8-E02` as a soft dependency, but `V8-E02` is in a later stage. This is acceptable for a soft dependency but should be noted as a forward reference.
+**Finding DEP-04 (LOW):** `V4.2-E03` (test intelligence) lists `V4.6-E02` as a soft dependency, but `V4.6-E02` is in a later stage. This is acceptable for a soft dependency but should be noted as a forward reference.
 
 ### 5.3 Cross-document dependency consistency
 
-`V4_V10_ROADMAP.md` and `MASTER_ROADMAP.md` are fully consistent with each other on dependencies. The only tension is with `EPIC_BACKLOG.md` (see DEP-01). `MIGRATION_PLAN.md` (missing) would normally be the fifth dependency cross-check source.
+`V4_STAGES_ROADMAP.md` and `MASTER_ROADMAP.md` are fully consistent with each other on dependencies. The only tension is with `EPIC_BACKLOG.md` (see DEP-01). `MIGRATION_PLAN.md` (missing) would normally be the fifth dependency cross-check source.
 
 ---
 
@@ -185,13 +185,13 @@ The following major claims in `CURRENT_ARCHITECTURE.md` were verified as accurat
 
 | Defect | Docs mentioning it | Consistent? |
 |---|---|---|
-| D1 (base_sha) | CURRENT_ARCHITECTURE, EPIC_BACKLOG, MASTER_ROADMAP, V4_V10_ROADMAP, ADR_INDEX, ARCHITECTURE_EVOLUTION, DO_NOT_BUILD_YET, TESTING_EVALUATION_PLAN, TARGET_ARCHITECTURE, DATA_MODEL | ✅ |
-| D2 (capped verification) | CURRENT_ARCHITECTURE, EPIC_BACKLOG, MASTER_ROADMAP, V4_V10_ROADMAP, ADR_INDEX, ARCHITECTURE_EVOLUTION, DO_NOT_BUILD_YET, TESTING_EVALUATION_PLAN | ✅ |
-| D3 (below-threshold dropped) | CURRENT_ARCHITECTURE, EPIC_BACKLOG, MASTER_ROADMAP, V4_V10_ROADMAP, ADR_INDEX, ARCHITECTURE_EVOLUTION, TESTING_EVALUATION_PLAN | ✅ |
-| D4 (max_comments caps report) | CURRENT_ARCHITECTURE, EPIC_BACKLOG, MASTER_ROADMAP, V4_V10_ROADMAP, ADR_INDEX, ARCHITECTURE_EVOLUTION, TESTING_EVALUATION_PLAN | ✅ |
-| D5 (no severity sort) | CURRENT_ARCHITECTURE, EPIC_BACKLOG, MASTER_ROADMAP, V4_V10_ROADMAP, ARCHITECTURE_EVOLUTION, TESTING_EVALUATION_PLAN | ✅ |
-| D6 (config crash) | CURRENT_ARCHITECTURE, EPIC_BACKLOG, MASTER_ROADMAP, V4_V10_ROADMAP, ADR_INDEX, ARCHITECTURE_EVOLUTION, TESTING_EVALUATION_PLAN | ⚠ see ARCH-03 |
-| D7 (mute not idempotent) | CURRENT_ARCHITECTURE, EPIC_BACKLOG, MASTER_ROADMAP, V4_V10_ROADMAP, ADR_INDEX, ARCHITECTURE_EVOLUTION, TESTING_EVALUATION_PLAN | ✅ |
+| D1 (base_sha) | CURRENT_ARCHITECTURE, EPIC_BACKLOG, MASTER_ROADMAP, V4_STAGES_ROADMAP, ADR_INDEX, ARCHITECTURE_EVOLUTION, DO_NOT_BUILD_YET, TESTING_EVALUATION_PLAN, TARGET_ARCHITECTURE, DATA_MODEL | ✅ |
+| D2 (capped verification) | CURRENT_ARCHITECTURE, EPIC_BACKLOG, MASTER_ROADMAP, V4_STAGES_ROADMAP, ADR_INDEX, ARCHITECTURE_EVOLUTION, DO_NOT_BUILD_YET, TESTING_EVALUATION_PLAN | ✅ |
+| D3 (below-threshold dropped) | CURRENT_ARCHITECTURE, EPIC_BACKLOG, MASTER_ROADMAP, V4_STAGES_ROADMAP, ADR_INDEX, ARCHITECTURE_EVOLUTION, TESTING_EVALUATION_PLAN | ✅ |
+| D4 (max_comments caps report) | CURRENT_ARCHITECTURE, EPIC_BACKLOG, MASTER_ROADMAP, V4_STAGES_ROADMAP, ADR_INDEX, ARCHITECTURE_EVOLUTION, TESTING_EVALUATION_PLAN | ✅ |
+| D5 (no severity sort) | CURRENT_ARCHITECTURE, EPIC_BACKLOG, MASTER_ROADMAP, V4_STAGES_ROADMAP, ARCHITECTURE_EVOLUTION, TESTING_EVALUATION_PLAN | ✅ |
+| D6 (config crash) | CURRENT_ARCHITECTURE, EPIC_BACKLOG, MASTER_ROADMAP, V4_STAGES_ROADMAP, ADR_INDEX, ARCHITECTURE_EVOLUTION, TESTING_EVALUATION_PLAN | ⚠ see ARCH-03 |
+| D7 (mute not idempotent) | CURRENT_ARCHITECTURE, EPIC_BACKLOG, MASTER_ROADMAP, V4_STAGES_ROADMAP, ADR_INDEX, ARCHITECTURE_EVOLUTION, TESTING_EVALUATION_PLAN | ✅ |
 
 ### 7.2 No false "fixed" claims
 
@@ -232,7 +232,7 @@ This is a **three-way inconsistency**: `EPIC_BACKLOG.md` + `MASTER_ROADMAP.md` d
 
 **Finding DM-03 (MEDIUM):** "SecurityFinding" and "ArchitectureFinding" are entity names invented in `DATA_MODEL.md`. They appear nowhere else in the plan set or codebase. The codebase uses `Finding` with `category='security'` (`models.py:44-47`, `VALID_CATEGORIES`). While `DATA_MODEL.md` correctly states these live "inside the Finding table", the names don't match current terminology.
 
-**Finding DM-04 (LOW):** "ReviewRun" entity home is listed as "relational (SQLite now)" but no `review_runs` table exists today. The data lives inside `ReportRow.payload` JSON. Should be "payload JSON inside ReportRow (today) → own table at V5".
+**Finding DM-04 (LOW):** "ReviewRun" entity home is listed as "relational (SQLite now)" but no `review_runs` table exists today. The data lives inside `ReportRow.payload` JSON. Should be "payload JSON inside ReportRow (today) → own table at V4.0".
 
 **Finding DM-05 (LOW):** "Verification" entity is classed as "event record" but its current state is payload fields on Finding. The doc correctly notes this is aspirational.
 
@@ -258,33 +258,33 @@ This is a **three-way inconsistency**: `EPIC_BACKLOG.md` + `MASTER_ROADMAP.md` d
 
 ### 9.1 Agent responsibilities and orchestration
 
-- `MASTER_VISION.md` §5 E/F: "V5, gated on provenance" — consistent with `V4_V10_ROADMAP.md` V5 hard deps (V4-E04 + V4-E05).
-- `ADR-006` (bounded fan-out under one orchestrator): consistent with `V4_V10_ROADMAP.md` V5-E01 (fan-out orchestration) and the C5 in-process carve-out.
-- `TARGET_ARCHITECTURE.md` Phase A package boundaries: `orchestration/` (planner/executor/merger/synthesizer) — consistent with `MASTER_ROADMAP.md` V5 architecture changes.
+- `MASTER_VISION.md` §5 E/F: "V4.0, gated on provenance" — consistent with `V4_STAGES_ROADMAP.md` V4.0 hard deps (V4-E04 + V4-E05).
+- `ADR-006` (bounded fan-out under one orchestrator): consistent with `V4_STAGES_ROADMAP.md` V4.0-E01 (fan-out orchestration) and the C5 in-process carve-out.
+- `TARGET_ARCHITECTURE.md` Phase A package boundaries: `orchestration/` (planner/executor/merger/synthesizer) — consistent with `MASTER_ROADMAP.md` V4.0 architecture changes.
 
 ### 9.2 Routing and provider abstraction
 
 - `ADR-007` (structural protocol as the seam): consistent with `CURRENT_ARCHITECTURE.md` §8 and `TARGET_ARCHITECTURE.md` §7.2.
-- `MASTER_ROADMAP.md` V5: "model_router.py → capability registry" — consistent with `EPIC_BACKLOG.md` V5-E05.
+- `MASTER_ROADMAP.md` V4.0: "model_router.py → capability registry" — consistent with `EPIC_BACKLOG.md` V4.0-E05.
 
 ### 9.3 Context retrieval and token budgets
 
 - `COST_TOKEN_ARCHITECTURE.md` references current char budgets (80k/12k) and C7 — consistent with `CURRENT_ARCHITECTURE.md`.
-- `V4_V10_ROADMAP.md` V4-E02: "token-aware retrieval" — consistent with `COST_TOKEN_ARCHITECTURE.md` telemetry spine.
+- `V4_STAGES_ROADMAP.md` V4-E02: "token-aware retrieval" — consistent with `COST_TOKEN_ARCHITECTURE.md` telemetry spine.
 
 ### 9.4 Verification and evidence
 
-- `ADR-012` (deterministic evidence only): consistent with `CURRENT_ARCHITECTURE.md` §5 (verification lifecycle) and `MASTER_ROADMAP.md` V6 ("T1 coverage floor; T3 observed-test-evidence only").
+- `ADR-012` (deterministic evidence only): consistent with `CURRENT_ARCHITECTURE.md` §5 (verification lifecycle) and `MASTER_ROADMAP.md` V4.2 ("T1 coverage floor; T3 observed-test-evidence only").
 - `ADR-004` (evidence as first-class records): consistent with `DATA_MODEL.md` FindingEvidence shape and `EPIC_BACKLOG.md` V4-E04.
 
 ### 9.5 Failure handling
 
-- `MASTER_ROADMAP.md` V5: "agents never post directly (merged+validated only)" — consistent with `DO_NOT_BUILD_YET.md` B5 (no auto-mute without human) and `CURRENT_ARCHITECTURE.md` (model output untrusted).
-- `V4_V10_ROADMAP.md` V5: "cross-agent output re-validated as untrusted; per-prompt fencing" — consistent with `CURRENT_ARCHITECTURE.md` §6 (security boundary).
+- `MASTER_ROADMAP.md` V4.0: "agents never post directly (merged+validated only)" — consistent with `DO_NOT_BUILD_YET.md` B5 (no auto-mute without human) and `CURRENT_ARCHITECTURE.md` (model output untrusted).
+- `V4_STAGES_ROADMAP.md` V4.0: "cross-agent output re-validated as untrusted; per-prompt fencing" — consistent with `CURRENT_ARCHITECTURE.md` §6 (security boundary).
 
 ### 9.6 Anti-patterns
 
-- `DO_NOT_BUILD_YET.md` E1–E4 (giant prompt, AI-authored memory, self-modifying prompts, multi-agent loops without budgets) — all consistent with `MASTER_VISION.md` principles and `EPIC_BACKLOG.md` epic designs (V5-E01 has budgets, V5-E07 arbitrates).
+- `DO_NOT_BUILD_YET.md` E1–E4 (giant prompt, AI-authored memory, self-modifying prompts, multi-agent loops without budgets) — all consistent with `MASTER_VISION.md` principles and `EPIC_BACKLOG.md` epic designs (V4.0-E01 has budgets, V4.0-E07 arbitrates).
 
 **Verdict:** AI architecture is **coherent** across existing documents. The missing `AI_AGENT_ARCHITECTURE.md` is the primary gap.
 
@@ -302,35 +302,35 @@ This is a **three-way inconsistency**: `EPIC_BACKLOG.md` + `MASTER_ROADMAP.md` d
 ### 10.2 Prompt injection defenses
 
 - `CURRENT_ARCHITECTURE.md` §6: nonce fencing + 8-pattern injection screening + redaction. Consistent with `MASTER_VISION.md` and `EPIC_BACKLOG.md` V4-E08 (intelligence security & budgets).
-- `V4_V10_ROADMAP.md` V4-E08: "retrieval fencing + injection exclusion, path allowlist, budget caps as DoS control" — consistent.
+- `V4_STAGES_ROADMAP.md` V4-E08: "retrieval fencing + injection exclusion, path allowlist, budget caps as DoS control" — consistent.
 
 ### 10.3 Secret handling
 
 - `CURRENT_ARCHITECTURE.md` §6: `redact_secrets()` on everything stored/posted. Consistent with `COST_TOKEN_ARCHITECTURE.md` ("telemetry must pass `redact_secrets()` before storage/posting").
-- `MASTER_ROADMAP.md` V7: "secrets redacted from digests" — consistent.
+- `MASTER_ROADMAP.md` V4.4: "secrets redacted from digests" — consistent.
 
 ### 10.4 Authorization and tenant isolation
 
-- `MASTER_ROADMAP.md` V9: "scope matrix as CI invariant (cross-org deny)" — consistent with `DO_NOT_BUILD_YET.md` C1 (full multi-tenancy refused until V10-E03, ADR-gated).
+- `MASTER_ROADMAP.md` V4.8: "scope matrix as CI invariant (cross-org deny)" — consistent with `DO_NOT_BUILD_YET.md` C1 (full multi-tenancy refused until V4.10-E03, ADR-gated).
 - `TARGET_ARCHITECTURE.md` Phase D: "row-level scope in data layer" — consistent.
 
 ### 10.5 Memory poisoning
 
-- `MASTER_ROADMAP.md` V7: "authority model blocks memory poisoning" — consistent with `ADR-003` (memory authority model) and `DO_NOT_BUILD_YET.md` E2 (AI-authored permanent memory refused).
-- `EPIC_BACKLOG.md` V7-E07 (memory security): consistent.
+- `MASTER_ROADMAP.md` V4.4: "authority model blocks memory poisoning" — consistent with `ADR-003` (memory authority model) and `DO_NOT_BUILD_YET.md` E2 (AI-authored permanent memory refused).
+- `EPIC_BACKLOG.md` V4.4-E07 (memory security): consistent.
 
 ### 10.6 Plugin security
 
-- `MASTER_ROADMAP.md` V10: "plugin code is hostile: sandbox escape suite, output treated as model-untrusted, no tokens by default, manifest signing" — consistent with `DO_NOT_BUILD_YET.md` D2 (plugin marketplace refused until V10-E01 proves itself).
+- `MASTER_ROADMAP.md` V4.10: "plugin code is hostile: sandbox escape suite, output treated as model-untrusted, no tokens by default, manifest signing" — consistent with `DO_NOT_BUILD_YET.md` D2 (plugin marketplace refused until V4.10-E01 proves itself).
 
 ### 10.7 GitHub permissions
 
 - `CURRENT_ARCHITECTURE.md` §6: "no `checks: write`" — consistent with `MASTER_VISION.md` and `example-workflow.yml`.
-- `MASTER_ROADMAP.md` V8: "token perms unchanged" — consistent.
+- `MASTER_ROADMAP.md` V4.6: "token perms unchanged" — consistent.
 
 ### 10.8 Auditability
 
-- `CURRENT_ARCHITECTURE.md` §7: `audit.jsonl` append-only. Consistent with `DATA_MODEL.md` AuditRecord entity and `MASTER_ROADMAP.md` V9 (metrics/audit platform).
+- `CURRENT_ARCHITECTURE.md` §7: `audit.jsonl` append-only. Consistent with `DATA_MODEL.md` AuditRecord entity and `MASTER_ROADMAP.md` V4.8 (metrics/audit platform).
 
 **Verdict:** Security is **coherent** across existing documents. The missing `SECURITY_ROADMAP.md` is the primary gap — it is the document that would contain the full threat model and per-subsystem trust-boundary table.
 
@@ -342,69 +342,69 @@ This is a **three-way inconsistency**: `EPIC_BACKLOG.md` + `MASTER_ROADMAP.md` d
 
 | Capability | Testing strategy assigned? | Where |
 |---|---|---|
-| Repository index (V4-E01) | ✅ | `TESTING_EVALUATION_PLAN.md` L7/L8 + `V4_V10_ROADMAP.md` V4 |
-| Context engine v2 (V4-E02) | ✅ | `TESTING_EVALUATION_PLAN.md` L7 + `V4_V10_ROADMAP.md` V4 |
+| Repository index (V4-E01) | ✅ | `TESTING_EVALUATION_PLAN.md` L7/L8 + `V4_STAGES_ROADMAP.md` V4 |
+| Context engine v2 (V4-E02) | ✅ | `TESTING_EVALUATION_PLAN.md` L7 + `V4_STAGES_ROADMAP.md` V4 |
 | Change impact analysis (V4-E03) | ❌ **No** | — |
 | Evidence engine (V4-E04) | ✅ | `TESTING_EVALUATION_PLAN.md` L7 |
 | Finding identity v2 (V4-E05) | ✅ | `TESTING_EVALUATION_PLAN.md` L16 (migration) |
-| Digital twin seed (V4-E06) | ✅ | `V4_V10_ROADMAP.md` V4 |
+| Digital twin seed (V4-E06) | ✅ | `V4_STAGES_ROADMAP.md` V4 |
 | Intelligence read contracts (V4-E07) | ✅ | `TESTING_EVALUATION_PLAN.md` L3 |
 | Intelligence security (V4-E08) | ✅ | `TESTING_EVALUATION_PLAN.md` L5/L6 |
-| Fan-out orchestration (V5-E01) | ✅ | `TESTING_EVALUATION_PLAN.md` L14 (load) |
-| Specialist contracts (V5-E02) | ✅ | `TESTING_EVALUATION_PLAN.md` L4 |
-| Finding merger (V5-E03) | ✅ | `TESTING_EVALUATION_PLAN.md` L7 |
-| Risk engine (V5-E04) | ✅ | `TESTING_EVALUATION_PLAN.md` L12 |
-| Provider registry (V5-E05) | ⚠ partial | `TESTING_EVALUATION_PLAN.md` L4 (provider contract) but no registry-specific test |
-| Council synthesis (V5-E06) | ✅ | `TESTING_EVALUATION_PLAN.md` L12 |
-| Cost arbitration (V5-E07) | ✅ | `TESTING_EVALUATION_PLAN.md` L13 (performance) |
-| Multi-agent evaluation (V5-E08) | ✅ | `TESTING_EVALUATION_PLAN.md` L11/L12 |
-| Security engine (V6-E01) | ✅ | `TESTING_EVALUATION_PLAN.md` L5 |
-| AI security v2 (V6-E02) | ✅ | `TESTING_EVALUATION_PLAN.md` L6 |
-| Test intelligence (V6-E03) | ✅ | `TESTING_EVALUATION_PLAN.md` L7 |
-| Architecture intelligence (V6-E04) | ✅ | `V4_V10_ROADMAP.md` V6 |
-| Advanced verification (V6-E05) | ✅ | `TESTING_EVALUATION_PLAN.md` L7 |
-| Dependency intelligence (V6-E06) | ✅ | `V4_V10_ROADMAP.md` V6 |
-| Policy engine (V6-E07) | ✅ | `TESTING_EVALUATION_PLAN.md` L7 |
-| Security eval corpus (V6-E08) | ✅ | `TESTING_EVALUATION_PLAN.md` L9/L10 |
-| Git history (V7-E01) | ✅ | `V4_V10_ROADMAP.md` V7 |
-| Memory hierarchy (V7-E02) | ✅ | `TESTING_EVALUATION_PLAN.md` L7 |
-| Finding relations (V7-E03) | ❌ **No** | — |
-| Issue/requirement linkage (V7-E04) | ✅ | `V4_V10_ROADMAP.md` V7 |
-| Team analytics (V7-E05) | ❌ **No** | — |
-| Historical evidence (V7-E06) | ✅ | `V4_V10_ROADMAP.md` V7 |
-| Memory security (V7-E07) | ❌ **No** | — |
-| CI ingestion (V8-E01) | ✅ | `TESTING_EVALUATION_PLAN.md` L3 |
-| Test-failure correlation (V8-E02) | ✅ | `TESTING_EVALUATION_PLAN.md` L7 |
-| Release intelligence (V8-E03) | ✅ | `V4_V10_ROADMAP.md` V8 |
-| Docs intelligence (V8-E04) | ✅ | `V4_V10_ROADMAP.md` V8 |
-| Infrastructure intelligence (V8-E05) | ✅ | `V4_V10_ROADMAP.md` V8 |
-| Incident intelligence (V8-E06) | ✅ | `V4_V10_ROADMAP.md` V8 |
-| Event platform (V8-E07) | ✅ | `TESTING_EVALUATION_PLAN.md` L7 |
-| Org model (V9-E01) | ✅ | `TESTING_EVALUATION_PLAN.md` L3 |
-| Org policy (V9-E02) | ✅ | `TESTING_EVALUATION_PLAN.md` L7 |
-| Versioned API (V9-E03) | ✅ | `TESTING_EVALUATION_PLAN.md` L3 |
-| Workers (V9-E04) | ✅ | `TESTING_EVALUATION_PLAN.md` L14/L15 |
-| Org memory (V9-E05) | ✅ | `TESTING_EVALUATION_PLAN.md` L7 |
-| Extensibility contract (V9-E06) | ✅ | `TESTING_EVALUATION_PLAN.md` L4 |
-| Observability (V9-E07) | ✅ | `TESTING_EVALUATION_PLAN.md` L13 |
-| Plugin system (V10-E01) | ✅ | `TESTING_EVALUATION_PLAN.md` L5 |
-| Provider ecosystem (V10-E02) | ✅ | `TESTING_EVALUATION_PLAN.md` L4 |
-| Multi-tenancy (V10-E03) | ⚠ optional | `DO_NOT_BUILD_YET.md` — ADR-gated, no test strategy needed until approved |
-| IDE/CLI (V10-E04) | ✅ | `TESTING_EVALUATION_PLAN.md` L3 |
-| Org analytics (V10-E05) | ✅ | `TESTING_EVALUATION_PLAN.md` L12 |
-| Command center (V10-E06) | ✅ | `TESTING_EVALUATION_PLAN.md` L3 |
+| Fan-out orchestration (V4.0-E01) | ✅ | `TESTING_EVALUATION_PLAN.md` L14 (load) |
+| Specialist contracts (V4.0-E02) | ✅ | `TESTING_EVALUATION_PLAN.md` L4 |
+| Finding merger (V4.0-E03) | ✅ | `TESTING_EVALUATION_PLAN.md` L7 |
+| Risk engine (V4.0-E04) | ✅ | `TESTING_EVALUATION_PLAN.md` L12 |
+| Provider registry (V4.0-E05) | ⚠ partial | `TESTING_EVALUATION_PLAN.md` L4 (provider contract) but no registry-specific test |
+| Council synthesis (V4.0-E06) | ✅ | `TESTING_EVALUATION_PLAN.md` L12 |
+| Cost arbitration (V4.0-E07) | ✅ | `TESTING_EVALUATION_PLAN.md` L13 (performance) |
+| Multi-agent evaluation (V4.0-E08) | ✅ | `TESTING_EVALUATION_PLAN.md` L11/L12 |
+| Security engine (V4.2-E01) | ✅ | `TESTING_EVALUATION_PLAN.md` L5 |
+| AI security v2 (V4.2-E02) | ✅ | `TESTING_EVALUATION_PLAN.md` L6 |
+| Test intelligence (V4.2-E03) | ✅ | `TESTING_EVALUATION_PLAN.md` L7 |
+| Architecture intelligence (V4.2-E04) | ✅ | `V4_STAGES_ROADMAP.md` V4.2 |
+| Advanced verification (V4.2-E05) | ✅ | `TESTING_EVALUATION_PLAN.md` L7 |
+| Dependency intelligence (V4.2-E06) | ✅ | `V4_STAGES_ROADMAP.md` V4.2 |
+| Policy engine (V4.2-E07) | ✅ | `TESTING_EVALUATION_PLAN.md` L7 |
+| Security eval corpus (V4.2-E08) | ✅ | `TESTING_EVALUATION_PLAN.md` L9/L10 |
+| Git history (V4.4-E01) | ✅ | `V4_STAGES_ROADMAP.md` V4.4 |
+| Memory hierarchy (V4.4-E02) | ✅ | `TESTING_EVALUATION_PLAN.md` L7 |
+| Finding relations (V4.4-E03) | ❌ **No** | — |
+| Issue/requirement linkage (V4.4-E04) | ✅ | `V4_STAGES_ROADMAP.md` V4.4 |
+| Team analytics (V4.4-E05) | ❌ **No** | — |
+| Historical evidence (V4.4-E06) | ✅ | `V4_STAGES_ROADMAP.md` V4.4 |
+| Memory security (V4.4-E07) | ❌ **No** | — |
+| CI ingestion (V4.6-E01) | ✅ | `TESTING_EVALUATION_PLAN.md` L3 |
+| Test-failure correlation (V4.6-E02) | ✅ | `TESTING_EVALUATION_PLAN.md` L7 |
+| Release intelligence (V4.6-E03) | ✅ | `V4_STAGES_ROADMAP.md` V4.6 |
+| Docs intelligence (V4.6-E04) | ✅ | `V4_STAGES_ROADMAP.md` V4.6 |
+| Infrastructure intelligence (V4.6-E05) | ✅ | `V4_STAGES_ROADMAP.md` V4.6 |
+| Incident intelligence (V4.6-E06) | ✅ | `V4_STAGES_ROADMAP.md` V4.6 |
+| Event platform (V4.6-E07) | ✅ | `TESTING_EVALUATION_PLAN.md` L7 |
+| Org model (V4.8-E01) | ✅ | `TESTING_EVALUATION_PLAN.md` L3 |
+| Org policy (V4.8-E02) | ✅ | `TESTING_EVALUATION_PLAN.md` L7 |
+| Versioned API (V4.8-E03) | ✅ | `TESTING_EVALUATION_PLAN.md` L3 |
+| Workers (V4.8-E04) | ✅ | `TESTING_EVALUATION_PLAN.md` L14/L15 |
+| Org memory (V4.8-E05) | ✅ | `TESTING_EVALUATION_PLAN.md` L7 |
+| Extensibility contract (V4.8-E06) | ✅ | `TESTING_EVALUATION_PLAN.md` L4 |
+| Observability (V4.8-E07) | ✅ | `TESTING_EVALUATION_PLAN.md` L13 |
+| Plugin system (V4.10-E01) | ✅ | `TESTING_EVALUATION_PLAN.md` L5 |
+| Provider ecosystem (V4.10-E02) | ✅ | `TESTING_EVALUATION_PLAN.md` L4 |
+| Multi-tenancy (V4.10-E03) | ⚠ optional | `DO_NOT_BUILD_YET.md` — ADR-gated, no test strategy needed until approved |
+| IDE/CLI (V4.10-E04) | ✅ | `TESTING_EVALUATION_PLAN.md` L3 |
+| Org analytics (V4.10-E05) | ✅ | `TESTING_EVALUATION_PLAN.md` L12 |
+| Command center (V4.10-E06) | ✅ | `TESTING_EVALUATION_PLAN.md` L3 |
 
 ### 11.2 Findings
 
-**Finding TEST-01 (MEDIUM):** `TESTING_EVALUATION_PLAN.md` has no testing strategy for **memory poisoning / memory security** (V7-E07). The word "poison" appears 0 times. `V4_V10_ROADMAP.md` V7 mentions "poisoning corpus" and "authority matrix" but `TESTING_EVALUATION_PLAN.md` does not assign a testing layer or method for this.
+**Finding TEST-01 (MEDIUM):** `TESTING_EVALUATION_PLAN.md` has no testing strategy for **memory poisoning / memory security** (V4.4-E07). The word "poison" appears 0 times. `V4_STAGES_ROADMAP.md` V4.4 mentions "poisoning corpus" and "authority matrix" but `TESTING_EVALUATION_PLAN.md` does not assign a testing layer or method for this.
 
 **Finding TEST-02 (MEDIUM):** No testing strategy for **change impact analysis** (V4-E03). The word "impact" appears 0 times in `TESTING_EVALUATION_PLAN.md`. Impact analysis is a core V4 capability with no assigned evaluation method.
 
-**Finding TEST-03 (MEDIUM):** No testing strategy for **finding relations** (V7-E03). The word "relations" appears 0 times. Relations (duplicate/caused_by/fixed_by/regression_of) are a significant identity feature with no assigned test layer.
+**Finding TEST-03 (MEDIUM):** No testing strategy for **finding relations** (V4.4-E03). The word "relations" appears 0 times. Relations (duplicate/caused_by/fixed_by/regression_of) are a significant identity feature with no assigned test layer.
 
-**Finding TEST-04 (MEDIUM):** No testing strategy for **team/repository analytics** (V7-E05). The word "analytics" appears 0 times. Analytics has no assigned evaluation method (particularly the "no individual rankings" invariant).
+**Finding TEST-04 (MEDIUM):** No testing strategy for **team/repository analytics** (V4.4-E05). The word "analytics" appears 0 times. Analytics has no assigned evaluation method (particularly the "no individual rankings" invariant).
 
-**Finding TEST-05 (LOW):** No explicit **provider failover** testing strategy for the capability registry (V5-E05). The word "failover" appears 4 times but in the context of the existing static fallback, not the V5-E05 registry-driven routing. The current suite has `test_provider_failover.py` but the plan does not assign a testing layer for registry-driven failover.
+**Finding TEST-05 (LOW):** No explicit **provider failover** testing strategy for the capability registry (V4.0-E05). The word "failover" appears 4 times but in the context of the existing static fallback, not the V4.0-E05 registry-driven routing. The current suite has `test_provider_failover.py` but the plan does not assign a testing layer for registry-driven failover.
 
 ---
 
@@ -417,34 +417,34 @@ This is a **three-way inconsistency**: `EPIC_BACKLOG.md` + `MASTER_ROADMAP.md` d
 - `repo_context_chars` = 12,000 chars (`config.py:99`)
 - C7 constraint (character budgets, not token budgets)
 - V3-E02 telemetry foundation
-- V5-E07 cost arbitration
+- V4.0-E07 cost arbitration
 
 ### 12.2 Token budget model
 
 The proposed token budget model (all marked "proposed baseline"):
 - PR diff: 80,000 chars ≈ 20,000 tokens
 - Repo context: 12,000 chars ≈ 3,000 tokens
-- V5 multi-agent: 300,000 tokens/run hard cap; per-agent 60,000; V5-E07 arbitrates
-- V9 org: 5,000,000 tokens/month/org
+- V4.0 multi-agent: 300,000 tokens/run hard cap; per-agent 60,000; V4.0-E07 arbitrates
+- V4.8 org: 5,000,000 tokens/month/org
 
 These are internally consistent (60k × 5 agents = 300k cap) and grounded in the current character budgets.
 
-### 12.3 Cost mentions per stage in V4_V10_ROADMAP
+### 12.3 Cost mentions per stage in V4_STAGES_ROADMAP
 
 | Stage | token mentions | cost mentions | Assessment |
 |---|---|---|---|
 | Phase 0 | 10 | 11 | Appropriate (telemetry foundation) |
 | V4 | 8 | 4 | Appropriate (budgets) |
-| V5 | 6 | 14 | Appropriate (multi-agent arbitration) |
-| V6 | 3 | 5 | Appropriate |
-| V7 | 2 | 1 | Appropriate |
-| V8 | 5 | 3 | Appropriate |
-| V9 | 11 | 5 | Appropriate (org envelope) |
-| V10 | 7 | 10 | Appropriate (plugins, multi-tenancy) |
+| V4.0 | 6 | 14 | Appropriate (multi-agent arbitration) |
+| V4.2 | 3 | 5 | Appropriate |
+| V4.4 | 2 | 1 | Appropriate |
+| V4.6 | 5 | 3 | Appropriate |
+| V4.8 | 11 | 5 | Appropriate (org envelope) |
+| V4.10 | 7 | 10 | Appropriate (plugins, multi-tenancy) |
 
 ### 12.4 Findings
 
-**Finding COST-01 (LOW):** `COST_TOKEN_ARCHITECTURE.md` does not explicitly reconcile the V5 multi-agent token cap (300,000 tokens/run) with the V4 context budget (20,000 tokens for diff + 3,000 for repo context). The 300k cap is for the *entire* run (all agents, all batches), while the 20k/3k are *per-batch* context budgets. The relationship between per-batch context and per-run total is not explicitly stated.
+**Finding COST-01 (LOW):** `COST_TOKEN_ARCHITECTURE.md` does not explicitly reconcile the V4.0 multi-agent token cap (300,000 tokens/run) with the V4 context budget (20,000 tokens for diff + 3,000 for repo context). The 300k cap is for the *entire* run (all agents, all batches), while the 20k/3k are *per-batch* context budgets. The relationship between per-batch context and per-run total is not explicitly stated.
 
 **Finding COST-02 (INFO):** All numeric targets in `COST_TOKEN_ARCHITECTURE.md` are correctly marked "proposed baseline". No unsupported certainty.
 
@@ -462,13 +462,13 @@ ADR-001 through ADR-016 are documented in `ADR_INDEX.md`. Statuses:
 
 **Finding ADR-01 (MEDIUM):** **Context retrieval/ranking strategy** has no ADR. This is a major architectural decision (how the context engine v2 retrieves, ranks, and budgets repository content) that will be implemented in V4-E02. It is distinct from ADR-002 (repository graph representation) and ADR-011 (storage evolution).
 
-**Finding ADR-02 (MEDIUM):** **Adaptive review depth** has no ADR. V5-E04 introduces depth levels (lightweight/normal/context-aware/multi-specialist/deep) with quality/latency/cost trade-offs. This is a significant decision that interacts with ADR-006 (agent architecture) and ADR-014 (cost accounting) but is not covered by either.
+**Finding ADR-02 (MEDIUM):** **Adaptive review depth** has no ADR. V4.0-E04 introduces depth levels (lightweight/normal/context-aware/multi-specialist/deep) with quality/latency/cost trade-offs. This is a significant decision that interacts with ADR-006 (agent architecture) and ADR-014 (cost accounting) but is not covered by either.
 
-**Finding ADR-03 (LOW):** **Finding relations model** has no ADR. V7-E03 introduces relations (duplicate/caused_by/fixed_by/regression_of) that attach to identity. This is related to ADR-005 (finding identity) but relations are a distinct modeling decision.
+**Finding ADR-03 (LOW):** **Finding relations model** has no ADR. V4.4-E03 introduces relations (duplicate/caused_by/fixed_by/regression_of) that attach to identity. This is related to ADR-005 (finding identity) but relations are a distinct modeling decision.
 
-**Finding ADR-04 (LOW):** **CI correlation methodology** has no ADR. V8-E02 introduces test-failure correlation with PR changes. The methodology (what constitutes correlation vs causation) is a significant decision.
+**Finding ADR-04 (LOW):** **CI correlation methodology** has no ADR. V4.6-E02 introduces test-failure correlation with PR changes. The methodology (what constitutes correlation vs causation) is a significant decision.
 
-**Finding ADR-05 (LOW):** **API versioning strategy** has no ADR. V9-E03 introduces `/api/v1`. The versioning policy (how versions are introduced, deprecated, and retired) is a significant decision for a public API.
+**Finding ADR-05 (LOW):** **API versioning strategy** has no ADR. V4.8-E03 introduces `/api/v1`. The versioning policy (how versions are introduced, deprecated, and retired) is a significant decision for a public API.
 
 ### 13.3 Verified coverage
 
@@ -489,33 +489,33 @@ The following major decisions **are** covered by ADRs: modular monolith (001), r
 
 ### 14.2 Roadmap compliance check
 
-| Refused item | Scheduled in Phase 0/V4/V5? | Consistent? |
+| Refused item | Scheduled in Phase 0/V4/V4.0? | Consistent? |
 |---|---|---|
 | Microservices | No — Phase A is modular monolith | ✅ |
 | Kubernetes | No | ✅ |
-| Queues | No — V8-E07 is "append-only log — no queues"; V9-E04 is "only where measured" | ✅ |
+| Queues | No — V4.6-E07 is "append-only log — no queues"; V4.8-E04 is "only where measured" | ✅ |
 | Distributed tracing | No | ✅ |
 | GraphQL | No | ✅ |
 | Real-time collaborative dashboard | No | ✅ |
 | Auto-commits | No — `MASTER_VISION.md` WILL NOT list | ✅ |
 | Auto-merge | No | ✅ |
 | Auto-deploy | No | ✅ |
-| Incident automation | No — V8-E06 is "read-only retrospective" | ✅ |
-| Auto-mute | No — `DO_NOT_BUILD_YET.md` B5; `MASTER_ROADMAP.md` V9 says "human approval for org memory" | ✅ |
-| Full multi-tenancy | No — V10-E03 is "strictly optional, ADR-gated" | ✅ |
-| Org analytics / individual rankings | No — V7-E05 is "no individual rankings"; V10-E05 is after V9-E01/E07 | ✅ |
+| Incident automation | No — V4.6-E06 is "read-only retrospective" | ✅ |
+| Auto-mute | No — `DO_NOT_BUILD_YET.md` B5; `MASTER_ROADMAP.md` V4.8 says "human approval for org memory" | ✅ |
+| Full multi-tenancy | No — V4.10-E03 is "strictly optional, ADR-gated" | ✅ |
+| Org analytics / individual rankings | No — V4.4-E05 is "no individual rankings"; V4.10-E05 is after V4.8-E01/E07 | ✅ |
 | Unbounded ingestion | No — V4-E08 is "budget caps as DoS control" | ✅ |
 | Data warehouse | No | ✅ |
-| IDE plugins | No — V10-E04, after V9-E03/V9-E06 contracts | ✅ |
-| Plugin marketplace | No — after V10-E01 exit criteria | ✅ |
-| Giant prompt | No — V5-E02 extracts shared prompt-builder | ✅ |
+| IDE plugins | No — V4.10-E04, after V4.8-E03/V4.8-E06 contracts | ✅ |
+| Plugin marketplace | No — after V4.10-E01 exit criteria | ✅ |
+| Giant prompt | No — V4.0-E02 extracts shared prompt-builder | ✅ |
 | AI-authored memory | No — ADR-003 authority model; `MASTER_VISION.md` WILL NOT | ✅ |
 | Self-modifying prompts | No | ✅ |
-| Multi-agent loops without budgets | No — V5-E01 has budgets, V5-E07 arbitrates | ✅ |
+| Multi-agent loops without budgets | No — V4.0-E01 has budgets, V4.0-E07 arbitrates | ✅ |
 
 ### 14.3 Finding
 
-**Finding DNB-01 (INFO):** No boundary violations. All 21 refused items are either explicitly negated in the roadmap or deferred to the correct stage with appropriate gating. The V8-E07 "append-only log — no queues" carve-out and V9-E04 "only where measured" are consistent with the queue refusal.
+**Finding DNB-01 (INFO):** No boundary violations. All 21 refused items are either explicitly negated in the roadmap or deferred to the correct stage with appropriate gating. The V4.6-E07 "append-only log — no queues" carve-out and V4.8-E04 "only where measured" are consistent with the queue refusal.
 
 ---
 
@@ -576,14 +576,14 @@ Only `AGENTS.md` (pre-existing) and `docs/planning/*.md` (12 new planning docume
 | ARCH-01 | `CURRENT_ARCHITECTURE.md` says "14 redaction patterns" — actually 12. |
 | ARCH-03 | D6 presented as fully unfixed; `repo_context_chars` is now safe (partially fixed). |
 | DEP-01 | Systematic soft→hard elevation tension between `EPIC_BACKLOG.md` and the two roadmap docs. |
-| DEP-02 | `V5-E01` missing `V3-E03` as a dependency. |
-| DEP-03 | `V7-E02` missing `V4-E05` as a dependency. |
+| DEP-02 | `V4.0-E01` missing `V3-E03` as a dependency. |
+| DEP-03 | `V4.4-E02` missing `V4-E05` as a dependency. |
 | DM-02 | `DATA_MODEL.md` stale caveat about `EPIC_BACKLOG.md` not being in the tree. |
 | DM-03 | "SecurityFinding"/"ArchitectureFinding" are invented terms, used nowhere else. |
-| TEST-01 | No testing strategy for memory poisoning / memory security (V7-E07). |
+| TEST-01 | No testing strategy for memory poisoning / memory security (V4.4-E07). |
 | TEST-02 | No testing strategy for change impact analysis (V4-E03). |
-| TEST-03 | No testing strategy for finding relations (V7-E03). |
-| TEST-04 | No testing strategy for team/repository analytics (V7-E05). |
+| TEST-03 | No testing strategy for finding relations (V4.4-E03). |
+| TEST-04 | No testing strategy for team/repository analytics (V4.4-E05). |
 | ADR-01 | Context retrieval/ranking strategy has no ADR. |
 | ADR-02 | Adaptive review depth has no ADR. |
 
@@ -594,13 +594,13 @@ Only `AGENTS.md` (pre-existing) and `docs/planning/*.md` (12 new planning docume
 | ARCH-02 | "22 test files" — actually 21 test files + conftest. |
 | ARCH-04 | "~24 routes" — actually 23. |
 | ARCH-05 | "8 markdown findings" is a function default, not a named constant. |
-| DEP-04 | `V6-E03` soft-depends on `V8-E02` (forward reference to later stage). |
+| DEP-04 | `V4.2-E03` soft-depends on `V4.6-E02` (forward reference to later stage). |
 | DM-04 | "ReviewRun" home says "relational (SQLite now)" but no such table exists. |
 | DM-05 | "Verification" classed as "event record" but is payload fields today. |
 | DM-06 | "MemoryEntry" name doesn't match current `repo_memory`/`RepoMemoryRow`. |
-| STAGE-01 | V8 stage name drift: "CI / release" vs "CI/CD + release". |
-| TEST-05 | No explicit provider failover testing for V5-E05 registry. |
-| COST-01 | V5 multi-agent token cap not explicitly reconciled with V4 per-batch context budgets. |
+| STAGE-01 | V4.6 stage name drift: "CI / release" vs "CI/CD + release". |
+| TEST-05 | No explicit provider failover testing for V4.0-E05 registry. |
+| COST-01 | V4.0 multi-agent token cap not explicitly reconciled with V4 per-batch context budgets. |
 | ADR-03 | Finding relations model has no ADR. |
 | ADR-04 | CI correlation methodology has no ADR. |
 | ADR-05 | API versioning strategy has no ADR. |
@@ -650,7 +650,7 @@ The following must be resolved before V4 implementation begins:
 | Do-Not-Build boundary respected | ✅ Yes |
 | Git/repository safety | ✅ Yes |
 | Epic ID integrity | ✅ Yes |
-| V4–V10 structure consistency | ✅ Yes |
+| V4–V4.10 structure consistency | ✅ Yes |
 
 ### 19.2 Recommendation
 

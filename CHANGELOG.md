@@ -6,7 +6,8 @@ V4 "deep repository intelligence". Additions to the report, config and
 storage are additive; every V3 input, output and required report field is
 unchanged. Behaviour changes are listed explicitly under **Changed**.
 Contract-relevant entries only. (Internal planning ids `V4-E01`..`V4-E11`
-are permanent; later stages V5..V10 ship publicly as v4.5.0..v4.10.0.)
+are permanent; later stages (internal ids `V4.0`..`V4.10`) ship
+publicly as v4.5.0..v4.10.0.)
 
 ### Added
 - **Repository index, context selection, change impact (E01-E03).** An

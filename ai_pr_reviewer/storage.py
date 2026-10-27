@@ -22,12 +22,15 @@ from typing import Any, Protocol, runtime_checkable
 
 from .findings import fingerprint_finding
 from .models import Finding
-from .storage_schema import (CAP_DISMISSED_FINGERPRINTS, CAP_LIST_REPO_MEMORY,
-                             CAP_PREVIOUS_FINDINGS, CAP_PRUNE, CAP_REPO_MEMORY,
-                             CAP_SUPPRESSION_RULES, CAP_TELEMETRY,
-                             CORE_CAPABILITIES, MAX_RULES_APPLIED_PER_RUN,
+from .storage_schema import (CAP_CI_RUNS, CAP_DISMISSED_FINGERPRINTS,
+                             CAP_LIST_REPO_MEMORY, CAP_PREVIOUS_FINDINGS,
+                             CAP_PRUNE, CAP_REPO_MEMORY, CAP_SUPPRESSION_RULES,
+                             CAP_TELEMETRY, CI_RUN_COLUMNS, CI_RUNS_TABLE,
+                             CORE_CAPABILITIES, MAX_CI_HEAD_SHAS_PER_QUERY,
+                             MAX_CI_RUN_PAYLOAD_CHARS, MAX_CI_RUNS_PER_REPO,
+                             MAX_RULES_APPLIED_PER_RUN,
                              SUPPRESSION_RULE_COLUMNS, SUPPRESSION_RULES_TABLE,
-                             feedback_iso, feedback_now,
+                             ci_runs_local_ddl, feedback_iso, feedback_now,
                              is_mute_pattern, mute_fingerprint, parse_review_id,
                              retention_cutoff)
 from .telemetry import sanitize_telemetry
@@ -356,6 +359,7 @@ class LocalReviewStorage:
         CAP_TELEMETRY,
         CAP_PRUNE,
         CAP_SUPPRESSION_RULES,
+        CAP_CI_RUNS,   # V4.6-E01-T03: engine-local only (see block below)
     }
 
     def __init__(self, db_path: str | Path):
@@ -697,6 +701,115 @@ class LocalReviewStorage:
                 "ORDER BY created_at, id LIMIT ?",
                 (repo, stamp, MAX_RULES_APPLIED_PER_RUN + 1)).fetchall()
             return [dict(row) for row in rows]
+
+    # ------------------------------------------- V4.6-E01-T03 · CI run records
+    # Additive, payload-first, engine-local. ``ci_runs`` is created lazily by
+    # the first ``save_ci_runs`` — opening a database never creates it, so a
+    # run without CI data leaves the file byte-for-byte unchanged. Not
+    # declared by ``DashboardStorageClient`` (the engine must not push CI
+    # data to a dashboard before the storage-consolidation ADR).
+    def save_ci_runs(self, repo: str, records, *,
+                     now: datetime | None = None) -> dict:
+        """Upsert normalized CI run records for exactly ``repo``.
+
+        Every record is re-validated and re-sanitized *at this boundary*
+        (``CIRunRecord.from_dict``): secrets are redacted, fence tags
+        neutralized and every field bounded no matter what the caller hands
+        in. Records for another repository, or that cannot be normalized, or
+        whose payload exceeds the cap, are rejected and counted — never
+        stored, never re-labelled. Upserts by ``(repo, run_id,
+        run_attempt)``: re-ingesting a run replaces its row (a run's status
+        progresses). After writing, the repository's oldest rows beyond
+        ``MAX_CI_RUNS_PER_REPO`` are evicted.
+
+        Returns ``{"saved", "rejected", "evicted"}``.
+        """
+        from .ci.records import CIRunRecord
+
+        outcome = {"saved": 0, "rejected": 0, "evicted": 0}
+        stamp = feedback_iso(feedback_now(now))
+        rows: list[tuple] = []
+        for item in records or ():
+            raw = item.to_dict() if isinstance(item, CIRunRecord) else item
+            rec = CIRunRecord.from_dict(raw, repo=repo)
+            payload = rec.to_payload() if rec is not None else ""
+            if rec is None or len(payload) > MAX_CI_RUN_PAYLOAD_CHARS:
+                outcome["rejected"] += 1
+                continue
+            rows.append((rec.repo, rec.run_id, rec.run_attempt, rec.head_sha,
+                         rec.status, rec.conclusion, rec.created_at, stamp,
+                         payload))
+        if not rows:
+            return outcome
+        columns = ", ".join(CI_RUN_COLUMNS)
+        marks = ", ".join("?" for _ in CI_RUN_COLUMNS)
+        updates = ", ".join(f"{c} = excluded.{c}" for c in CI_RUN_COLUMNS
+                            if c not in ("repo", "run_id", "run_attempt"))
+        with self._connection() as conn:
+            conn.executescript(ci_runs_local_ddl())
+            for row in rows:
+                conn.execute(
+                    f"INSERT INTO {CI_RUNS_TABLE} ({columns}) "
+                    f"VALUES ({marks}) "
+                    f"ON CONFLICT(repo, run_id, run_attempt) DO UPDATE SET "
+                    f"{updates}", row)
+                outcome["saved"] += 1
+            outcome["evicted"] = conn.execute(
+                f"DELETE FROM {CI_RUNS_TABLE} WHERE repo = ? AND rowid IN ("
+                f"SELECT rowid FROM {CI_RUNS_TABLE} WHERE repo = ? "
+                f"ORDER BY ingested_at DESC, rowid DESC "
+                f"LIMIT -1 OFFSET ?)",
+                (repo, repo, MAX_CI_RUNS_PER_REPO)).rowcount
+        return outcome
+
+    def get_ci_runs(self, repo: str, *, head_shas=None,
+                    limit: int = MAX_CI_RUNS_PER_REPO) -> list[dict]:
+        """Stored CI run records for exactly ``repo`` (newest first).
+
+        ``head_shas``: ``None`` = no filter; an iterable limits to runs of
+        those commits (an explicitly empty one answers ``[]``; at most
+        ``MAX_CI_HEAD_SHAS_PER_QUERY`` are used). Every row is re-sanitized
+        on the way out and an unusable row is skipped, so a tampered
+        database cannot hand unsanitized text to a prompt or a report. A
+        database without the table answers ``[]`` and is not altered.
+        """
+        from .ci.records import CIRunRecord
+
+        try:
+            cap = max(1, min(int(limit), MAX_CI_RUNS_PER_REPO))
+        except (TypeError, ValueError):
+            cap = MAX_CI_RUNS_PER_REPO
+        shas: list[str] | None = None
+        if head_shas is not None:
+            shas = [str(x).strip().lower() for x in head_shas][
+                :MAX_CI_HEAD_SHAS_PER_QUERY]
+            if not shas:
+                return []
+        with self._connection() as conn:
+            present = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+                "AND name = ?", (CI_RUNS_TABLE,)).fetchone()
+            if present is None:
+                return []
+            sql = f"SELECT payload FROM {CI_RUNS_TABLE} WHERE repo = ?"
+            args: list = [repo]
+            if shas is not None:
+                sql += f" AND head_sha IN ({', '.join('?' for _ in shas)})"
+                args.extend(shas)
+            sql += (" ORDER BY created_at DESC, run_id DESC, "
+                    "run_attempt DESC LIMIT ?")
+            args.append(cap)
+            rows = conn.execute(sql, args).fetchall()
+        out: list[dict] = []
+        for row in rows:
+            try:
+                rec = CIRunRecord.from_dict(json.loads(row["payload"]),
+                                            repo=repo)
+            except Exception:  # noqa: BLE001 — a bad row is skipped, never fatal
+                continue
+            if rec is not None:
+                out.append(rec.to_dict())
+        return out
 
     def prune(self, retention_days: int, *, dry_run: bool = False,
               now: datetime | None = None) -> dict:

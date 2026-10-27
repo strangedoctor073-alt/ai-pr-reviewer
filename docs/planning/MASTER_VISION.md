@@ -2,7 +2,7 @@
 
 > Status: planning document (v1). Repository state it describes:
 > `CURRENT_ARCHITECTURE.md` (commit `2841b23`).
-> Scope of this file: *what* and *why*. How/when: `V4_V10_ROADMAP.md`,
+> Scope of this file: *what* and *why*. How/when: `V4_STAGES_ROADMAP.md`,
 > `EPIC_BACKLOG.md`, `MASTER_ROADMAP.md`.
 
 ## 1. Where we are
@@ -88,7 +88,7 @@ deepened, not replaced. Sequencing: `DEPENDENCY_GRAPH.md`.
 
 ## 5. Capability areas — position statements
 
-Full treatment per generation in `V4_V10_ROADMAP.md`. Summary stance:
+Full treatment per generation in `V4_STAGES_ROADMAP.md`. Summary stance:
 
 - **A Developer Experience** — deepen PR + dashboard first; IDE/plugins only after
   contracts stabilize (see `DO_NOT_BUILD_YET.md`).
@@ -97,41 +97,41 @@ Full treatment per generation in `V4_V10_ROADMAP.md`. Summary stance:
   no graph DB (ADR-002).
 - **D Digital Twin** — V4 creates the *seed projection* (layered index); the twin
   is the accumulating projection, never a separate CQRS/GRAPH system early.
-- **E Multi-dimensional Review / F Review Council** — V5, gated on provenance
+- **E Multi-dimensional Review / F Review Council** — V4.0, gated on provenance
   (V4-E04/E05) and bounded fan-out; deterministic tooling preferred where it
   wins (regex/AST/API-shape checks stay static).
-- **G Risk Engine / H Adaptive Depth** — V5 (v1 risk features → depth routing),
+- **G Risk Engine / H Adaptive Depth** — V4.0 (v1 risk features → depth routing),
   must stay explainable and cheap; informational until proven.
 - **I Context Intelligence / J Evidence Engine / K Finding Intelligence /
   L Fix Intelligence** — V4 core (retrieval+provenance, evidence records,
-  identity v2), V5-V6 (fix plans, relations), never auto-apply patches.
-- **M Advanced Verification** — V6 (evidence tiers incl. test evidence); the
+  identity v2), V4.0-V4.2 (fix plans, relations), never auto-apply patches.
+- **M Advanced Verification** — V4.2 (evidence tiers incl. test evidence); the
   current deterministic coverage model remains the floor.
-- **N Test Intelligence / O CI Intelligence / P Git History** — N: V6, O: V8,
-  P: V7.
-- **Q Engineering Memory hierarchy** — V7 (authority model ADR-003; AI-derived
+- **N Test Intelligence / O CI Intelligence / P Git History** — N: V4.2, O: V4.6,
+  P: V4.4.
+- **Q Engineering Memory hierarchy** — V4.4 (authority model ADR-003; AI-derived
   observations never become permanent truth automatically).
-- **R Policy Engine** — V6 repo/team scopes; V9 org scopes (ADR-003/inheritance).
-- **S Security Intelligence / T AI Security** — S: V6; T: continuous, upgraded
-  at every stage that adds a new untrusted input surface (V4 index, V5 agents,
-  V7 memory, V8 CI content, V9 webhooks, V10 plugins).
-- **U AI Provider Platform** — V5 (capability registry, task routing), V6-V8
-  (context-window/cost awareness), V10 (local providers).
+- **R Policy Engine** — V4.2 repo/team scopes; V4.8 org scopes (ADR-003/inheritance).
+- **S Security Intelligence / T AI Security** — S: V4.2; T: continuous, upgraded
+  at every stage that adds a new untrusted input surface (V4 index, V4.0 agents,
+  V4.4 memory, V4.6 CI content, V4.8 webhooks, V4.10 plugins).
+- **U AI Provider Platform** — V4.0 (capability registry, task routing), V4.2-V4.6
+  (context-window/cost awareness), V4.10 (local providers).
 - **V Cost Intelligence** — V3-E02 telemetry first (nothing can be managed that
-  isn't measured), then V5 arbitration, V6+ dashboards.
-- **W Dependency / X Infrastructure / Y Documentation intelligence** — W: V6,
-  X: V8, Y: V8.
-- **Z Issue/Requirement Intelligence** — V7 (linkage), long-term gap detection
+  isn't measured), then V4.0 arbitration, V4.2+ dashboards.
+- **W Dependency / X Infrastructure / Y Documentation intelligence** — W: V4.2,
+  X: V4.6, Y: V4.6.
+- **Z Issue/Requirement Intelligence** — V4.4 (linkage), long-term gap detection
   only as evidence-backed signals, never asserted compliance.
-- **AA Architecture Intelligence** — V6.
-- **AB Release / AC Incident intelligence** — V8 (incident = retrospective,
+- **AA Architecture Intelligence** — V4.2.
+- **AB Release / AC Incident intelligence** — V4.6 (incident = retrospective,
   read-only; no autonomous production integration).
-- **AD Developer/Team/Org Intelligence** — V7/V10 — **trends and hotspots only;
+- **AD Developer/Team/Org Intelligence** — V4.4/V4.10 — **trends and hotspots only;
   explicitly no individual performance rankings or quality scores.**
-- **AE Dashboard command center / AF API platform / AG-AH Events** — AF: V9,
-  AG: V8 (internal events) → V9 (webhooks), AH: V9 (queue only where justified).
-- **AI Plugin architecture** — V9 defines the contract, V10 ships it.
-- **AJ Multi-repo / AK Hosted multi-tenant** — V9 / V10 (optional; labelled
+- **AE Dashboard command center / AF API platform / AG-AH Events** — AF: V4.8,
+  AG: V4.6 (internal events) → V4.8 (webhooks), AH: V4.8 (queue only where justified).
+- **AI Plugin architecture** — V4.8 defines the contract, V4.10 ships it.
+- **AJ Multi-repo / AK Hosted multi-tenant** — V4.8 / V4.10 (optional; labelled
   future option, not a commitment).
 
 ## 6. Product boundaries (normative — see also `MASTER_ROADMAP.md` §Out of scope)
@@ -177,7 +177,7 @@ Hosted/enterprise options are labeled future options, never assumed
 | What exactly is true today? | `CURRENT_ARCHITECTURE.md` |
 | What are we building toward, and what will we never do? | this file |
 | How does the target system look? | `TARGET_ARCHITECTURE.md`, `ARCHITECTURE_EVOLUTION.md` |
-| What order, and what do we build **next**? | `MASTER_ROADMAP.md`, `V4_V10_ROADMAP.md` |
+| What order, and what do we build **next**? | `MASTER_ROADMAP.md`, `V4_STAGES_ROADMAP.md` |
 | Which epics/tickets? | `EPIC_BACKLOG.md` |
 | What depends on what? | `DEPENDENCY_GRAPH.md` |
 | How is data modeled? | `DATA_MODEL.md` |

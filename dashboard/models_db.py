@@ -121,6 +121,37 @@ class TelemetryRow(Base):
     payload: Mapped[dict] = mapped_column(JSON, default=dict)
 
 
+class RepoDailyMetricsRow(Base):
+    """V4.4-E05-T01 — aggregation-at-write analytics projection.
+
+    One row per (repo, UTC date), updated incrementally by
+    ``DbStorage.upsert`` in the same session as the report it summarizes
+    (additive table; no change to ``reports``). Trend/hotspot reads
+    (V4.4-E05-T04) scan only these rows, never the full ``reports``
+    table. Column set is exactly ``storage_schema.ANALYTICS_PROJECTION_
+    FIELDS`` — asserted by ``tests/test_dashboard_storage.py`` — and
+    carries no per-individual dimension (V4.4-E05-T03; family-wide
+    non-goal, see ``storage_schema.BANNED_INDIVIDUAL_DIMENSIONS``).
+    """
+
+    __tablename__ = _schema.ANALYTICS_PROJECTIONS_TABLE
+    __table_args__ = (
+        Index("ix_repo_daily_metrics_repo_date", "repo", "date"),
+    )
+
+    id: Mapped[str] = mapped_column(String(240), primary_key=True)  # analytics_projection_key(repo, date)
+    repo: Mapped[str] = mapped_column(String(200), default="", index=True)
+    date: Mapped[str] = mapped_column(String(10), default="")  # YYYY-MM-DD or "unknown"
+    reviews_count: Mapped[int] = mapped_column(Integer, default=0)
+    findings_count: Mapped[int] = mapped_column(Integer, default=0)
+    severity_counts: Mapped[dict] = mapped_column(JSON, default=dict)
+    category_counts: Mapped[dict] = mapped_column(JSON, default=dict)
+    duration_ms_sum: Mapped[int] = mapped_column(Integer, default=0)
+    health_score_sum: Mapped[float] = mapped_column(Float, default=0.0)
+    fallback_count: Mapped[int] = mapped_column(Integer, default=0)
+    updated_at: Mapped[str] = mapped_column(String(32), default="")
+
+
 class FeedbackEventRow(Base):
     """V4-E09-T01 — one human vote on a finding fingerprint (additive table).
 

@@ -145,78 +145,78 @@ dependency incomplete) · 🔵 In progress · ✅ Complete.
 | V4-E10 | GitHub comment lifecycle | ✅ Complete | **5/5 tickets** | V4-E04, V4-E05 | Ownership ledger, sticky summary, additive outputs |
 | V4-E11 | evaluation, telemetry & cost | ✅ Complete | **9/9 tickets** | V3-E03 | Includes the telemetry ingestion route + engine push (debt 15) and the dashboard cost surface (debt 9) |
 
-### V5 — Multi-agent engineering review
+### V4.0 — Multi-agent engineering review
 
 | Epic | Name | Status | Completion | Dependencies (hard) | Notes |
 |------|------|--------|------------|---------------------|-------|
-| V5-E01 | fan-out orchestration | 🔴 Blocked | 0 | V4-E04, V4-E05, V4-E07, V3-E02 | |
-| V5-E02 | specialist reviewer contracts | 🔴 Blocked | 0 | V4-E04, V5-E01 | |
-| V5-E03 | finding merger | 🔴 Blocked | 0 | V4-E04, V4-E05, V5-E02 | |
-| V5-E04 | risk engine v1 + adaptive depth | 🔴 Blocked | 0 | — (all soft) | Stage order still requires V4 first; needs ADR-018 |
-| V5-E05 | provider capability registry + routing | 🔴 Blocked | 0 | V3-E02 | |
-| V5-E06 | council synthesis | 🔴 Blocked | 0 | V5-E03 | |
-| V5-E07 | cost/token arbitration | 🔴 Blocked | 0 | V3-E02, V5-E05 | |
-| V5-E08 | multi-agent evaluation harness | 🔴 Blocked | 0 | V3-E03, V5-E01 | |
+| V4.0-E01 | fan-out orchestration | 🔴 Blocked | 0 | V4-E04, V4-E05, V4-E07, V3-E02 | |
+| V4.0-E02 | specialist reviewer contracts | 🔴 Blocked | 0 | V4-E04, V4.0-E01 | |
+| V4.0-E03 | finding merger | 🔴 Blocked | 0 | V4-E04, V4-E05, V4.0-E02 | |
+| V4.0-E04 | risk engine v1 + adaptive depth | 🔴 Blocked | 0 | — (all soft) | Stage order still requires V4 first; needs ADR-018 |
+| V4.0-E05 | provider capability registry + routing | 🔴 Blocked | 0 | V3-E02 | |
+| V4.0-E06 | council synthesis | 🔴 Blocked | 0 | V4.0-E03 | |
+| V4.0-E07 | cost/token arbitration | 🔴 Blocked | 0 | V3-E02, V4.0-E05 | |
+| V4.0-E08 | multi-agent evaluation harness | 🔴 Blocked | 0 | V3-E03, V4.0-E01 | |
 
-### V6 — Security, testing & architecture intelligence
-
-| Epic | Name | Status | Completion | Dependencies (hard) | Notes |
-|------|------|--------|------------|---------------------|-------|
-| V6-E01 | security engine | 🔴 Blocked | 0 | V4-E04, V4-E01 | |
-| V6-E02 | AI security v2 | 🔴 Blocked | 0 | V6-E01 | |
-| V6-E03 | dependency graph analysis | 🔴 Blocked | 0 | V4-E01 | |
-| V6-E04 | architecture intelligence | 🔴 Blocked | 0 | V4-E01, V4-E06 | |
-| V6-E05 | advanced verification tiers | 🔴 Blocked | 0 | V4-E04, V6-E03 | |
-| V6-E06 | dependency intelligence | 🔴 Blocked | 0 | V4-E01 | |
-| V6-E07 | policy engine v1 | 🔴 Blocked | 0 | V4-E04 | |
-| V6-E08 | security evaluation corpus | 🔴 Blocked | 0 | V6-E01, V3-E03 | |
-
-### V7 — Historical / project / team intelligence
+### V4.2 — Security, testing & architecture intelligence
 
 | Epic | Name | Status | Completion | Dependencies (hard) | Notes |
 |------|------|--------|------------|---------------------|-------|
-| V7-E01 | git history intelligence | 🔴 Blocked | 0 | V4-E01 | |
-| V7-E02 | memory hierarchy + authority model | 🔴 Blocked | 0 | V3-E04 (✅) | Hard dep done; stage order still requires V4–V6 first |
-| V7-E03 | finding relations | 🔴 Blocked | 0 | V4-E05 | Needs ADR-019 |
-| V7-E04 | issue/requirement linkage | 🔴 Blocked | 0 | V4-E04 | |
-| V7-E05 | team/repository analytics | 🔴 Blocked | 0 | V3-E04 (✅) | Hard dep done; stage order still requires V4–V6 first |
-| V7-E06 | historical evidence in review | 🔴 Blocked | 0 | V7-E01, V7-E02, V4-E04 | |
-| V7-E07 | memory security | 🔴 Blocked | 0 | V7-E02 | |
+| V4.2-E01 | security engine | 🔴 Blocked | 0 | V4-E04, V4-E01 | |
+| V4.2-E02 | AI security v2 | 🔴 Blocked | 0 | V4.2-E01 | |
+| V4.2-E03 | dependency graph analysis | 🔴 Blocked | 0 | V4-E01 | |
+| V4.2-E04 | architecture intelligence | 🔴 Blocked | 0 | V4-E01, V4-E06 | |
+| V4.2-E05 | advanced verification tiers | 🔴 Blocked | 0 | V4-E04, V4.2-E03 | |
+| V4.2-E06 | dependency intelligence | 🔴 Blocked | 0 | V4-E01 | |
+| V4.2-E07 | policy engine v1 | 🔴 Blocked | 0 | V4-E04 | |
+| V4.2-E08 | security evaluation corpus | 🔴 Blocked | 0 | V4.2-E01, V3-E03 | |
 
-### V8 — CI / release / incident intelligence
-
-| Epic | Name | Status | Completion | Dependencies (hard) | Notes |
-|------|------|--------|------------|---------------------|-------|
-| V8-E01 | CI ingestion & correlation | 🔴 Blocked | 0 | V3-E02 | |
-| V8-E02 | test-failure correlation | 🔴 Blocked | 0 | V8-E01, V6-E03 | Needs ADR-020 |
-| V8-E03 | release intelligence | 🔴 Blocked | 0 | V7-E01 | |
-| V8-E04 | documentation intelligence | 🔴 Blocked | 0 | V4-E01 | |
-| V8-E05 | infrastructure intelligence | 🔴 Blocked | 0 | V4-E01, V6-E07 | |
-| V8-E06 | incident intelligence | 🔴 Blocked | 0 | V8-E01 | |
-| V8-E07 | internal event platform v1 | 🔴 Blocked | 0 | V3-E02 (✅), V3-E04 (✅) | Hard deps done; stage order still requires V4–V7 first |
-
-### V9 — Organization platform
+### V4.4 — Historical / project / team intelligence
 
 | Epic | Name | Status | Completion | Dependencies (hard) | Notes |
 |------|------|--------|------------|---------------------|-------|
-| V9-E01 | multi-repository/org model | 🔴 Blocked | 0 | V3-E04 (✅), V8-E07 | |
-| V9-E02 | org policy engine | 🔴 Blocked | 0 | V6-E07, V9-E01 | |
-| V9-E03 | versioned API platform (/api/v1) | 🔴 Blocked | 0 | V9-E01 | Needs ADR-021 |
-| V9-E04 | event-driven workers | 🔴 Blocked | 0 | V8-E07 | |
-| V9-E05 | org memory | 🔴 Blocked | 0 | V7-E02, V9-E01 | |
-| V9-E06 | extensibility contract v1 | 🔴 Blocked | 0 | V4-E07, V5-E05 | |
-| V9-E07 | observability platform | 🔴 Blocked | 0 | V3-E02, V8-E07 | |
+| V4.4-E01 | git history intelligence | 🔴 Blocked | 0 | V4-E01 | |
+| V4.4-E02 | memory hierarchy + authority model | 🔴 Blocked | 0 | V3-E04 (✅) | Hard dep done; stage order still requires V4–V4.2 first |
+| V4.4-E03 | finding relations | 🔴 Blocked | 0 | V4-E05 | Needs ADR-019 |
+| V4.4-E04 | issue/requirement linkage | 🔴 Blocked | 0 | V4-E04 | |
+| V4.4-E05 | team/repository analytics | 🔴 Blocked | 0 | V3-E04 (✅) | Hard dep done; stage order still requires V4–V4.2 first |
+| V4.4-E06 | historical evidence in review | 🔴 Blocked | 0 | V4.4-E01, V4.4-E02, V4-E04 | |
+| V4.4-E07 | memory security | 🔴 Blocked | 0 | V4.4-E02 | |
 
-### V10 — Ecosystem / platform
+### V4.6 — CI / release / incident intelligence
 
 | Epic | Name | Status | Completion | Dependencies (hard) | Notes |
 |------|------|--------|------------|---------------------|-------|
-| V10-E01 | plugin system (sandboxed) | 🔴 Blocked | 0 | V9-E06 | |
-| V10-E02 | provider capability ecosystem | 🔴 Blocked | 0 | V5-E05, V9-E06 | |
-| V10-E03 | hosted multi-tenant foundation | 🔴 Blocked | 0 | V9-E01, V9-E03, V9-E04 | Optional, ADR-gated |
-| V10-E04 | IDE/CLI ecosystem | 🔴 Blocked | 0 | V9-E03, V4-E07 | |
-| V10-E05 | org-scale analytics | 🔴 Blocked | 0 | V7-E05, V9-E01, V9-E07 | |
-| V10-E06 | engineering command center | 🔴 Blocked | 0 | V9-E03, V9-E07 | |
+| V4.6-E01 | CI ingestion & correlation | 🔴 Blocked | 0 | V3-E02 | |
+| V4.6-E02 | test-failure correlation | 🔴 Blocked | 0 | V4.6-E01, V4.2-E03 | Needs ADR-020 |
+| V4.6-E03 | release intelligence | 🔴 Blocked | 0 | V4.4-E01 | |
+| V4.6-E04 | documentation intelligence | 🔴 Blocked | 0 | V4-E01 | |
+| V4.6-E05 | infrastructure intelligence | 🔴 Blocked | 0 | V4-E01, V4.2-E07 | |
+| V4.6-E06 | incident intelligence | 🔴 Blocked | 0 | V4.6-E01 | |
+| V4.6-E07 | internal event platform v1 | 🔴 Blocked | 0 | V3-E02 (✅), V3-E04 (✅) | Hard deps done; stage order still requires V4–V4.4 first |
+
+### V4.8 — Organization platform
+
+| Epic | Name | Status | Completion | Dependencies (hard) | Notes |
+|------|------|--------|------------|---------------------|-------|
+| V4.8-E01 | multi-repository/org model | 🔴 Blocked | 0 | V3-E04 (✅), V4.6-E07 | |
+| V4.8-E02 | org policy engine | 🔴 Blocked | 0 | V4.2-E07, V4.8-E01 | |
+| V4.8-E03 | versioned API platform (/api/v1) | 🔴 Blocked | 0 | V4.8-E01 | Needs ADR-021 |
+| V4.8-E04 | event-driven workers | 🔴 Blocked | 0 | V4.6-E07 | |
+| V4.8-E05 | org memory | 🔴 Blocked | 0 | V4.4-E02, V4.8-E01 | |
+| V4.8-E06 | extensibility contract v1 | 🔴 Blocked | 0 | V4-E07, V4.0-E05 | |
+| V4.8-E07 | observability platform | 🔴 Blocked | 0 | V3-E02, V4.6-E07 | |
+
+### V4.10 — Ecosystem / platform
+
+| Epic | Name | Status | Completion | Dependencies (hard) | Notes |
+|------|------|--------|------------|---------------------|-------|
+| V4.10-E01 | plugin system (sandboxed) | 🔴 Blocked | 0 | V4.8-E06 | |
+| V4.10-E02 | provider capability ecosystem | 🔴 Blocked | 0 | V4.0-E05, V4.8-E06 | |
+| V4.10-E03 | hosted multi-tenant foundation | 🔴 Blocked | 0 | V4.8-E01, V4.8-E03, V4.8-E04 | Optional, ADR-gated |
+| V4.10-E04 | IDE/CLI ecosystem | 🔴 Blocked | 0 | V4.8-E03, V4-E07 | |
+| V4.10-E05 | org-scale analytics | 🔴 Blocked | 0 | V4.4-E05, V4.8-E01, V4.8-E07 | |
+| V4.10-E06 | engineering command center | 🔴 Blocked | 0 | V4.8-E03, V4.8-E07 | |
 
 ## Ticket Checklist
 
@@ -774,16 +774,16 @@ check recorded for T02 (lint red→green) · ✅ no commit.
 
 ## Version Gates
 
-Actual completion gate per `V4_V10_ROADMAP.md` exit criteria (a version is
+Actual completion gate per `V4_STAGES_ROADMAP.md` exit criteria (a version is
 complete only when **all** its stage epics are ✅ **and** all exit items pass):
 
 - **V4 gate** (7 items): (1) index built from `base_sha`, hash-sealed, PR-modified file cannot alter its own review's index; (2) context provenance `{source ref, reason, tokens}` + harness relevance ≥ 0.8@10, no regression vs Phase 0; (3) bounded, truncation-flagged impact closures, degrade to "impact unknown"; (4) every AI finding carries provenance, none settable via `from_untrusted_dict`; (5) fingerprint v2 dual-compute with 100% state continuity migration; (6) injection/poisoning corpus 100% neutralized + budget-cap tests; (7) harness score ≥ Phase 0 score, full suite green, zero-key path exercises index end-to-end. **Entry gate: Phase 0 complete.**
-- **V5 gate** (5 groups): planner→executor→merger→synthesizer green under concurrency stress with no global breaker state; registry adding-fake-provider wiring test; merger golden suite with per-agent provenance + single merged comments; V5-E08 council-vs-single deltas in CI (quality ≥ baseline, cost ≤ cap); budget/failure drills correctly labelled.
-- **V6 gate** (5): security engine at corpus precision/recall floor with evidence-backed findings (locator or dropped); arch/test-intel fixtures + partial-analysis labelling; verification tiers incl. "model cannot claim test evidence" negative test; policy truth-table suite with non-overridable exclusion baseline; secret-leak corpus clean.
-- **V7 gate** (5): deterministic history on fixtures with labelled shallow-clone degradation; memory authority/poisoning corpus cannot reach approved level, backfill idempotent; relations from deterministic rules with caps; linkage with fenced issue bodies; analytics aggregate-only invariant (no author dimensions).
-- **V8 gate** (5): CI ingestion with rate-limit/missing-data drills never fatal; correlation with causation-vs-correlation honesty tests; evidence-backed release/docs/infra findings; append-only event log with replay-equality + **zero queue/worker symbols** (negative architecture test); secret-leak corpus clean in events/correlations/report.
-- **V9 gate** (5): scope-matrix CI invariant with cross-org denial; policy inheritance fixtures + effective-policy audit; `/api/v1` snapshot + breaking-change detector + SPA on v1 with deprecation headers; org-scoping migration idempotency + JsonStorage fate decided; workers only where V9-E07 shows bottleneck with parity + kill drills.
-- **V10 gate** (5): sandbox escape suite 100% denied + crash isolation + malicious-plugin corpus neutralized + plugin-disabled degradation; manifest/API-range parity for first-party rule packs; capability registry with ≥ 1 offline local adapter + retired-model deny-list; CLI == Action == sandbox parity; command center from precomputed rollups with no-individual-dimensions invariant on v1 only.
+- **V4.0 gate** (5 groups): planner→executor→merger→synthesizer green under concurrency stress with no global breaker state; registry adding-fake-provider wiring test; merger golden suite with per-agent provenance + single merged comments; V4.0-E08 council-vs-single deltas in CI (quality ≥ baseline, cost ≤ cap); budget/failure drills correctly labelled.
+- **V4.2 gate** (5): security engine at corpus precision/recall floor with evidence-backed findings (locator or dropped); arch/test-intel fixtures + partial-analysis labelling; verification tiers incl. "model cannot claim test evidence" negative test; policy truth-table suite with non-overridable exclusion baseline; secret-leak corpus clean.
+- **V4.4 gate** (5): deterministic history on fixtures with labelled shallow-clone degradation; memory authority/poisoning corpus cannot reach approved level, backfill idempotent; relations from deterministic rules with caps; linkage with fenced issue bodies; analytics aggregate-only invariant (no author dimensions).
+- **V4.6 gate** (5): CI ingestion with rate-limit/missing-data drills never fatal; correlation with causation-vs-correlation honesty tests; evidence-backed release/docs/infra findings; append-only event log with replay-equality + **zero queue/worker symbols** (negative architecture test); secret-leak corpus clean in events/correlations/report.
+- **V4.8 gate** (5): scope-matrix CI invariant with cross-org denial; policy inheritance fixtures + effective-policy audit; `/api/v1` snapshot + breaking-change detector + SPA on v1 with deprecation headers; org-scoping migration idempotency + JsonStorage fate decided; workers only where V4.8-E07 shows bottleneck with parity + kill drills.
+- **V4.10 gate** (5): sandbox escape suite 100% denied + crash isolation + malicious-plugin corpus neutralized + plugin-disabled degradation; manifest/API-range parity for first-party rule packs; capability registry with ≥ 1 offline local adapter + retired-model deny-list; CLI == Action == sandbox parity; command center from precomputed rollups with no-individual-dimensions invariant on v1 only.
 
 ## Known Technical Debt
 
@@ -840,7 +840,7 @@ pre-existing defects into epic credit):
    defines that config surface (epic exit criteria mention only tokens/usage
    markers, report telemetry, storage round-trip, redaction). Follow-up:
    decide the price-table config shape during ADR-014 ratification (or
-   V5-E07 cost arbitration). The `usage.duration_ms` → `call_ms` column and
+   V4.0-E07 cost arbitration). The `usage.duration_ms` → `call_ms` column and
    `_telemetry_summary` leave a clean seam for it.
 10. **Telemetry/finding retention — ✅ RESOLVED (V3-E04-T02, this run):**
     time-based pruning shipped on every backend: `retention_days` config

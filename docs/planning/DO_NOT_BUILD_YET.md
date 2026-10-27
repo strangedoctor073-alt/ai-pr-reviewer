@@ -35,7 +35,7 @@ INTERIM     what serves the need until then
   service boundary on the whiteboard.
 - **MISSING:** everything — there is no queue (ADR-008), no per-service data
   contract (ADR-011 consolidation not done), no observability to tell whether
-  the split helped (V3-E02 telemetry, V9-E07). C5 global breakers make
+  the split helped (V3-E02 telemetry, V4.8-E07). C5 global breakers make
   multi-process unsafe *today*.
 - **TRIGGER:** load layer (TESTING §L14) shows a single process cannot meet a
   real workload, **and** the bottleneck is unfixable in-process (query,
@@ -47,11 +47,11 @@ INTERIM     what serves the need until then
 ### A2 · Kubernetes (or any orchestrator) deployment
 - **WHAT:** k8s manifests/Helm/operators for the engine or dashboard.
 - **WHY SEXY:** enterprise credibility, "production-grade" optics.
-- **MISSING:** a hosted product to deploy (V10 gated, ADR-010), containers
+- **MISSING:** a hosted product to deploy (V4.10 gated, ADR-010), containers
   beyond the current single `Dockerfile` Action image, and any queue/worker
   model (A3). Nothing in the OSS path needs orchestration — CI is `docker
   build` (`.github/workflows/ci.yml`).
-- **TRIGGER:** an approved hosted offering (V10 scope decision) with ≥1 real
+- **TRIGGER:** an approved hosted offering (V4.10 scope decision) with ≥1 real
   deployment target.
 - **INTERIM:** the Action image for users; `docker run` + `uvicorn` for the
   dashboard; a single-process systemd/compose example in docs if asked — docs
@@ -61,11 +61,11 @@ INTERIM     what serves the need until then
 - **WHAT:** Rabbit/Kafka/Redis streams + workers ahead of an actual queue
   workload.
 - **WHY SEXY:** looks like the architecture diagram of a "real platform";
-  preemptively "future-proofs" V8 CI events.
+  preemptively "future-proofs" V4.6 CI events.
 - **MISSING:** measured need (zero — one review per process, §12), typed
-  in-process events first (ADR-008 stage a), webhook volume data (V9,
+  in-process events first (ADR-008 stage a), webhook volume data (V4.8,
   ADR-013).
-- **TRIGGER:** L14 numbers show sustained work beyond one process **or** V9
+- **TRIGGER:** L14 numbers show sustained work beyond one process **or** V4.8
   webhook ingestion exceeds single-process handling; queue design then gets
   an ADR, not a default.
 - **INTERIM:** run-scoped typed events (ADR-008a) — the same records as
@@ -79,7 +79,7 @@ INTERIM     what serves the need until then
 - **MISSING:** V3-E02 telemetry (start with flat per-run/per-call records),
   multiple services to trace (A1), a self-hosted backend story that doesn't
   violate the no-phone-home default (ADR-014).
-- **TRIGGER:** V9-E07 dashboards exist, and diagnosing a real incident
+- **TRIGGER:** V4.8-E07 dashboards exist, and diagnosing a real incident
   requires cross-process spans that per-run records cannot answer — i.e. after
   A1's trigger fired too.
 - **INTERIM:** the V3-E02 telemetry spine: run + call records in the report
@@ -93,7 +93,7 @@ INTERIM     what serves the need until then
 - **WHY SEXY:** flexible client queries, "modern API" talking point.
 - **MISSING:** any second client that needs it (there is one SPA, dependency-
   free, consuming plain REST), a versioned REST contract first (listed as
-  absent in §10.5; AF API platform is V9), and query-cost controls the
+  absent in §10.5; AF API platform is V4.8), and query-cost controls the
   dashboard's rate limiter doesn't cover.
 - **TRIGGER:** ≥2 real external consumers demonstrably cannot compose their
   views from documented REST endpoints, and the cost of adding those endpoints
@@ -110,7 +110,7 @@ INTERIM     what serves the need until then
   constraint C9), concurrency semantics for concurrent edits (last-writer-wins
   is a decision no one has made), and ADR-010's boundary — plus ADR-003
   authority model for *who* may promote memory.
-- **TRIGGER:** multi-user auth exists (V9/V10 hosted decision) **and** user
+- **TRIGGER:** multi-user auth exists (V4.8/V4.10 hosted decision) **and** user
   evidence shows stale-page confusion is a top support issue.
 - **INTERIM:** the current request/response SPA with a refresh; optimistic
   updates are a frontend-only improvement that doesn't need a socket.
@@ -126,9 +126,9 @@ so nobody treats them as schedule slips.*
 ### B1 · Autonomous code commits (engine pushes code changes)
 - **WHAT:** the reviewer applies its own suggested fixes as commits.
 - **WHY SEXY:** "AI that fixes what it finds" — the demo everyone wants.
-- **MISSING:** fix intelligence that is correct without a human (V5–V6 fix
+- **MISSING:** fix intelligence that is correct without a human (V4.0–V4.2 fix
   planning is *propose-only*), verification of the fix beyond diff coverage
-  (ADR-012 — code execution evidence is V6+ and non-trivial), and a signed-off
+  (ADR-012 — code execution evidence is V4.2+ and non-trivial), and a signed-off
   trust model for write credentials beyond `pull-requests: write`.
 - **TRIGGER:** explicit vision-boundary re-decision + fix-precision on the
   evaluation corpus ≥ **proposed baseline** 0.95 over a sustained window
@@ -141,8 +141,8 @@ so nobody treats them as schedule slips.*
 - **WHAT:** the platform merges PRs it has reviewed/approved.
 - **WHY SEXY:** the endgame of "AI approval flow".
 - **MISSING:** everything that makes merge decisions defensible — ADR-012
-  evidence tiers with test results (V6), policy engine completeness (ADR-015;
-  org layer V9), CI intelligence (V8) — plus a liability/threat model
+  evidence tiers with test results (V4.2), policy engine completeness (ADR-015;
+  org layer V4.8), CI intelligence (V4.6) — plus a liability/threat model
   (`SECURITY_ROADMAP.md`) and human accountability for merges.
 - **TRIGGER:** a *human* policy explicitly authorizes auto-merge for a defined
   class (docs-only, green-CI, zero-findings) **and** every prerequisite above
@@ -155,7 +155,7 @@ so nobody treats them as schedule slips.*
 ### B3 · Autonomous production deployment
 - **WHAT:** reviewer/release tooling deploys to production.
 - **WHY SEXY:** closes the loop from PR to prod.
-- **MISSING:** release intelligence (V8), incident intelligence (V8), and —
+- **MISSING:** release intelligence (V4.6), incident intelligence (V4.6), and —
   fundamentally — any product boundary allowing write access outside GitHub
   comments (§6). Incident stage is explicitly "retrospective, read-only; no
   autonomous production integration" (`MASTER_VISION.md` §5-AC).
@@ -168,13 +168,13 @@ so nobody treats them as schedule slips.*
 - **WHAT:** auto-remediation on incidents: roll back, gate traffic, open
   fix-PRs during an incident.
 - **WHY SEXY:** "AIOps" is a magnet slide.
-- **MISSING:** V8 read-only incident ingestion first, evidence quality
+- **MISSING:** V4.6 read-only incident ingestion first, evidence quality
   (ADR-004), ADR-012 trust tiers for "this mitigation works", on-call/account
   integration that does not exist.
 - **TRIGGER:** vision re-decision **plus** a real operator with real
   accountability asking for it; read-only retrospective must have shipped and
-  been used first (V8 trigger).
-- **INTERIM:** read-only incident intelligence (V8): correlate regressions
+  been used first (V4.6 trigger).
+- **INTERIM:** read-only incident intelligence (V4.6): correlate regressions
   with recently merged PRs, summarize blast radius, attach evidence — humans
   remediate.
 
@@ -202,10 +202,10 @@ so nobody treats them as schedule slips.*
   control plane.
 - **WHY SEXY:** revenue narrative; "real product".
 - **MISSING:** single-tenant boundary hygiene (ADR-010's seam), queue (A3),
-  observability/envelopes (V3-E02 → V9-E07), storage consolidation + retention
-  (ADR-011/C9), webhook posture (ADR-013/V9), load data (L14). It is the
-  *last* stage (V10) for a reason.
-- **TRIGGER:** explicit V10 scope approval in `MASTER_ROADMAP.md` + named
+  observability/envelopes (V3-E02 → V4.8-E07), storage consolidation + retention
+  (ADR-011/C9), webhook posture (ADR-013/V4.8), load data (L14). It is the
+  *last* stage (V4.10) for a reason.
+- **TRIGGER:** explicit V4.10 scope approval in `MASTER_ROADMAP.md` + named
   demand evidence + all of the above green.
 - **INTERIM:** multi-repo single-tenant usage works today (each repo's Action
   run + one dashboard); orgs self-host the dashboard with Postgres
@@ -215,14 +215,14 @@ so nobody treats them as schedule slips.*
 - **WHAT:** per-developer quality scores, velocity league tables, performance
   dashboards.
 - **WHY SEXY:** dashboards that rank people get executive attention.
-- **MISSING:** V7 historical/team intelligence with an authority model
+- **MISSING:** V4.4 historical/team intelligence with an authority model
   (ADR-003), enough signal per team to say anything defensible — and a
   permission the product explicitly does not have: vision §5-AD is
   "**trends and hotspots only; explicitly no individual performance rankings
   or quality scores**" and §6 forbids ranking individuals.
 - **TRIGGER:** vision-boundary re-decision (human approval) — prerequisite
   epics staying green is **not** sufficient.
-- **INTERIM:** aggregate trend views that V7 does allow: findings per
+- **INTERIM:** aggregate trend views that V4.4 does allow: findings per
   component, hotspots by path, verification-rate trends — scoped to
   code/teams-as-structures, never to named individuals.
 
@@ -249,7 +249,7 @@ so nobody treats them as schedule slips.*
 - **WHAT:** replicate report/finding history into a warehouse for org BI.
 - **WHY SEXY:** "data-driven engineering" decks.
 - **MISSING:** any consumer of that data beyond `/api/metrics`, retention
-  discipline (C9), and the aggregation work that V9-E07 will do inside the
+  discipline (C9), and the aggregation work that V4.8-E07 will do inside the
   dashboard first.
 - **TRIGGER:** documented analytics requirements the dashboard's own storage
   cannot serve after query-level fixes (ADR-011 revisit condition).
@@ -270,7 +270,7 @@ so nobody treats them as schedule slips.*
   240 s timeouts — §12), and the positioning decision that IDE review is a
   *client* of the platform gateway (`MASTER_VISION.md` §2), not a fork of the
   engine. Vision: IDE/plugins only after contracts stabilize (§5-A).
-- **TRIGGER:** versioned API platform shipped (V9, AF) **and** an evaluation
+- **TRIGGER:** versioned API platform shipped (V4.8, AF) **and** an evaluation
   showing static/incremental analysis meets interactive latency on the L13
   corpus.
 - **INTERIM:** local CLI already gives editor-adjacent workflows
@@ -282,12 +282,12 @@ so nobody treats them as schedule slips.*
   plugins)
 - **WHAT:** an app-store surface for analyzers/providers/reporters.
 - **WHY SEXY:** ecosystem story; network effects.
-- **MISSING:** the plugin *contract* itself (ADR-009: V9 defines, V10 ships),
+- **MISSING:** the plugin *contract* itself (ADR-009: V4.8 defines, V4.10 ships),
   a conformance suite (TESTING §L18 candidate), sandboxing verdicts, signing/
   provenance for third-party code, and abuse/security review processes —
   marketplace without a contract is a supply-chain attack vector (plugin
   output would be untrusted input per §6).
-- **TRIGGER:** contract + conformance suite shipped (V9/V10) and real
+- **TRIGGER:** contract + conformance suite shipped (V4.8/V4.10) and real
   third-party plugins exist that users *ask* to discover — never before.
 - **INTERIM:** the documented contribution paths that work today: rule packs
   (registered in `static/engine.build_default_registry()`), provider adapters
@@ -305,7 +305,7 @@ so nobody treats them as schedule slips.*
 - **MISSING:** V3-E03 evidence that a generalist beats the deterministic core
   (it can't — identity/lifecycle/verification are *defined* to be
   deterministic, vision §3.2, §13.3), capability registry for right-sizing
-  (V5, ADR-007), cost data (V3-E02) — and it contradicts honest-fallback:
+  (V4.0, ADR-007), cost data (V3-E02) — and it contradicts honest-fallback:
   static rules are free and provable (`static/`), a prompt is neither.
 - **TRIGGER:** evaluation corpus shows the unified approach ≥ **proposed
   baseline** parity on recall *and* precision *and* verification accuracy
@@ -321,10 +321,10 @@ so nobody treats them as schedule slips.*
   later reviews trust permanently.
 - **WHY SEXY:** "the tool learns my codebase" — the sticky feature.
 - **MISSING:** ADR-003 authority model (this item is literally why it exists),
-  V7 memory hierarchy, injection testing for memory writes (V7 untrusted
+  V4.4 memory hierarchy, injection testing for memory writes (V4.4 untrusted
   surface), human promotion UX.
 - **TRIGGER:** ADR-003 accepted and implemented, memory-write injection corpus
-  (V7) green, promotion workflow proven in use — then `observed`-authority
+  (V4.4) green, promotion workflow proven in use — then `observed`-authority
   auto-rows may exist as *candidates*, still requiring human promotion before
   influencing anything.
 - **INTERIM:** human-authored memory + mutes as built (`memory.py`,
@@ -353,13 +353,13 @@ so nobody treats them as schedule slips.*
 - **WHAT:** agents that spawn agents — re-plan, self-critique, retry until
   "done" — with no ceiling.
 - **WHY SEXY:** frontier-model demos do this; looks maximally autonomous.
-- **MISSING:** *every* V5 prerequisite: fan-out primitives (C1), shared prompt
+- **MISSING:** *every* V4.0 prerequisite: fan-out primitives (C1), shared prompt
   builder (C2), provenance for merge (C3/C4), non-global breakers (C5) — and
-  the thing this entry exists for: **cost ceilings** (V5-E07 arbitration,
-  V3-E02 telemetry; `COST_TOKEN_ARCHITECTURE.md` §6 gives V5 a 300k-token
+  the thing this entry exists for: **cost ceilings** (V4.0-E07 arbitration,
+  V3-E02 telemetry; `COST_TOKEN_ARCHITECTURE.md` §6 gives V4.0 a 300k-token
   hard cap). Unbounded loops on BYO keys spend a user's money with no
   consent UX.
-- **TRIGGER:** bounded fan-out (ADR-006) ships, is evaluated (V5-E08), and
+- **TRIGGER:** bounded fan-out (ADR-006) ships, is evaluated (V4.0-E08), and
   shows marginal quality gains per token that *justify* additional rounds —
   each round becomes an explicit budget line, not an open loop.
 - **INTERIM:** bounded, declared agents per ADR-006: fixed batch count,

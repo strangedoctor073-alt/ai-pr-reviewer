@@ -6,8 +6,8 @@
 
 Related: `CURRENT_ARCHITECTURE.md` (defect **C6** no telemetry, **C7**
 character budgets) · `MASTER_VISION.md` (§3.7 cost-aware OSS, §5-U/V capability
-stances) · `EPIC_BACKLOG.md` (V3-E02 telemetry foundation, V5-E07 cost
-arbitration, V9-E07 observability platform) · `TESTING_EVALUATION_PLAN.md` ·
+stances) · `EPIC_BACKLOG.md` (V3-E02 telemetry foundation, V4.0-E07 cost
+arbitration, V4.8-E07 observability platform) · `TESTING_EVALUATION_PLAN.md` ·
 `ADR_INDEX.md` (ADR-014 telemetry/cost accounting).
 
 ---
@@ -87,7 +87,7 @@ ReviewTelemetry (per run)                    CallTelemetry (per provider/batch c
 ─────────────────────────                    ──────────────────────────────
 run_id, repo, pr_number (no code)            call_index, batch_count_total
 engine, backend, model, review_mode          provider, model
-depth / risk label (V5-E04)                  input_tokens, output_tokens   ← dead today
+depth / risk label (V4.0-E04)                  input_tokens, output_tokens   ← dead today
 duration_ms (exists: models.py:248)          duration_ms                    ← new
 batches_total, batches_static                retries, http_status_class     ← new
 fallback_used, fallback_reason               circuit_state (open/half/closed) ← new
@@ -131,7 +131,7 @@ formalizes it.
 
 ### 3.3 Roll-up layers
 per batch → per review (JSON `telemetry` block) → per repo (storage rows) →
-per dashboard (`/api/metrics` series) → per org (V9-E07, multi-repo).
+per dashboard (`/api/metrics` series) → per org (V4.8-E07, multi-repo).
 
 ### 3.4 Privacy note (normative)
 Telemetry rows may contain: provider, model, counts, durations, status classes,
@@ -189,25 +189,25 @@ specific diff; reusing it is stale review (vision §3.1).
 - Prior findings are re-sent as compact identity rows (fingerprint, file, title,
   state) — never full payloads (D13 caps already bound this).
 
-### 4.4 Model routing / capability matching (→ V5 capability registry)
+### 4.4 Model routing / capability matching (→ V4.0 capability registry)
 - Right-size model per task: cheap model for style/summarize batches, capable
   model for security/correctness judgment; static rules for anything
   deterministic (vision §3.2 — identity/lifecycle/verification never spend
   tokens at all; they already don't).
-- Routing inputs: task kind, PR risk (V5-E04), batch category, provider price,
+- Routing inputs: task kind, PR risk (V4.0-E04), batch category, provider price,
   circuit state. Router is `model_router` grown in place (keep the
   `AIProvider` seam — ADR-007).
 - Guardrail: routing decisions are logged in telemetry (`model`,
   `review_mode`, `reason`) so a "cheap" route can be audited for quality loss
-  by the evaluation harness (V5-E08 correlates route → precision/recall).
+  by the evaluation harness (V4.0-E08 correlates route → precision/recall).
 
-### 4.5 Review depth (link V5-E04 adaptive depth)
+### 4.5 Review depth (link V4.0-E04 adaptive depth)
 Depth presets (shallow/standard/deep) map to: batch scope, model tier, max
 batches, repo-context depth. Depth selection is **explainable** (risk features
 listed in telemetry, vision §3.1) and informational until proven — never
 auto-deepen (cost runaway) nor auto-shallow on security-relevant surfaces.
 
-### 4.6 Specialist activation gates (V5+)
+### 4.6 Specialist activation gates (V4.0+)
 Specialist agents (security, performance, docs…) activate **only when**
 risk/context justifies: e.g. security specialist when touched paths match
 sensitive globs or diff contains sinks; perf specialist on algorithmic files.
@@ -248,7 +248,7 @@ cost-reason recorded).
 | Summed per-batch budget (C7 fix) | Safe | trim order fixed (§4.1); core last |
 | Prompt-prefix caching | Safe | SHA/policy-keyed invalidation; trusted-side prefix only |
 | Cheaper model for style/summary batches | **Quality-risking** | routing logged; harness must show recall delta ≤ **proposed 3 pp** on style corpus before defaulting |
-| Shallow depth on low-risk PRs (V5-E04) | **Quality-risking** | risk features explicit in report; user override always wins; security surfaces exempt from shallow |
+| Shallow depth on low-risk PRs (V4.0-E04) | **Quality-risking** | risk features explicit in report; user override always wins; security surfaces exempt from shallow |
 | Fewer repo-context files under budget pressure | **Quality-risking** (could hide a definition the finding needs) | never drop files that *contain flagged symbols* (V4 index makes this checkable); attribution warning mandatory |
 | Skip specialist activation when gate says no | **Quality-risking** | gate thresholds config-visible; false-gate rate tracked (§4.6); security specialist gate is conservative-by-default |
 | Reduce batch size to fit context window | Safe (more calls, same content) | watch total-call cost — smaller batches can *increase* tokens; telemetry must show net effect |
@@ -273,12 +273,12 @@ month of data.
 |---|---|---|---|
 | Phase 0 / V3.x | telemetry only — no behavior change | 120,000 tok | measure first; ship the hard stop (§4.7) with the number above |
 | V4 repository intelligence | index build amortized per repo + retrieval context | 150,000 tok/run; index rebuild capped at 300,000 tok/month/repo | index cache (§4.2) is the offset; reindex triggered by SHA delta only |
-| V5 multi-agent review | N agents × fan-out | 300,000 tok/run hard cap; per-agent 60,000; V5-E07 arbitrates | bounded fan-out is a *shipping requirement*, not a nicety (C1/C5); council must fit budget or degrade to fewer agents **with attribution** |
-| V6 security/testing/architecture intelligence | security specialist + test-evidence runs | 350,000 tok/run | security specialist gate (§4.6) keeps median well below cap |
-| V7 historical/team intelligence | git/issue history summarization over time windows | 250,000 tok/run; history queries cached by (repo, window, policy version) | query planner bounds window size |
-| V8 CI/release/incident | CI log + release note ingestion | 400,000 tok/run | logs are bulky → deterministic pre-filter before any model call |
-| V9 organization platform | org-wide rollups, cross-repo policies | budget moves to **per-org monthly** envelope: 5,000,000 tok/month/org (proposed) with per-run caps still enforced | dashboards (V9-E07) enforce/visualize the envelope |
-| V10 ecosystem/platform | plugin-provided agents | plugin declares its budget request; org admin approval required; engine enforces | unbudgeted plugin calls rejected (ADR-009) |
+| V4.0 multi-agent review | N agents × fan-out | 300,000 tok/run hard cap; per-agent 60,000; V4.0-E07 arbitrates | bounded fan-out is a *shipping requirement*, not a nicety (C1/C5); council must fit budget or degrade to fewer agents **with attribution** |
+| V4.2 security/testing/architecture intelligence | security specialist + test-evidence runs | 350,000 tok/run | security specialist gate (§4.6) keeps median well below cap |
+| V4.4 historical/team intelligence | git/issue history summarization over time windows | 250,000 tok/run; history queries cached by (repo, window, policy version) | query planner bounds window size |
+| V4.6 CI/release/incident | CI log + release note ingestion | 400,000 tok/run | logs are bulky → deterministic pre-filter before any model call |
+| V4.8 organization platform | org-wide rollups, cross-repo policies | budget moves to **per-org monthly** envelope: 5,000,000 tok/month/org (proposed) with per-run caps still enforced | dashboards (V4.8-E07) enforce/visualize the envelope |
+| V4.10 ecosystem/platform | plugin-provided agents | plugin declares its budget request; org admin approval required; engine enforces | unbudgeted plugin calls rejected (ADR-009) |
 
 Illustrative USD only (prices change; do not treat as data): 120k tok ≈
 $0.30–0.60 on mid-tier models, ≈ $0.03–0.08 on small models — order-of-magnitude
@@ -318,4 +318,4 @@ Telemetry consumers: `TESTING_EVALUATION_PLAN.md` (§4 metrics) ·
 Decisions: `ADR_INDEX.md` (ADR-014, ADR-007 provider abstraction, ADR-011
 storage) · What not to build yet: `DO_NOT_BUILD_YET.md` (tracing stack,
 multi-tenant billing) · Order: `MASTER_ROADMAP.md`, `EPIC_BACKLOG.md`
-(V3-E02 first, V5-E07 second, V9-E07 third).
+(V3-E02 first, V4.0-E07 second, V4.8-E07 third).

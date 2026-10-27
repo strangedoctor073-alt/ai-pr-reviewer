@@ -8,7 +8,7 @@
 Conventions: Context cites **current** code (real file paths); forward-looking
 statements name *likely modules* or *new subsystems*. "Revisit conditions" are
 measurable triggers, not feelings — each names the metric or event that forces
-a re-decision. Epics referenced (`V3-E02`, `V5-E07`, …) live in
+a re-decision. Epics referenced (`V3-E02`, `V4.0-E07`, …) live in
 `EPIC_BACKLOG.md`; stage order lives in `MASTER_ROADMAP.md`.
 
 ## Index
@@ -23,7 +23,7 @@ a re-decision. Epics referenced (`V3-E02`, `V5-E07`, …) live in
 | ADR-006 | Bounded fan-out agent architecture under one orchestrator | Proposed — requires human approval before implementation |
 | ADR-007 | Provider abstraction: structural protocol as the seam | Accepted (de facto) |
 | ADR-008 | In-process pipeline first; events before queues | Accepted (de facto) / Proposed at the queue boundary |
-| ADR-009 | Plugin contract deferred to V9, shipped V10 | Proposed — requires human approval before implementation |
+| ADR-009 | Plugin contract deferred to V4.8, shipped V4.10 | Proposed — requires human approval before implementation |
 | ADR-010 | Single-tenant now; multi-tenancy as a boundary, not a rewrite | Accepted (de facto) |
 | ADR-011 | Storage evolution behind `ReviewStorage` | Accepted (de facto) |
 | ADR-012 | Verification trust model: deterministic evidence only | Accepted (de facto) |
@@ -75,11 +75,11 @@ the split question.
 
 **Revisit conditions:** load layer (TESTING §2-L14) shows sustained need for
 >1 engine worker per review **or** dashboard p95 latency fails at realistic
-row counts with no query-level fix remaining; V9 organization platform scope
+row counts with no query-level fix remaining; V4.8 organization platform scope
 approved with concurrent multi-repo workloads.
 
 **Links:** `CURRENT_ARCHITECTURE.md` §2-§3, §13.1 · `TARGET_ARCHITECTURE.md`
-· `DO_NOT_BUILD_YET.md` (microservices) · V9 platform epics.
+· `DO_NOT_BUILD_YET.md` (microservices) · V4.8 platform epics.
 
 ---
 
@@ -118,7 +118,7 @@ or stale index degrades to today's behavior (bounded fetch), never to a wrong
 answer presented as right.
 
 **Consequences:** + no new infrastructure; + rebuild-on-demand consistency;
-+ index doubles as context retrieval for V4/V5. − first index build costs
++ index doubles as context retrieval for V4/V4.0. − first index build costs
 tokens/API only insofar as file reads (bounded by `COST_TOKEN_ARCHITECTURE.md`
 §6); − hand-rolled adjacency code for future query types; − index freshness
 must be SHA-invalidated on every push.
@@ -142,7 +142,7 @@ on ingest into prompts) and dashboard mute rows `fingerprint:<fp>` (write-
 protected). Vision is explicit: "AI-derived observations never become
 permanent truth automatically" (§5-Q) and the platform "will not convert AI
 observations into permanent organizational truth without human approval"
-(§6). V7 builds the full hierarchy org→team→repo→component→PR→finding.
+(§6). V4.4 builds the full hierarchy org→team→repo→component→PR→finding.
 
 **Decision:** Every memory row carries an **authority level** and a provenance
 record:
@@ -164,7 +164,7 @@ written by the engine automatically); (d) promotions are append-only audited
 **Alternatives considered:**
 1. *AI self-writing memory (auto-commit observations)* — rejected: contradicts
    vision §3.3/§6; an injected PR could launder text into permanent truth
-   (injection surface, V7 untrusted-input list).
+   (injection surface, V4.4 untrusted-input list).
 2. *Flat single-tier memory with labels* — rejected: labels without enforced
    influence rules rot; the whole point is that low-authority rows must not
    be able to answer policy questions.
@@ -182,11 +182,11 @@ three storage implementations (§7); − more states to test (layer L16);
 
 **Revisit conditions:** telemetry shows < **proposed baseline** 10% of
 `observed` rows ever promoted over 3 months (authority model not pulling its
-weight → collapse levels); V7 scope review; any incident where a low-
+weight → collapse levels); V4.4 scope review; any incident where a low-
 authority row influenced a policy decision (immediate re-decision).
 
 **Links:** `MASTER_VISION.md` §5-Q, §3.3, §6 · `DATA_MODEL.md` ·
-`SECURITY_ROADMAP.md` (V7 injection surface) · ADR-004, ADR-012.
+`SECURITY_ROADMAP.md` (V4.4 injection surface) · ADR-004, ADR-012.
 
 ---
 
@@ -195,7 +195,7 @@ authority row influenced a policy decision (immediate re-decision).
 **Status:** Approved — human ratification 2026-10-07 (V4-C0, recorded per
 C0-T05). V4 ships the *embedded* subset defined in the staging note below;
 the content-addressed evidence *store* stays Proposed until a consumer needs
-cross-run re-validation (expected V6-E05).
+cross-run re-validation (expected V4.2-E05).
 
 **Context:** Vision §3.1: "Every important claim carries evidence (code, rule,
 test output, history, tool result) with provenance. No unsupported certainty."
@@ -236,7 +236,7 @@ memory (ADR-003), and the dashboard point at the same artifact instead of
 copying text (§7's duplication lesson).
 
 **Consequences:** + findings become auditable ("show me why") — feeds the
-review-quality benchmark (TESTING §L12); + V6 test-evidence tiers have a
+review-quality benchmark (TESTING §L12); + V4.2 test-evidence tiers have a
 storage home. − new subsystem with retention questions (must land with a
 retention policy — bounded everything); − storage growth measurable in L14;
 − three storage implementations to extend (§7).
@@ -300,13 +300,13 @@ not the hash — it is missing *attribution* (C3); fixing attribution fixes
 council merge and cross-engine dedup without destabilizing stored state.
 
 **Consequences:** + zero migration for existing rows; + relations become
-possible at V5. − C4 duplicate comments persist until v2 merge logic ships;
+possible at V4.0. − C4 duplicate comments persist until v2 merge logic ships;
 − two identity concepts to explain (documented in the fingerprint docstring);
 − title normalization changes remain breaking — treat normalization as frozen
 until v2.
 
 **Revisit conditions:** duplicate-rate metric exceeds **proposed baseline**
-0.02 in V5 multi-engine runs (TESTING §4); V4-E05 provenance lands (v2 work
+0.02 in V4.0 multi-engine runs (TESTING §4); V4-E05 provenance lands (v2 work
 may start); any proposal to alter title normalization (auto re-decision —
 identity-affecting).
 
@@ -323,7 +323,7 @@ identity-affecting).
 fan-out/merge primitive (C1). Shared single `SYSTEM_PROMPT`, prompt assembly
 copy-pasted in three providers (C2). Process-global sequential-only circuit
 breakers (C5). No provenance on findings (C3). `model_router.run_analysis`
-already does per-batch static fallback — the batching seam exists. V5 is
+already does per-batch static fallback — the batching seam exists. V4.0 is
 "multi-agent review" in the canonical stage order.
 
 **Decision:** Agents are **declarative descriptors, not autonomous processes**:
@@ -358,13 +358,13 @@ fixed (per-backend breaker state) before parallel calls — hard prerequisite;
 improves only if calls are truly concurrent (today sequential, §12).
 
 **Revisit conditions:** C1/C3/C5 prerequisites not green → do not start;
-V5-E08 evaluation shows council quality delta ≤ **proposed baseline** 3 pp
+V4.0-E08 evaluation shows council quality delta ≤ **proposed baseline** 3 pp
 over single-agent at ≥ 1.5× cost (re-evaluate whether fan-out is worth it);
 fan-out budget exhaustion becomes routine (> **proposed baseline** 20% of
 runs) → shrink scope or re-decide.
 
 **Links:** `MASTER_VISION.md` §5-E/§5-F · `AI_AGENT_ARCHITECTURE.md` ·
-`EPIC_BACKLOG.md` (V5-E07 cost arbitration, V5-E08 evaluation) ·
+`EPIC_BACKLOG.md` (V4.0-E07 cost arbitration, V4.0-E08 evaluation) ·
 ADR-005, ADR-007, ADR-014.
 
 ---
@@ -388,7 +388,7 @@ don't replace. Evolution path: (a) consolidate prompt assembly + JSON
 extraction into one shared layer (kills the C2 copy-paste); (b) add an
 explicit capability/metadata declaration (supported modes, usage parsing,
 vision, streaming) consumed by routing; (c) collapse the 7 hard-coded sites
-into one registry; (d) leave plugin-grade discovery to ADR-009/V10.
+into one registry; (d) leave plugin-grade discovery to ADR-009/V4.10.
 
 **Alternatives considered:**
 1. *Adopt a unified LLM SDK (litellm-style) as the abstraction* — rejected:
@@ -405,7 +405,7 @@ to `analyze()`'s return — one more reason the protocol stays narrow and its
 outcome type carries the data.
 
 **Consequences:** + provider additions become one registry entry after
-consolidation; + task routing (V5) has capabilities to route on; − informal
+consolidation; + task routing (V4.0) has capabilities to route on; − informal
 contract (`backend`, `startup_warnings`) stays undocumented-in-types until
 formalized; − three providers still drift until the shared layer lands;
 − usage parsing asymmetry persists (Gemini TODO, `ai/gemini.py:159`) until
@@ -413,7 +413,7 @@ ADR-014.
 
 **Revisit conditions:** a 4th backend still requires > **proposed baseline**
 3 code sites after registry consolidation (abstraction leaking → re-decide);
-V10 local providers need runtime discovery; capability metadata grows
+V4.10 local providers need runtime discovery; capability metadata grows
 contradictions (e.g. two providers claiming incompatible mode semantics).
 
 **Links:** `CURRENT_ARCHITECTURE.md` §8, §10.1 · `COST_TOKEN_ARCHITECTURE.md`
@@ -429,13 +429,13 @@ boundary — requires human approval before implementation
 **Context:** Everything is synchronous in-process: orchestrator stages run
 sequentially, batches are sequential (§12), dashboard single-worker, breakers
 process-global (C5). There is no event bus, no queue, no workers (§10.5).
-Vision stages internal events at V8, webhooks at V9, and a "queue only where
+Vision stages internal events at V4.6, webhooks at V4.8, and a "queue only where
 justified" (§5-AG/AH).
 
 **Decision:** (a) Phase 0: keep the synchronous pipeline; formalize **typed
 in-process events** (dataclass records appended to a run-scoped list — review
 started, batch done, fallback taken, budget exhausted — the same records as
-telemetry, ADR-014) instead of ad-hoc warnings. (b) At V8, events are written
+telemetry, ADR-014) instead of ad-hoc warnings. (b) At V4.6, events are written
 through a small dispatcher interface so subscribers (reporter, telemetry,
 audit) stop being hand-wired call sites. (c) An external queue/worker is
 allowed **only** when a measured trigger fires — never preemptively.
@@ -444,7 +444,7 @@ allowed **only** when a measured trigger fires — never preemptively.
 1. *Stand up broker-backed queues now (Rabbit/Redis/Kafka)* — rejected:
    nothing to queue (one review per process), operational cost on the free
    path, ADR-001; `DO_NOT_BUILD_YET.md` (event-driven queue infrastructure).
-2. *No events at all, keep scattered callbacks* — rejected: as V5/V8 add
+2. *No events at all, keep scattered callbacks* — rejected: as V4.0/V4.6 add
    subscribers, call-site fan-out becomes the next C2-style copy-paste and
    telemetry (V3-E02) needs one canonical stream anyway.
 
@@ -459,8 +459,8 @@ block the review — invariant §13.6); − run-scoped event lists must be bound
 (memory ceiling).
 
 **Revisit conditions:** measured trigger — sustained concurrent workloads
-beyond one process (L14) **or** webhook ingestion (ADR-013/V9) exceeding
-single-process handling with bounded latency; V8 CI-event volume data in hand;
+beyond one process (L14) **or** webhook ingestion (ADR-013/V4.8) exceeding
+single-process handling with bounded latency; V4.6 CI-event volume data in hand;
 event list growth > **proposed baseline** 1,000 events/run (trim first, queue
 never).
 
@@ -469,7 +469,7 @@ never).
 
 ---
 
-## ADR-009 — Plugin contract deferred to V9, shipped V10
+## ADR-009 — Plugin contract deferred to V4.8, shipped V4.10
 
 **Status:** Proposed — requires human approval before implementation
 
@@ -477,11 +477,11 @@ never).
 (`static/engine.build_default_registry()` tuple — the single wiring point),
 provider protocol, `ReviewStorage`. "No plugin system, no event bus, no
 versioned API, no public extension contract" (§10.5). Vision: "AI Plugin
-architecture — V9 defines the contract, V10 ships it" (§5), and community
+architecture — V4.8 defines the contract, V4.10 ships it" (§5), and community
 surface is rule packs + provider adapters until then (§7).
 
 **Decision:** Define the plugin contract **as a document + conformance suite
-first (V9)**, ship runtime loading in V10. Contract sketch: three plugin kinds
+first (V4.8)**, ship runtime loading in V4.10. Contract sketch: three plugin kinds
 (rule pack, provider adapter, reporter/exporter), versioned input/output
 schemas (finding-shaped data only), **declared resource budget** (enforced
 hard-stop, `COST_TOKEN_ARCHITECTURE.md` §6), sandboxed trust level (plugin
@@ -500,18 +500,18 @@ AI plugins never gate PRs (ADR-016).
 
 **Reasoning:** Contracts are cheap to write and expensive to break; shipping
 before the data model (evidence, identity v2, authority) stabilizes would
-enshrine pre-V5 shapes.
+enshrine pre-V4.0 shapes.
 
 **Consequences:** + community extensibility without core fork; + conformance
-suite doubles as an 18th test layer (TESTING §6); − contributors wait for V9/
-V10 — interim path must be documented so it doesn't feel like gatekeeping;
+suite doubles as an 18th test layer (TESTING §6); − contributors wait for V4.8/
+V4.10 — interim path must be documented so it doesn't feel like gatekeeping;
 − sandboxing interpreted plugins is hard — worst case is "trusted, reviewed
 plugins only", stated honestly.
 
 **Revisit conditions:** first credible external request that a rule pack
 cannot satisfy (contract requirements gathering trigger); data-model stability
 (evidence/identity/authority schemas unchanged for **proposed baseline** one
-minor release) unlocks V9 drafting; a security review of plugin loading
+minor release) unlocks V4.8 drafting; a security review of plugin loading
 completes before any runtime loading ships.
 
 **Links:** `MASTER_VISION.md` §5 (AI), §7 · `TARGET_ARCHITECTURE.md` ·
@@ -529,10 +529,10 @@ with a single shared token (`DASHBOARD_TOKEN`, `hmac.compare_digest`, weak-
 token refusal). All storage keys are `repo#pr`-namespaced but assumptions are
 single-process and single-user: per-IP rate limiter is per-process, audit file
 per-process, breakers process-global (C5), "multi-tenant impossible" is the
-stated C5 consequence. Vision: hosted multi-tenant is an optional V10 future
+stated C5 consequence. Vision: hosted multi-tenant is an optional V4.10 future
 option, "never a commitment" (§5-AK).
 
-**Decision:** (a) Stay single-tenant through V9; no tenant columns, no billing,
+**Decision:** (a) Stay single-tenant through V4.8; no tenant columns, no billing,
 no per-tenant isolation work. (b) But **maintain the boundary as a code rule**:
 all identity/authorization flows through one module seam (dashboard auth +
 storage key construction), so a future tenant layer adds scoping there rather
@@ -543,7 +543,7 @@ context instead — C5's fix is a prerequisite for *any* concurrency, tenant or
 not.
 
 **Alternatives considered:**
-1. *Build full multi-tenancy now (V10 scope creep)* — rejected: no hosting
+1. *Build full multi-tenancy now (V4.10 scope creep)* — rejected: no hosting
    product exists, no demand evidence, and it would tax every storage change
    today for a future that may never ship.
 2. *Ignore the boundary entirely (hardcode single-user)* — rejected: the
@@ -555,12 +555,12 @@ not.
 is keeping identity/scoping centralized while single-tenant. This buys the
 option without paying for the product.
 
-**Consequences:** + V10 hosted option remains open without rewrite; + forces
+**Consequences:** + V4.10 hosted option remains open without rewrite; + forces
 per-run context hygiene now (helps C5 anyway); − small ongoing tax (one seam
 to route through); − temptation to half-build tenant fields — explicitly out
-of scope until the V10 gate.
+of scope until the V4.10 gate.
 
-**Revisit conditions:** V10 scope review explicitly approves a hosted option;
+**Revisit conditions:** V4.10 scope review explicitly approves a hosted option;
 organizational demand (named design partners) for SaaS; L14 shows one process
 cannot serve even single-tenant org load (which is an ADR-001/008 problem
 first, not a tenancy problem).
@@ -643,7 +643,7 @@ still-present finding pushed out of the cap can be synthesized as resolved.
 **Decision:** The trust rule is invariant: **verification status is computed
 by deterministic code from machine-checkable evidence; the model is never an
 authority on whether something is fixed** (vision §3.2). Evolution adds
-*evidence sources*, not *evidence authorities*: V6 may add test-output
+*evidence sources*, not *evidence authorities*: V4.2 may add test-output
 evidence (run artifacts, coverage deltas) and diff-context evidence — each
 source must be a record (ADR-004) with a deterministic checker. D2 must be
 fixed (verification receives the uncapped current set) **before** any new
@@ -670,7 +670,7 @@ active — a visible behavior change users must be told about in release notes).
 
 **Revisit conditions:** D2 fixed (prerequisite for tier work); premature-
 resolved rate exceeds **proposed baseline** 0.01 (TESTING §4) on the
-evaluation corpus; V6 proposes an evidence source that is *not*
+evaluation corpus; V4.2 proposes an evidence source that is *not*
 deterministically checkable → hard re-decision, default no.
 
 **Links:** `CURRENT_ARCHITECTURE.md` §5.5, D2 · `MASTER_VISION.md` §5-M, §3.2 ·
@@ -685,13 +685,13 @@ deterministically checkable → hard re-decision, default no.
 **Context:** Today events arrive only through the GitHub Action trigger
 (`pull_request`, explicitly never `pull_request_target` — §13.8, enforced by
 tests) with base-revision checkout and minimal permissions (`contents: read`,
-`pull-requests: write`, no `checks: write`). V9 introduces webhooks (vision
+`pull-requests: write`, no `checks: write`). V4.8 introduces webhooks (vision
 §5-AG) — i.e., the repository's runtime starts accepting **network input
 chosen by GitHub (and thus by anyone who can trigger repository events)**,
-bypassing the Actions trust framing. V9 is also on the untrusted-surface list
+bypassing the Actions trust framing. V4.8 is also on the untrusted-surface list
 for injection testing (§5-T).
 
-**Decision (design constraints to approve at V9):**
+**Decision (design constraints to approve at V4.8):**
 1. Webhook receiver verifies `X-Hub-Signature-256` with a dedicated secret,
    constant-time compare (same primitive as `dashboard` token —
    `hmac.compare_digest` precedent), rejects unsigned/mismatched bodies before
@@ -724,7 +724,7 @@ replays harmless; − receiver adds an always-on network surface (new process
 concern, tension with ADR-001 — it must be optional and off by default);
 − webhook secret management is a user burden → docs deliverable before code.
 
-**Revisit conditions:** V9 scope approval (nothing before then); a security
+**Revisit conditions:** V4.8 scope approval (nothing before then); a security
 review + threat model pass (`SECURITY_ROADMAP.md`) before the receiver ships;
 any proposal to auto-act on event content (re-decision — default stays
 read-only).
@@ -776,7 +776,7 @@ storage; Gemini usage unparsed (`ai/gemini.py:159`); budgets are characters
 but the trust boundary says our defaults must never move user data outward —
 measurement for the *user's* benefit, in the *user's* stores.
 
-**Consequences:** + C6 unblocked → V5-E07 arbitration, V9-E07 dashboards,
+**Consequences:** + C6 unblocked → V4.0-E07 arbitration, V4.8-E07 dashboards,
 cost visibility for BYO-key users; + evaluation harness gets operational
 metrics (TESTING §4); − storage growth (retention required, ADR-011);
 − price tables drift → cost figures labeled estimates; − no fleet-wide
@@ -790,7 +790,7 @@ formats requested (JSON/CSV/OTel) → add as opt-in sinks; price-table update
 cadence proves annoying → move table to a versioned external file.
 
 **Links:** `COST_TOKEN_ARCHITECTURE.md` (whole) · `TESTING_EVALUATION_PLAN.md`
-§4 · `EPIC_BACKLOG.md` (V3-E02, V5-E07, V9-E07) · ADR-007, ADR-008, ADR-011.
+§4 · `EPIC_BACKLOG.md` (V3-E02, V4.0-E07, V4.8-E07) · ADR-007, ADR-008, ADR-011.
 
 ---
 
@@ -821,7 +821,7 @@ and the orchestrator applies thresholds inline (D3/D4 show the sharp edges).
    only additive).
 3. D12 duplicate baselines collapse into one module consumed by both engine
    and dashboard (same consolidation instinct as ADR-011).
-4. V9 org policy composes downward (org > team > repo > component) as an
+4. V4.8 org policy composes downward (org > team > repo > component) as an
    additional *input* to the same engine-side merge — evaluated where the code
    runs, not by a central service.
 
@@ -830,7 +830,7 @@ and the orchestrator applies thresholds inline (D3/D4 show the sharp edges).
    — rejected: engine must work dashboard-less (free path) and during
    dashboard outages (§13.6 degrade-don't-fail); a remote evaluator becomes a
    single point of failure and a trust hop.
-2. *Central org policy service* (V9 shortcut) — rejected: adds network
+2. *Central org policy service* (V4.8 shortcut) — rejected: adds network
    dependency to every review, contradicts Action-first posture; inheritance
    logic is pure data merging — it belongs in-process.
 
@@ -846,7 +846,7 @@ on `README.md`); − dashboard edits apply on the *next* review, not instantly �
 must be surfaced in UX to avoid "I changed it and nothing happened".
 
 **Revisit conditions:** D12 divergence incident (immediate consolidation
-trigger); V9 org scopes approved (inheritance implementation begins);
+trigger); V4.8 org scopes approved (inheritance implementation begins);
 any request to evaluate policy at post time instead of review time (re-decision
 — changes the fail-closed story).
 
@@ -975,7 +975,7 @@ structural selection (ranking work reopens); index absent in > 20% of runs
 (degradation too frequent); selection overhead > 500 ms p95 (budget breach).
 
 **Links:** `EPIC_BACKLOG.md` (V4 scope record, V4-E01/E02) ·
-`V4_V10_ROADMAP.md` §V4 · `V4_THREAT_MODEL.md` (§1–2) · ADR-002 (index),
+`V4_STAGES_ROADMAP.md` §V4 · `V4_THREAT_MODEL.md` (§1–2) · ADR-002 (index),
 ADR-004 (evidence), ADR-012 (verification).
 
 ---
@@ -1104,39 +1104,39 @@ The following decisions have been identified as requiring ADRs but have not yet 
 ### ADR-018 (planned) — Adaptive review depth
 
 - **Status:** Planned ADR — not yet written
-- **Decision needed:** Depth levels (lightweight/normal/context-aware/multi-specialist/deep) and the quality/latency/cost trade-offs. How depth is selected (risk features from V5-E04) and how it interacts with cost arbitration (V5-E07).
-- **Depends on:** V5-E04 (risk engine), V5-E07 (cost arbitration)
-- **Consumed by:** V5-E01 (planner), V9-E04 (workers)
+- **Decision needed:** Depth levels (lightweight/normal/context-aware/multi-specialist/deep) and the quality/latency/cost trade-offs. How depth is selected (risk features from V4.0-E04) and how it interacts with cost arbitration (V4.0-E07).
+- **Depends on:** V4.0-E04 (risk engine), V4.0-E07 (cost arbitration)
+- **Consumed by:** V4.0-E01 (planner), V4.8-E04 (workers)
 - **Related:** ADR-006 (agent architecture), ADR-014 (cost accounting)
 
 ### ADR-019 (planned) — Finding relations model
 
 - **Status:** Planned ADR — not yet written
 - **Decision needed:** How relations (duplicate/caused_by/fixed_by/regression_of) attach to identity. Relations attach to (fingerprint, provenance) pairs per ADR-005. Whether relations are stored as edges or derived.
-- **Depends on:** V4-E05 (identity v2), V7-E01 (history for regression detection)
-- **Consumed by:** V7-E03 (relations), V7-E06 (historical evidence)
+- **Depends on:** V4-E05 (identity v2), V4.4-E01 (history for regression detection)
+- **Consumed by:** V4.4-E03 (relations), V4.4-E06 (historical evidence)
 - **Related:** ADR-005 (finding identity), ADR-004 (evidence model)
 
 ### ADR-020 (planned) — CI correlation methodology
 
 - **Status:** Planned ADR — not yet written
 - **Decision needed:** What constitutes correlation vs causation between CI failures and PR changes. How test-failure correlation is computed and presented (evidence, not assertion).
-- **Depends on:** V8-E01 (CI ingestion), V6-E03 (test intelligence)
-- **Consumed by:** V8-E02 (test-failure correlation), V8-E06 (incident intelligence)
+- **Depends on:** V4.6-E01 (CI ingestion), V4.2-E03 (test intelligence)
+- **Consumed by:** V4.6-E02 (test-failure correlation), V4.6-E06 (incident intelligence)
 - **Related:** ADR-012 (verification trust), ADR-013 (webhook security)
 
 ### ADR-021 (planned) — API versioning strategy
 
 - **Status:** Planned ADR — not yet written
-- **Decision needed:** How API versions are introduced, deprecated, and retired. `/api/v1/` is the first versioned API (V9-E03). Deprecation policy (headers, sunset dates, major version triggers).
-- **Depends on:** V9-E03 (versioned API), V9-E01 (org model for authz)
-- **Consumed by:** V10-E04 (IDE/CLI), V10-E06 (command center)
+- **Decision needed:** How API versions are introduced, deprecated, and retired. `/api/v1/` is the first versioned API (V4.8-E03). Deprecation policy (headers, sunset dates, major version triggers).
+- **Depends on:** V4.8-E03 (versioned API), V4.8-E01 (org model for authz)
+- **Consumed by:** V4.10-E04 (IDE/CLI), V4.10-E06 (command center)
 - **Related:** ADR-009 (plugin contract), ADR-010 (multi-tenant boundary)
 
 ---
 
 ### Cross-references
 Ground truth: `CURRENT_ARCHITECTURE.md` · Vision/boundaries:
-`MASTER_VISION.md` · Order: `MASTER_ROADMAP.md`, `V4_V10_ROADMAP.md` ·
+`MASTER_VISION.md` · Order: `MASTER_ROADMAP.md`, `V4_STAGES_ROADMAP.md` ·
 Epics: `EPIC_BACKLOG.md` · Refusals: `DO_NOT_BUILD_YET.md` ·
 Threat model: `SECURITY_ROADMAP.md` · Data: `DATA_MODEL.md`.

@@ -898,7 +898,7 @@ def test_t06_operator_doc_states_lan_scope_and_never_claims_network_auth():
     low = doc.lower()
     assert "lan / trusted-network only" in low
     assert "no network-grade authentication" in low
-    assert "v4.5.0" in doc                      # V5 ships publicly as v4.5.0
+    assert "v4.5.0" in doc                      # later V4 stages ship publicly as v4.5.0
     for overclaim in ("secure by default", "production-grade auth",
                       "mutual tls", "is authenticated end-to-end"):
         assert overclaim not in low

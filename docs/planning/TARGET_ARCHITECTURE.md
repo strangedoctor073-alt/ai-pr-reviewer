@@ -16,19 +16,19 @@
 This document answers: *what does the system look like at the end, how is it
 decomposed, what contracts hold it together, and what triggers each structural
 change?* It does not say **when** — that is `MASTER_ROADMAP.md` /
-`V4_V10_ROADMAP.md` — nor in what order code moves — that is
+`V4_STAGES_ROADMAP.md` — nor in what order code moves — that is
 `ARCHITECTURE_EVOLUTION.md`.
 
 Two independent structures must not be confused:
 
-1. **Capability stages** (canonical): Phase 0/"V3.x" → V4 → V5 → V6 → V7 → V8
-   → V9 → V10. These are *what the product can do*.
+1. **Capability stages** (canonical): Phase 0/"V3.x" → V4 → V4.0 → V4.2 → V4.4 → V4.6
+   → V4.8 → V4.10. These are *what the product can do*.
 2. **Deployment/architecture phases** (this document): **A** modular monolith →
    **B** worker/queue separation → **C** service separation → **D**
    organization-scale platform. These are *how the code is packaged and run*.
 
 They are intentionally **not 1:1**. Phase A is the home of Phase 0 through most
-of V7; B/C/D enter only on measured triggers (§6). A capability stage may be
+of V4.4; B/C/D enter only on measured triggers (§6). A capability stage may be
 delivered entirely inside Phase A.
 
 ## 1. Design stance
@@ -53,10 +53,10 @@ criteria are measurements, not aspirations (§6).
 
 | Phase | Home stages | Shape | Enters when |
 |---|---|---|---|
-| **A** — modular monolith | Phase 0, V4–V7 (default through V8) | one engine process + optional dashboard process; package boundaries with in-process contracts | now (already the current shape) |
-| **B** — worker/queue separation | V8–V9 capability work can live in A or B | long-running review jobs move behind a queue; dashboard/API and Action stay responsive; ADR-008 | measured concurrency/latency triggers (§6) |
-| **C** — service separation | V9 | ingress/gateway, review workers, intelligence/index builder, API split into separately deployable services over the same contracts | measured scaling/isolation triggers (§6) |
-| **D** — organization-scale platform | V10 | org API, event backbone, sandboxed plugin host, observability platform, optional hosted multi-tenant (ADR-010) | org platform is an approved product (V9/V10 gates) |
+| **A** — modular monolith | Phase 0, V4–V4.4 (default through V4.6) | one engine process + optional dashboard process; package boundaries with in-process contracts | now (already the current shape) |
+| **B** — worker/queue separation | V4.6–V4.8 capability work can live in A or B | long-running review jobs move behind a queue; dashboard/API and Action stay responsive; ADR-008 | measured concurrency/latency triggers (§6) |
+| **C** — service separation | V4.8 | ingress/gateway, review workers, intelligence/index builder, API split into separately deployable services over the same contracts | measured scaling/isolation triggers (§6) |
+| **D** — organization-scale platform | V4.10 | org API, event backbone, sandboxed plugin host, observability platform, optional hosted multi-tenant (ADR-010) | org platform is an approved product (V4.8/V4.10 gates) |
 
 **Contract rule that spans all phases:** the GitHub Action keeps working
 end-to-end with *zero* infrastructure — no queue, no services, no Postgres — in
@@ -77,7 +77,7 @@ a lint/test problem, not an outage.
 ```
 PHASE A — modular monolith (two processes max: engine + optional dashboard)
 
- GitHub Action (action.yml)   CLI (local mode)        future: webhook/IDE (V9+)
+ GitHub Action (action.yml)   CLI (local mode)        future: webhook/IDE (V4.8+)
       │  INPUT_* env                │ args                    │
       └────────────┬────────────────┴─────────────────────────┘
                    ▼
@@ -122,7 +122,7 @@ incrementally per `ARCHITECTURE_EVOLUTION.md`, never as a flag-day rewrite.
 | Boundary (likely package) | Why it exists | What owns the data | Contract crossing it |
 |---|---|---|---|
 | **core** | shared kernel that every other package may import, and that imports nothing but stdlib: identity, lifecycle, pure models | owns *identity*: `fingerprint_finding` (in `ai_pr_reviewer/findings.py`), `ReviewKey`, `FindingState` (`ai_pr_reviewer/models.py`, `ai_pr_reviewer/review_state.py`) | `Finding`, `PRContext`, `ReviewResult`, `AnalysisOutcome` dataclasses — the data contract of the whole system (`DATA_MODEL.md` §4) |
-| **ingest** | everything that turns external events into core types; the only place GitHub event/diff payloads enter | no persistence; produces `FileDiff[]` / `PRContext` from `ai_pr_reviewer/diff_parser.py`, `ai_pr_reviewer/github_client.py` | core types in, `GitHubClient` HTTP out; later CI/git ingestion (`V8`, `V7`) lands here too |
+| **ingest** | everything that turns external events into core types; the only place GitHub event/diff payloads enter | no persistence; produces `FileDiff[]` / `PRContext` from `ai_pr_reviewer/diff_parser.py`, `ai_pr_reviewer/github_client.py` | core types in, `GitHubClient` HTTP out; later CI/git ingestion (`V4.6`, `V4.4`) lands here too |
 | **intelligence** | retrieval and context assembly, kept separate from judgment so it can be swapped for the V4 context engine v2 without touching review | writes nothing; reads storage via `ReviewStorage` | `ReviewContext` (`ai_pr_reviewer/context.py`), bounded repo-context fetches (`ai_pr_reviewer/repo_context.py`) |
 | **review** | the deterministic review pipeline: validate → dedup → lifecycle → verify → score; owns all pipeline state transitions | owns pipeline state *decisions* (states are written only via storage) | `ReviewOrchestrator.run() -> ReviewResult` (`ai_pr_reviewer/orchestrator.py`), `verification.py` pure functions, `reporter.py` report dict |
 | **memory** | human-authored knowledge, isolated so no code path can *write* memory implicitly (`ai_pr_reviewer/storage.py` docstring, engine is read-only by design) | `repo_memory` rows (engine SQLite and `dashboard/models_db.py: RepoMemoryRow`) | `get_repo_memory` / `list_repo_memory` reads; dashboard CRUD API; mute rows (`fingerprint:<fp>`) are decisions, not notes |
@@ -143,16 +143,16 @@ that fails is swallowed into a warning).
 | Boundary | Failure behavior | Security boundary | Scalability reason | Migration strategy |
 |---|---|---|---|---|
 | **core** | cannot fail (pure) | model output enters only via `Finding.from_untrusted_dict`, which strips `LIFECYCLE_FIELDS` | none needed — O(findings) CPU only | freeze: moves are renames with re-export; behavior changes need tests first |
-| **ingest** | GitHub outage → run fails *before* review; force-push on incremental diff → full-diff fallback (current behavior) | untrusted: PR diff/title/author; `_safe_repo_path` prevents path escape into token-bearing URLs | bounded: 1000-file/10-page caps (`CURRENT_ARCHITECTURE.md` §12); raising them is a config change, not a structural one | add V7/V8 sources (git history, CI) as sibling modules behind the same "external source" seam |
+| **ingest** | GitHub outage → run fails *before* review; force-push on incremental diff → full-diff fallback (current behavior) | untrusted: PR diff/title/author; `_safe_repo_path` prevents path escape into token-bearing URLs | bounded: 1000-file/10-page caps (`CURRENT_ARCHITECTURE.md` §12); raising them is a config change, not a structural one | add V4.4/V4.6 sources (git history, CI) as sibling modules behind the same "external source" seam |
 | **intelligence** | context failure → review proceeds with less context + warning; never blocks | fenced untrusted content (`repo_context`, memory notes) before prompt assembly | character budgets today (`batch_chars=80k`, `repo_context_chars=12k`, `context.py: DEFAULT_TOKEN_BUDGET`); V4 replaces with provenance-tracked budgeting | grow in place: `context.py` → context engine v2 (`ARCHITECTURE_EVOLUTION.md` V4 row) |
-| **review** | static fallback keeps the run alive; degraded runs withhold `last_reviewed_sha` so the next run retries AI | deterministic steps never trust provider output; caps (`max_comments`, 500-finding dashboard cap) bound hostile volume | one review per process; this is the *reason* Phase B exists (§3) | evolve: orchestrator gains fan-out (V5) behind the same `run()` contract |
-| **memory** | memory read failure → empty notes, review continues | human-authored only; engine never writes; dashboard writes are token-auth + audit-logged; authority model arrives V7 (ADR-003) | 50-entry read cap today (D13); hierarchy replaces flat rows in V7 | additive columns (`category`/`enabled`/`updated_at` precedent in `storage.py:_init_db`) |
-| **policy** | policy load failure → defaults + warning; PR that rewrites its own policy = warning (base-revision read) | trusted *only* because it is read from the base revision; privacy baseline is non-removable (`rules.py`) | tiny docs; no scale concern until org scope (V9, ADR-003 inheritance) | file stays authoritative; cached rows are projections (`DATA_MODEL.md` §Policy) |
-| **security** | screening is warnings-only (forensic); redaction failure is a hard stop for posting that item | this package *is* the security boundary; untrusted/trusted split per `CURRENT_ARCHITECTURE.md` §6 | pattern scans are O(diff size), linear | extend at every stage that adds an untrusted surface (V4 index, V5 agents, V7 memory, V8 CI, V9 webhooks, V10 plugins) |
-| **providers** | retry → circuit breaker → secondary → static; breakers process-global (safe only because runs are sequential — C5) | BYO keys never leave provider modules; no retired model IDs hardcoded | sequential calls, 240s timeout; concurrency is *unsafe today* → this is trigger B2 (§6) | V5 capability registry + per-task routing; breakers become per-instance before any concurrency |
-| **sync** | 422 → per-comment recovery; `MAX_SYNC_ERRORS=5`; never re-post without transitions | only outbound write path; every body passes `redact_secrets` + caps | bounded comment harvesting (1 page) | unchanged through V7; V9 adds API-side events, not changes to comment sync |
+| **review** | static fallback keeps the run alive; degraded runs withhold `last_reviewed_sha` so the next run retries AI | deterministic steps never trust provider output; caps (`max_comments`, 500-finding dashboard cap) bound hostile volume | one review per process; this is the *reason* Phase B exists (§3) | evolve: orchestrator gains fan-out (V4.0) behind the same `run()` contract |
+| **memory** | memory read failure → empty notes, review continues | human-authored only; engine never writes; dashboard writes are token-auth + audit-logged; authority model arrives V4.4 (ADR-003) | 50-entry read cap today (D13); hierarchy replaces flat rows in V4.4 | additive columns (`category`/`enabled`/`updated_at` precedent in `storage.py:_init_db`) |
+| **policy** | policy load failure → defaults + warning; PR that rewrites its own policy = warning (base-revision read) | trusted *only* because it is read from the base revision; privacy baseline is non-removable (`rules.py`) | tiny docs; no scale concern until org scope (V4.8, ADR-003 inheritance) | file stays authoritative; cached rows are projections (`DATA_MODEL.md` §Policy) |
+| **security** | screening is warnings-only (forensic); redaction failure is a hard stop for posting that item | this package *is* the security boundary; untrusted/trusted split per `CURRENT_ARCHITECTURE.md` §6 | pattern scans are O(diff size), linear | extend at every stage that adds an untrusted surface (V4 index, V4.0 agents, V4.4 memory, V4.6 CI, V4.8 webhooks, V4.10 plugins) |
+| **providers** | retry → circuit breaker → secondary → static; breakers process-global (safe only because runs are sequential — C5) | BYO keys never leave provider modules; no retired model IDs hardcoded | sequential calls, 240s timeout; concurrency is *unsafe today* → this is trigger B2 (§6) | V4.0 capability registry + per-task routing; breakers become per-instance before any concurrency |
+| **sync** | 422 → per-comment recovery; `MAX_SYNC_ERRORS=5`; never re-post without transitions | only outbound write path; every body passes `redact_secrets` + caps | bounded comment harvesting (1 page) | unchanged through V4.4; V4.8 adds API-side events, not changes to comment sync |
 | **storage** | every read degrades to empty/None with a warning; a run never dies on storage | local file vs token-gated HTTP; audit append-only; token file 0600 best-effort | C9: connections never closed, no retention, O(all) dashboard queries — Phase 0 fix candidates; single-worker ceiling is trigger B1 | consolidation (3 duplicate implementations) *before* any new backend (ADR-011) |
-| **telemetry** | telemetry loss must never fail the run (drop + count drops) | usage/cost data is internal; never includes diff content | append-only, batched writes | Phase 0 seeds; consumed by V5 arbitration, V6+ dashboards |
+| **telemetry** | telemetry loss must never fail the run (drop + count drops) | usage/cost data is internal; never includes diff content | append-only, batched writes | Phase 0 seeds; consumed by V4.0 arbitration, V4.2+ dashboards |
 | **dashboard** | engine swallows dashboard errors → stateless degrade; JsonStorage is single-worker only | token auth, constant-time compare, rate limits, CSP; reads optionally open | single worker; O(all) queries — trigger B1 | Postgres via `DATABASE_URL` is already wired (ADR-011); real migrations when schema churn accelerates |
 
 ---
@@ -198,7 +198,7 @@ PHASE B — worker/queue separation (opt-in; Action can always run inline)
 | **worker ↔ storage** | one durable owner during the transition | Postgres (ADR-011); SQLite remains valid for single-node/local | `ReviewStorage` (§7.3) — identical in inline and queued modes | storage down → worker retries → never a silent state advance (findings-then-SHA ordering preserved) | single credential scope; audit records every queued write | moves writes off the dashboard process (today both read and write share it) | consolidation of the 3 storage implementations lands *before* Phase B — precondition, not a follow-up |
 | **dashboard/API ↔ workers** | interactive reads must not wait on reviews | dashboard reads only | HTTP API unchanged (routes + `X-Dashboard-Token`) | dashboard outage degrades workers (swallowed warnings, current semantics) | token boundary unchanged | interactive latency isolated from review load | no code move — only deployment roles |
 
-**Phase B is entered only on triggers B1–B4 (§6).** Until then all V8 event
+**Phase B is entered only on triggers B1–B4 (§6).** Until then all V4.6 event
 platform work (internal event platform v1) can be built as *schemas + producers*
 with the inline consumer (see `DO_NOT_BUILD_YET.md` for what stays unbuilt).
 
@@ -235,7 +235,7 @@ PHASE C — service separation (same contracts, separate deploys)
                                │                              │
                  ┌─────────────┴─────────────┐   ┌────────────┴─────────────┐
                  │ API / dashboard service   │   │ observability service    │
-                 │ (versioned public API V9) │   │ (telemetry spine sink)   │
+                 │ (versioned public API V4.8) │   │ (telemetry spine sink)   │
                  └───────────────────────────┘   └──────────────────────────┘
 ```
 
@@ -246,21 +246,21 @@ PHASE C — service separation (same contracts, separate deploys)
 | **gateway ↔ review workers** | isolate GitHub rate-limit pressure (C8) and event intake from analysis compute | gateway owns idempotency keys/dedupe; workers own nothing durable | event envelope + job pointer | gateway loss = no new reviews (existing inline path unaffected); worker loss = redelivery | single place where GitHub events enter — screening/fencing applied once | independent scaling of intake vs. compute | Phase B roles promoted to deploys; no contract change |
 | **review ↔ intelligence** | index/context builds are CPU/IO-heavy and must not delay reviews; independent refresh cadence | intelligence service owns the repository index + `ContextArtifact` store (`DATA_MODEL.md`) | context request/response data contract with **provenance** (what was read, from which revision) | index stale/absent → review falls back to today's bounded `repo_context` fetch (graceful degradation is already the norm) | index content is derived from repo files = untrusted until fenced; base-revision reads only | index rebuilds spike; must not share CPU with live reviews | `repo_context.py`/`context.py` first run in-process behind the contract; service split is a deploy decision |
 | **services ↔ storage tier** | one durable owner per datum (no distributed writes) | per-entity ownership table in `DATA_MODEL.md` §2 (Postgres now, ADR-011) | `ReviewStorage` + versioned data contracts | partition → degrade (reads serve stale where safe; writes buffer/retry; never lose a review) | credential scope per service; audit records cross-service writes | read replicas / partitioning become possible; retention jobs run off-path | phase-in per entity group; SQLite single-node path never removed |
-| **API/dashboard ↔ everything** | public versioned API (V9-E03) must not be coupled to internal service layout | API owns its own projection/serializations, not the tables | **versioned HTTP API** (`schema_version`, additive-first; §7.5) | API outage affects humans only, never review execution | token/org auth, rate limits, audit; org scoping per ADR-010 when multi-tenant | interactive scale independent of compute scale | dashboard routes are already the seed of the API surface |
+| **API/dashboard ↔ everything** | public versioned API (V4.8-E03) must not be coupled to internal service layout | API owns its own projection/serializations, not the tables | **versioned HTTP API** (`schema_version`, additive-first; §7.5) | API outage affects humans only, never review execution | token/org auth, rate limits, audit; org scoping per ADR-010 when multi-tenant | interactive scale independent of compute scale | dashboard routes are already the seed of the API surface |
 | **observability ↔ all** | telemetry becomes a shared service only when volume/retention demand it | telemetry sink owns metrics/log rows | telemetry spine export format | telemetry sink loss → local buffering → drop with counted drops | no diff content in telemetry (redaction first) | high write volume, cheap reads | Phase 0 emitter stays the source; sink swaps behind it |
 
 ---
 
-## 5. PHASE D — organization-scale platform (V10)
+## 5. PHASE D — organization-scale platform (V4.10)
 
-Phase D is reached only if the V9/V10 gates are approved (org platform, optional
+Phase D is reached only if the V4.8/V4.10 gates are approved (org platform, optional
 hosted offering per ADR-010). It adds the platform surface; it does not replace
 Phase C's services.
 
 ```
 PHASE D — organization-scale platform
 
- orgs ──► IDE / CLI / plugins ──► versioned public API (V9-E03)
+ orgs ──► IDE / CLI / plugins ──► versioned public API (V4.8-E03)
                     │                      │
                     ▼                      ▼
         ┌───────────────────────────────────────────────────┐
@@ -270,8 +270,8 @@ PHASE D — organization-scale platform
                     ▼                       ▼
         ┌───────────────────┐   ┌────────────────────────────┐
         │ plugin host       │   │ event backbone             │
-        │ (V10, sandboxed;  │   │ (ADR-008 matured: fan-out, │
-        │  V9 contract only)│   │  org event consumers)      │
+        │ (V4.10, sandboxed;  │   │ (ADR-008 matured: fan-out, │
+        │  V4.8 contract only)│   │  org event consumers)      │
         └─────────┬─────────┘   └────────────┬───────────────┘
                   │ untrusted plugin I/O     │
                   ▼ (evidence, never state)  ▼
@@ -283,10 +283,10 @@ PHASE D — organization-scale platform
 
 | Boundary | Why it exists | Data owner | Contract crossing it | Failure behavior | Security boundary | Scalability reason | Migration strategy |
 |---|---|---|---|---|---|---|---|
-| **gateway ↔ org tenants** | isolation and quota enforcement for multi-tenant (ADR-010) | org/identity tables (`DATA_MODEL.md`) | versioned API + org-scoped policy resolution | tenant quota breach → shed that tenant only | per-tenant credential/data scoping; audit per org | tenant count grows horizontally | org = derived from `owner/` prefix until V9 makes it a real row |
-| **plugin host ↔ core** | extensibility without trusting extension code (V9 contract, V10 runtime) | plugins own no core tables; their output enters as *evidence records* | extensibility contract v1 (V9): declared capabilities, no lifecycle-field writes | plugin crash/timeout → finding dropped or static fallback; never blocks a review | **new security boundary**: sandbox, capability-limited I/O, output screened like model output (redaction + injection screening) | plugin load isolated from review workers | contract ships at V9 with zero plugins (contract-first), runtime at V10 |
-| **event backbone ↔ consumers** | org-scale fan-out (V9 events → V8/V9 consumers) | event store (retention-bounded) | event envelope, exactly the §7.4 schema (no second schema) | consumer lag → degraded freshness, never lost reviews (reviews are not *driven* by the backbone in the default path) | authenticated producers/consumers; payload redaction at produce time | many consumers per event | grows from Phase B outbox — same schema, better transport |
-| **analytics ↔ operational stores** | org analytics (V10) must not load operational rows in Python (today's O(all) pattern, C9) | analytics projections (read-only copies) | read-only projection contract | analytics outage → dashboards only | no individual rankings anywhere (vision §6) | columnar/aggregation-friendly copy | build on `DATA_MODEL.md` projections; search index only when a query needs it |
+| **gateway ↔ org tenants** | isolation and quota enforcement for multi-tenant (ADR-010) | org/identity tables (`DATA_MODEL.md`) | versioned API + org-scoped policy resolution | tenant quota breach → shed that tenant only | per-tenant credential/data scoping; audit per org | tenant count grows horizontally | org = derived from `owner/` prefix until V4.8 makes it a real row |
+| **plugin host ↔ core** | extensibility without trusting extension code (V4.8 contract, V4.10 runtime) | plugins own no core tables; their output enters as *evidence records* | extensibility contract v1 (V4.8): declared capabilities, no lifecycle-field writes | plugin crash/timeout → finding dropped or static fallback; never blocks a review | **new security boundary**: sandbox, capability-limited I/O, output screened like model output (redaction + injection screening) | plugin load isolated from review workers | contract ships at V4.8 with zero plugins (contract-first), runtime at V4.10 |
+| **event backbone ↔ consumers** | org-scale fan-out (V4.8 events → V4.6/V4.8 consumers) | event store (retention-bounded) | event envelope, exactly the §7.4 schema (no second schema) | consumer lag → degraded freshness, never lost reviews (reviews are not *driven* by the backbone in the default path) | authenticated producers/consumers; payload redaction at produce time | many consumers per event | grows from Phase B outbox — same schema, better transport |
+| **analytics ↔ operational stores** | org analytics (V4.10) must not load operational rows in Python (today's O(all) pattern, C9) | analytics projections (read-only copies) | read-only projection contract | analytics outage → dashboards only | no individual rankings anywhere (vision §6) | columnar/aggregation-friendly copy | build on `DATA_MODEL.md` projections; search index only when a query needs it |
 
 ---
 
@@ -307,10 +307,10 @@ windows (proposed baseline)** before any structural work is scheduled.
 | C1 | one deployment cannot serve both compute profiles | Phase B metrics | index/context builds consume > 50 % worker time and delay live reviews beyond SLO | Phase C intelligence split |
 | C2 | independent release cadence needed | delivery metrics | teams/deployments blocked on shared release; ≥ 2 independently-scaling workloads | Phase C service split |
 | C3 | tenant isolation required | product gate | approved multi-tenant offering (ADR-010) | Phase C/D isolation boundaries |
-| D1 | org platform approved | product gate | V9/V10 stage approval | Phase D |
+| D1 | org platform approved | product gate | V4.8/V4.10 stage approval | Phase D |
 
 Anti-guess rule: **"we might need it" is not a trigger.** Nothing in the
-capability stages V4–V7 *requires* B/C/D; if a feature seems to require them,
+capability stages V4–V4.4 *requires* B/C/D; if a feature seems to require them,
 it is designed wrong (the inline path is the reference implementation).
 
 ---
@@ -353,7 +353,7 @@ Everything else may be reorganized freely.
   seven hard-coded wiring sites (`CURRENT_ARCHITECTURE.md` §10.1).
 - **Stabilize now:** declare the informal members in the protocol; declare
   token/usage reporting as an **optional capability** (counters exist in
-  `ai/claude.py` + `ai/openai.py`, unreported; Gemini TODO) so V5's capability
+  `ai/claude.py` + `ai/openai.py`, unreported; Gemini TODO) so V4.0's capability
   registry (`CURRENT_ARCHITECTURE` C6 → cost arbitration) has a contract to
   read.
 - **Never break:** `AnalysisOutcome` first five fields keep position and meaning
@@ -385,7 +385,7 @@ Everything else may be reorganized freely.
 
 - No event bus exists (correctly — `DO_NOT_BUILD_YET.md`; ADR-008 keeps Phase 0
   in-process with typed run-scoped records). The **schema** is nevertheless a
-  contract to fix *before* the platform (V8 internal event
+  contract to fix *before* the platform (V4.6 internal event
   platform v1; transport per ADR-008):
   `{schema_version, event_id (uuid), type (dotted, e.g. "review.completed"),
   occurred_at (ISO-8601 UTC), source (service/role), repo?, subject
@@ -431,13 +431,13 @@ summary of the architectural commitment:
 
 | Foundation | One owner | Reused by |
 |---|---|---|
-| **provenance record** (who/what produced this: engine, model, agent, revision, evidence pointers) | core data contract | V4 evidence + identity v2 → V5 council merge → V6 evidence tiers → V7 relations → audit/observability |
-| **context artifact + budget system** (bounded, provenance-tracked context pieces) | intelligence | V4 context engine v2 → V5 adaptive depth → V6 verification tiers → V8 CI context |
-| **event envelope schema** (§7.4) | storage/platform | V8 internal events → V9 webhooks/org events → V10 analytics |
+| **provenance record** (who/what produced this: engine, model, agent, revision, evidence pointers) | core data contract | V4 evidence + identity v2 → V4.0 council merge → V4.2 evidence tiers → V4.4 relations → audit/observability |
+| **context artifact + budget system** (bounded, provenance-tracked context pieces) | intelligence | V4 context engine v2 → V4.0 adaptive depth → V4.2 verification tiers → V4.6 CI context |
+| **event envelope schema** (§7.4) | storage/platform | V4.6 internal events → V4.8 webhooks/org events → V4.10 analytics |
 | **storage migration framework** (one schema, one migration path — replaces hand-rolled `ALTER TABLE` in `storage.py` and `dashboard/storage.py`) | storage | every entity added after `DATA_MODEL.md` lands |
-| **provider capability registry** | providers | V5 task routing + cost arbitration → V6 context-window awareness → V10 local providers/ecosystem |
-| **policy evaluation interface** (evaluate(policy, subject) → explainable result) | policy | V6 repo/team policy engine → V9 org inheritance (ADR-003) → V10 plugins reading policy |
-| **telemetry spine** (usage, latency, fallback events; drop-safe) | telemetry | Phase 0 measurement → triggers §6 → V5 arbitration → V6+ cost dashboards → V10 observability platform |
+| **provider capability registry** | providers | V4.0 task routing + cost arbitration → V4.2 context-window awareness → V4.10 local providers/ecosystem |
+| **policy evaluation interface** (evaluate(policy, subject) → explainable result) | policy | V4.2 repo/team policy engine → V4.8 org inheritance (ADR-003) → V4.10 plugins reading policy |
+| **telemetry spine** (usage, latency, fallback events; drop-safe) | telemetry | Phase 0 measurement → triggers §6 → V4.0 arbitration → V4.2+ cost dashboards → V4.10 observability platform |
 
 The discipline: **a foundation that is needed twice is designed once, at the
 first use, with the second use as a review checklist** — not designed twice and
@@ -459,7 +459,7 @@ Phase D), **ADR-011** (storage evolution behind `ReviewStorage` — all phases),
 **ADR-015** (policy evaluation placement — §8 interface). Vision:
 `MASTER_VISION.md` (12 planes; planes 11–12 map to Phase C/D surfaces).
 Refusal list: `DO_NOT_BUILD_YET.md`. Order and epics: `MASTER_ROADMAP.md`,
-`V4_V10_ROADMAP.md`, `EPIC_BACKLOG.md`, `DEPENDENCY_GRAPH.md`,
+`V4_STAGES_ROADMAP.md`, `EPIC_BACKLOG.md`, `DEPENDENCY_GRAPH.md`,
 `MIGRATION_PLAN.md`.
 
 **Flagged uncertainty:** `EPIC_BACKLOG.md`, `DEPENDENCY_GRAPH.md` and

@@ -677,7 +677,7 @@ def _forged_value(name: str):
 
 
 class TestPipelineOwnedFieldsCannotBeForged:
-    """THE highest-risk regression in V4-E04: V5's multi-agent merge keys on
+    """THE highest-risk regression in V4-E04: V4.0's multi-agent merge keys on
     provenance, so model output must never be able to set it."""
 
     def test_convention_is_not_vacuous(self):
@@ -1092,7 +1092,7 @@ class TestDeriveProvenanceSource:
     @pytest.mark.parametrize("engine", ["claude+static", "openai+static",
                                         "gemini+static", "Claude+Static"])
     def test_no_composite_engine_ever_reaches_a_source_key(self, engine):
-        """V5 merge dedups on (engine, model, origin, agent): a composite
+        """V4.0 merge dedups on (engine, model, origin, agent): a composite
         'claude+static' would split one engine's findings across two keys."""
         for f in (_rule_engine_finding(), Finding(file="a.py", line=1)):
             src = derive_provenance_source(f, outcome_engine=engine,

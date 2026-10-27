@@ -11,6 +11,7 @@ import sys
 from typing import TYPE_CHECKING
 from urllib.parse import quote
 
+from .github_ratelimit import RateLimitBlocked, RateLimiter
 from .models import PRContext
 
 if TYPE_CHECKING:  # annotation-only; the runtime import stays lazy in __init__
@@ -36,6 +37,23 @@ class GitHubError(RuntimeError):
         self.status_code = status_code
 
 
+class GitHubRateLimited(GitHubError):
+    """A GitHub read was refused or withheld because of a rate limit
+    (V4.6-E01-T01).
+
+    ``reason`` is one of the ``github_ratelimit.REASON_*`` values and
+    ``retry_after`` the seconds GitHub (or our default) says to wait. Callers
+    that poll optional data catch this and degrade with a label; it is never
+    a reason to fail a review.
+    """
+
+    def __init__(self, message: str = "", reason: str = "",
+                 retry_after: float = 0.0, status_code: int | None = 429):
+        super().__init__(message, status_code=status_code)
+        self.reason = reason
+        self.retry_after = retry_after
+
+
 def _api_error(what: str, r) -> GitHubError:
     return GitHubError(f"{what} failed ({r.status_code}): {r.text[:300]}",
                        status_code=r.status_code)
@@ -55,13 +73,15 @@ def _safe_repo_path(path: str) -> str:
 
 class GitHubClient:
     def __init__(self, token: str, repo: str, api_url: str = "https://api.github.com",
-                 retry: "RetryPolicy | None" = None):
+                 retry: "RetryPolicy | None" = None,
+                 rate_limiter: RateLimiter | None = None):
         import httpx
 
         from .retry import RetryPolicy
 
         self.repo = repo.strip("/")
         self._retry = retry or RetryPolicy()
+        self._limiter = rate_limiter or RateLimiter()
         self._http = httpx.Client(
             base_url=api_url.rstrip("/"),
             timeout=60.0,
@@ -297,6 +317,85 @@ class GitHubClient:
         if r.status_code in (200, 201):
             return {"ok": True, "status": r.status_code, "body": r.json()}
         raise _api_error("PATCH review comment", r)
+
+    # ------------------------------ V4.6-E01-T01 · rate-limit-aware reads
+    # The one general-purpose, quota-aware read path. Features that poll
+    # GitHub (CI runs today; issues and releases later) call ``get_json`` —
+    # they never build their own limiter or call ``self._http`` directly for
+    # optional reads. Existing methods above are intentionally unchanged.
+    def _safe_read_path(self, path: str) -> str:
+        """Confine a read to this repository's REST namespace.
+
+        The request carries our token, so a caller-built path must never
+        reach another repository, an absolute URL, or climb with ``..``.
+        """
+        prefix = f"/repos/{self.repo}/"
+        rest = path[len(prefix):] if isinstance(path, str) and \
+            path.startswith(prefix) else ""
+        if (not rest or any(seg in ("", ".", "..") for seg in rest.split("/"))
+                or not all(ch.isascii() and (ch.isalnum() or ch in "._-/")
+                           for ch in rest)):
+            raise GitHubError(f"refusing unsafe read path: {path!r}")
+        return path
+
+    def get_json(self, path: str, params: dict | None = None):
+        """GET ``path`` (under ``/repos/{repo}/``) and return the parsed JSON.
+
+        Interface contract (reused by later epics — do not fork it):
+
+        * GET only; there is no write twin of this method.
+        * Quota-aware: waits inside the ``RateLimitPolicy`` bounds, keeps a
+          reserve for the review's own calls, re-sends a throttled request at
+          most ``max_throttle_retries`` times, and otherwise raises
+          :class:`GitHubRateLimited` (``reason``, ``retry_after``) instead of
+          hanging.
+        * Any other non-200 raises ``GitHubError`` carrying ``status_code``
+          (a bare 403 stays a plain authorization error, not a throttle).
+        * Transient 5xx/timeouts are not retried here: optional reads degrade
+          with a label rather than spend quota re-asking.
+        """
+        safe = self._safe_read_path(path)
+        policy = self._limiter.policy
+        attempt = 0
+        while True:
+            try:
+                self._limiter.before_request()
+            except RateLimitBlocked as blocked:
+                raise GitHubRateLimited(
+                    str(blocked), reason=blocked.reason,
+                    retry_after=blocked.retry_after) from None
+            r = self._http.get(safe, params=params)
+            throttle = self._limiter.observe(
+                r.status_code, r.headers,
+                r.text if r.status_code == 403 else "")
+            if throttle is None:
+                break
+            attempt += 1
+            if attempt > policy.max_throttle_retries:
+                raise GitHubRateLimited(
+                    f"GET {safe.rsplit('/', 1)[-1]} throttled by GitHub "
+                    f"({throttle.kind})", reason=throttle.kind,
+                    retry_after=throttle.wait_seconds,
+                    status_code=r.status_code)
+            try:
+                self._limiter.backoff(throttle)
+            except RateLimitBlocked as blocked:
+                raise GitHubRateLimited(
+                    str(blocked), reason=blocked.reason,
+                    retry_after=blocked.retry_after,
+                    status_code=r.status_code) from None
+        if r.status_code != 200:
+            raise _api_error(f"GET {safe.rsplit('/', 1)[-1]}", r)
+        try:
+            return r.json()
+        except ValueError:
+            raise GitHubError(
+                f"GET {safe.rsplit('/', 1)[-1]} returned a non-JSON payload",
+                status_code=r.status_code) from None
+
+    def rate_limit_stats(self) -> dict:
+        """Counts-only view of quota use for telemetry/reports."""
+        return self._limiter.stats()
 
     # ------------------------------------------------------- helper utilities
     @staticmethod

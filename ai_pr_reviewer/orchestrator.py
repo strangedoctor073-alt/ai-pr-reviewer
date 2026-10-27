@@ -36,6 +36,7 @@ from .storage_schema import (CAP_DISMISSED_FINGERPRINTS,
                              CAP_PREVIOUS_FINDINGS, CAP_TELEMETRY)
 
 # --- Pipeline stages (each lives in its own module) -------------------------
+from .architecture import run_architecture_check  # V4.2-E04 (opt-in)
 from .context import build_context                   # provided by context.py
 from .findings import (apply_lifecycle, deduplicate,  # provided by findings.py
                        fingerprint_finding, mark_dismissed)
@@ -301,7 +302,7 @@ class ReviewOrchestrator:
         warnings.extend(_scrub(w, cfg) for w in
                         (getattr(context, "context_warnings", None) or []))
         provider = get_provider(cfg, context)
-        outcome = run_analysis(cfg, context, provider)
+        outcome = self._analyze(cfg, context, provider)     # V4.0-E01-T05
         warnings.extend(_scrub(w, cfg) for w in outcome.warnings)
         # V4-E08-T05: THE output redaction chokepoint. Engine text crosses
         # from the provider into the pipeline right here — before
@@ -319,6 +320,25 @@ class ReviewOrchestrator:
         _attach_diff_evidence(
             outcome.findings, files,
             scrub=lambda t: _scrub(t, cfg))
+        # V4.2-E04 architecture intelligence (opt-in, default OFF; a no-op
+        # unless the trusted rules file enables ``architecture:``). Its
+        # findings arrive fully stamped and redacted, so they join after the
+        # provenance/evidence steps above and before dedup.
+        _arch = run_architecture_check(
+            repo_root=getattr(cfg, "repo_root", None) or ".",
+            rules_file=rules_file, index=getattr(context, "repo_index", None),
+            files=files, scrub=lambda t: _scrub(t, cfg))
+        outcome.findings.extend(_arch.findings)
+        warnings.extend(_scrub(w, cfg) for w in _arch.warnings)
+        # V4.2-E07-T03: policy findings (reported only, never remediated).
+        # No ``policy:`` section -> review_policy returns ([], []): output
+        # unchanged.
+        from .policy import review_policy
+        _pf, _pw = review_policy(
+            getattr(cfg, "repo_root", None) or ".", rules_file, files,
+            scrub=lambda t: _scrub(t, cfg), extra_excludes=policy.exclude)
+        outcome.findings.extend(_pf)
+        warnings.extend(_pw)
         findings = deduplicate(outcome.findings)
         # D4: ``max_comments`` is a *posting* limit only. ``reported`` is
         # every anchored finding this review found — the report, the health
@@ -399,6 +419,22 @@ class ReviewOrchestrator:
         result.review_state = "fallback" if fallback_used else "completed"
         # V3: additive, read with getattr by the reporter / cli.
         result.risk = risk                          # ReviewRisk (C8 summary)
+        # V4.0-E04 (T02-T04): opt-in, report-only. Computes the explainable
+        # score and depth decision for the report; nothing below acts on it.
+        # A failure here never fails or alters the review.
+        if getattr(cfg, "risk_engine", False):
+            try:
+                from .risk import DepthPolicyConfig, assess_risk
+                result.risk_assessment = assess_risk(
+                    files, impact=getattr(context, "impact", None),
+                    focus=[*(getattr(cfg, "focus_areas", None) or []),
+                           *(getattr(policy, "focus", None) or [])],
+                    policy=DepthPolicyConfig(
+                        depth_cap=getattr(cfg, "risk_depth_cap", ""),
+                        max_specialists=getattr(cfg, "risk_max_specialists", 0)))
+            except Exception as exc:  # noqa: BLE001 — informational, never fatal
+                warnings.append(f"Risk engine unavailable "
+                                f"({type(exc).__name__}); review unaffected.")
         result.previous_findings_count = len(previous)
         result.state_transition_count = transitions  # (C8: skip duplicate posts)
         result.verification = verification_counts(lifecycle_findings)  # (C4)
@@ -413,9 +449,30 @@ class ReviewOrchestrator:
         # ``engine == "static"`` + ``fallback_used`` is the forced-fallback
         # outcome: no AI backend completed and the rule engine stood in.
         result.analysis_degraded = (engine == "static" and fallback_used)
+        # --- V4.0-E01-T03: a fan-out run missing any task's analysis is
+        # degraded even when an AI engine completed the rest; the SHA must
+        # not advance (see _persist). Never set when fan-out is off.
+        if getattr(outcome, "fanout_degraded", False):
+            result.analysis_degraded = True
+            result.fanout_degraded = True
+        # --- end V4.0-E01-T03
         self._persist(result, repo, pr)
         result.duration_ms = int((time.monotonic() - t0) * 1000)
         return result
+
+    # ------------------------------------------------- V4.0-E01-T05 fan-out hook
+    def _analyze(self, cfg: Config, context, provider):
+        """Single-agent analysis, or bounded fan-out when ``fanout_enabled``.
+
+        Flag off (the default): exactly the pre-V4.0 call, nothing imported,
+        nothing wrapped. Flag on: the invocation/scheduling layer in
+        ``orchestration/`` runs the analysis; the pipeline after this point
+        is unchanged.
+        """
+        if not getattr(cfg, "fanout_enabled", False):
+            return run_analysis(cfg, context, provider)
+        from .orchestration.runner import run_fanout_analysis
+        return run_fanout_analysis(cfg, context, provider, analyze=run_analysis)
 
     # ------------------------------------------------------------ diff intake
     def _load_diff(self, warnings: list[str]) -> tuple[PRContext, str, bool]:
@@ -579,6 +636,13 @@ class ReviewOrchestrator:
         try:
             self.storage.save_findings(review_id,
                                        [_finding_row(f) for f in result.findings])
+            # --- V4.0-E01-T03: degraded fan-out run - own wording, same rule.
+            if getattr(result, "fanout_degraded", False):
+                result.warnings.append(
+                    "last-reviewed SHA not advanced: not every review task "
+                    "completed, so the next run re-reviews these commits.")
+                return
+            # --- end V4.0-E01-T03
             if getattr(result, "analysis_degraded", False):
                 result.warnings.append(
                     "last-reviewed SHA not advanced: no AI provider completed "
@@ -657,7 +721,7 @@ def _stamp_provenance(findings: list[Finding], outcome) -> None:
                                        outcome_model=model)
         f.provenance_engine = src.engine
         f.provenance_model = src.model
-        f.provenance_agent = None  # V5+ specialist agents
+        f.provenance_agent = None  # V4.0+ specialist agents
         f.provenance_origin = src.origin
         if not f.provenance_sources:
             f.provenance_sources = (src,)

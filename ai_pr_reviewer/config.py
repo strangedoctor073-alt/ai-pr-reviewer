@@ -27,6 +27,9 @@ KNOWN_INPUT_ENV_VARS = frozenset({
     "INPUT_OUTPUT", "INPUT_BATCH_CHARS", "INPUT_REVIEW_MODE",
     "INPUT_INCREMENTAL", "INPUT_RULES_FILE", "INPUT_STORAGE_FILE",
     "INPUT_PROVIDER_ORDER", "INPUT_REPO_CONTEXT_CHARS", "INPUT_RETENTION_DAYS",
+    # V4.0-E01-T05: engine-only knob (NOT an action.yml input - the Action
+    # contract is frozen); settable from a workflow `env:` block only.
+    "INPUT_FANOUT_ENABLED",
 })
 
 
@@ -170,6 +173,17 @@ class Config:
     retention_days: int = 0            # V3-E04-T02: 0 = keep everything (default);
                                         # >0 prunes aged finding-history + telemetry
 
+    # V4.0-E01-T05: bounded fan-out orchestration. Default OFF - the
+    # single-agent path is byte-identical. Enabling it anywhere is a human
+    # sign-off decision (plan §F); nothing in this repo turns it on.
+    fanout_enabled: bool = False
+
+    # V4.0-E04 (T02-T04) risk engine. Default OFF; report-only. Plain env
+    # vars (RISK_*), deliberately not INPUT_* action inputs.
+    risk_engine: bool = False
+    risk_depth_cap: str = ""           # "" | low | standard | deep (can only lower)
+    risk_max_specialists: int = 0      # 0 = no cap
+
 
 def load_config(args) -> Config:
     _warn_unknown_inputs()
@@ -222,7 +236,31 @@ def load_config(args) -> Config:
                                      "retention_days")
     if cfg.retention_days < 0:
         raise ConfigError("retention_days must be >= 0 (0 = keep everything)")
+    # V4.0-E01-T05 - same CLI > INPUT_* > env > default layering as the rest.
+    # `args.fanout` is read defensively: no CLI flag exists yet, and none is
+    # added here (cli.py is outside this ticket).
+    cfg.fanout_enabled = _bool_field(getattr(args, "fanout", None),
+                                     "INPUT_FANOUT_ENABLED", "FANOUT_ENABLED",
+                                     default=False)
+    _load_risk_engine_config(cfg)
     return cfg
+
+
+def _load_risk_engine_config(cfg: Config) -> None:
+    """V4.0-E04: read the risk-engine knobs. Invalid values are ignored with
+    a warning (never fatal, never a way to *weaken* review): an unknown cap
+    means no cap, a negative specialist cap means none. The security-depth
+    floor is applied downstream whatever these say."""
+    from .risk import DEPTH_ORDER
+    cfg.risk_engine = _bool_field(None, "RISK_ENGINE", default=False)
+    cap = _str_field(None, "RISK_DEPTH_CAP").lower()
+    if cap and cap not in DEPTH_ORDER:
+        log.warning("RISK_DEPTH_CAP %r is not one of %s; ignored",
+                    cap[:40], "/".join(DEPTH_ORDER))
+        cap = ""
+    cfg.risk_depth_cap = cap
+    cfg.risk_max_specialists = max(
+        0, _int_field(None, "RISK_MAX_SPECIALISTS", default=0))
 
 
 def merge_dashboard_rules(cfg: Config) -> None:

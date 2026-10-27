@@ -411,7 +411,7 @@ def derive_provenance_source(finding: Any, *, outcome_engine: Any,
     provider that fell back to the rule engine for some batches reports
     ``"claude+static"`` for all of them. Stamping that blend on every
     finding mislabelled rule-engine output as an AI review (and credited the
-    AI model with it), and put a composite string into the key a V5 merge
+    AI model with it), and put a composite string into the key a V4.0 merge
     would dedup on. Per finding the answer is concrete:
 
     * pure ``static`` outcome -> static / the outcome's model / ``static``
@@ -571,7 +571,7 @@ class Finding:
     # Set by the orchestrator from AnalysisOutcome; never from model output.
     provenance_engine: str | None = None     # "claude" | "openai" | "gemini" | "static"
     provenance_model: str | None = None      # model identifier
-    provenance_agent: str | None = None      # specialist agent name (V5+; None today)
+    provenance_agent: str | None = None      # specialist agent name (V4.0+; None today)
     provenance_origin: str | None = None     # "ai" | "static" | "rule"
     # --- V4-E04 T02/T03 (pipeline-owned; see LIFECYCLE_FIELDS) ---
     # provenance_sources: every engine/model that produced (or merged into)
@@ -849,7 +849,8 @@ class ReviewResult:
             # JSON additively. Always present: None when the orchestrator
             # did not compute them (null-with-reason, E04-T01), so
             # consumers see one stable shape, never key-existence branches.
-            "risk": _risk_json(getattr(self, "risk", None)),
+            "risk": _risk_json(getattr(self, "risk", None),
+                               getattr(self, "risk_assessment", None)),
             "verification": _verification_json(
                 getattr(self, "verification", None)),
             # V4-E09: absent unless feedback.enabled (byte-identical to V3).
@@ -865,7 +866,7 @@ class ReviewResult:
 _RISK_LEVELS = frozenset({"low", "high"})
 
 
-def _risk_json(risk: object) -> dict | None:
+def _risk_json(risk: object, assessment: object = None) -> dict | None:
     """``ReviewRisk`` -> ``{"level", "reasons"}``; None when uncomputed.
 
     * level folds to the closed vocab ``{"low", "high"}`` —
@@ -884,8 +885,27 @@ def _risk_json(risk: object) -> dict | None:
         text = redact_secrets(str(raw)).strip()
         if text:
             reasons.append(text[:500])
-    return {"level": level if level in _RISK_LEVELS else "low",
-            "reasons": reasons}
+    out: dict = {"level": level if level in _RISK_LEVELS else "low",
+                 "reasons": reasons}
+    out.update(_risk_assessment_json(assessment))
+    return out
+
+
+def _risk_assessment_json(assessment: object) -> dict:
+    """V4.0-E04-T02: the risk engine's additive fields, or ``{}``.
+
+    Allowlisted keys only (the engine emits closed-vocabulary strings and
+    integers, never diff text); anything else a caller attached is dropped.
+    Absent assessment -> ``{}``, so the default report is byte-identical.
+    """
+    to_dict = getattr(assessment, "to_report_dict", None)
+    if not callable(to_dict):
+        return {}
+    from .risk import REPORT_RISK_KEYS
+    raw = to_dict()
+    if not isinstance(raw, dict):
+        return {}
+    return {k: raw[k] for k in sorted(raw) if k in REPORT_RISK_KEYS}
 
 
 def _verification_json(verification: object) -> dict | None:

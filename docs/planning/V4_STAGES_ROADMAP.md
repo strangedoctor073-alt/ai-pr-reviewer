@@ -1,6 +1,6 @@
-# V4–V10 ROADMAP — Stage-by-Stage Architecture Plan
+# V4–V4.10 ROADMAP — Stage-by-Stage Architecture Plan
 
-> Status: planning document (v1) — describes Phase 0 ("V3.x") through V10 against
+> Status: planning document (v1) — describes Phase 0 ("V3.x") through V4.10 against
 > the verified repository state in `CURRENT_ARCHITECTURE.md` at commit `2841b23`.
 > Scope: *how and in what order* each generation is built. What/why: `MASTER_VISION.md`.
 > Executive summary & build-next: `MASTER_ROADMAP.md`. Epic detail: `EPIC_BACKLOG.md`.
@@ -8,26 +8,26 @@
 
 ---
 
-## 0. Generation boundary rationale — deviations from the naive V4–V10 hypothesis
+## 0. Generation boundary rationale — deviations from the naive V4–V4.10 hypothesis
 
 The brief's starting stage structure is largely correct. Where this document
 deviates or hardens a boundary, it says so explicitly.
 
 | # | Question | Verdict | Justification |
 |---|---|---|---|
-| 1 | Must evidence/provenance (V4-E04, V4-E05) land **before** multi-agent V5? | **Yes — hard gate, not a preference.** Structure confirmed. | C3: `Finding` has no engine/model/agent/origin fields; C4: title-based 16-hex fingerprints. A V5 merger without provenance produces findings that *cannot later be attributed* — attribution is lost data, not backfillable data (you cannot re-derive which agent said what after dedup collapsed it). Comment identity also cannot be retrofitted onto already-posted GitHub comments (state markers in `github_sync.py` key off fingerprints). Naive hypothesis "build multi-agent first, provenance later" is rejected. |
-| 2 | Must telemetry (V3-E02) precede risk/cost control? | **Yes.** | C6: token/usage counted on Claude/OpenAI instances but never surfaced; Gemini usage not parsed. V5-E04 (risk engine) and V5-E07 (cost arbitration) consume token/latency distributions. Without V3-E02 their thresholds are invented numbers; with it they are fitted to observed data. Confirmed as stated. |
+| 1 | Must evidence/provenance (V4-E04, V4-E05) land **before** multi-agent V4.0? | **Yes — hard gate, not a preference.** Structure confirmed. | C3: `Finding` has no engine/model/agent/origin fields; C4: title-based 16-hex fingerprints. A V4.0 merger without provenance produces findings that *cannot later be attributed* — attribution is lost data, not backfillable data (you cannot re-derive which agent said what after dedup collapsed it). Comment identity also cannot be retrofitted onto already-posted GitHub comments (state markers in `github_sync.py` key off fingerprints). Naive hypothesis "build multi-agent first, provenance later" is rejected. |
+| 2 | Must telemetry (V3-E02) precede risk/cost control? | **Yes.** | C6: token/usage counted on Claude/OpenAI instances but never surfaced; Gemini usage not parsed. V4.0-E04 (risk engine) and V4.0-E07 (cost arbitration) consume token/latency distributions. Without V3-E02 their thresholds are invented numbers; with it they are fitted to observed data. Confirmed as stated. |
 | 3 | Must the evaluation harness (V3-E03) precede multi-agent? | **Yes.** | N specialist calls multiply every existing defect (D2 false-`resolved`, D5 unsorted severity) and shift output distribution. Without a golden-set harness you cannot tell whether a council improved or degraded review quality — you only see that it cost more. Confirmed. |
-| 4 | Should the event platform (V8-E07) precede queue/worker separation (V9-E04)? | **Yes — but with a carve-out.** | Full queue separation is correctly deferred to V9 (workers justify queues, not vice versa). **Deviation:** C5 (process-global breakers, sequential-only) is a *concurrency-safety* problem that V5 fan-out hits in-process, years before any queue exists. V5-E01 must therefore include an in-process slice of C5 — per-call breaker state or a lock — but must **not** build queues, workers, or a message bus. Queues remain V9-E04. |
-| 5 | Should the triplicated storage schema (C9) be consolidated in Phase 0? | **No rewrite in Phase 0; ADR gate before V7.** | Phase 0 fixes D7 (dashboard mute idempotency) and connection lifecycle but must not touch the `ReviewStorage` protocol shape beyond bug fixes — the stable core is keep-list. However V4-E01 (index storage), V7-E02 (memory hierarchy) and V9-E01 (org model) all add tables; three duplicated implementations cannot absorb that thrice. **Deviation:** a single data-access/schema consolidation decision (ADR) becomes a *hard prerequisite of V7*, drafted during V4-E01, implemented incrementally — never as a big-bang rewrite. |
-| 6 | Should the policy engine be one system from V6? | **No — repo/team scope in V6, org scope in V9 (staged).** | Inheritance/authority (ADR-003) requires the multi-repo model (V9-E01) to exist; a single-shot policy engine in V6 would guess at org semantics. Confirmed as staged. |
+| 4 | Should the event platform (V4.6-E07) precede queue/worker separation (V4.8-E04)? | **Yes — but with a carve-out.** | Full queue separation is correctly deferred to V4.8 (workers justify queues, not vice versa). **Deviation:** C5 (process-global breakers, sequential-only) is a *concurrency-safety* problem that V4.0 fan-out hits in-process, years before any queue exists. V4.0-E01 must therefore include an in-process slice of C5 — per-call breaker state or a lock — but must **not** build queues, workers, or a message bus. Queues remain V4.8-E04. |
+| 5 | Should the triplicated storage schema (C9) be consolidated in Phase 0? | **No rewrite in Phase 0; ADR gate before V4.4.** | Phase 0 fixes D7 (dashboard mute idempotency) and connection lifecycle but must not touch the `ReviewStorage` protocol shape beyond bug fixes — the stable core is keep-list. However V4-E01 (index storage), V4.4-E02 (memory hierarchy) and V4.8-E01 (org model) all add tables; three duplicated implementations cannot absorb that thrice. **Deviation:** a single data-access/schema consolidation decision (ADR) becomes a *hard prerequisite of V4.4*, drafted during V4-E01, implemented incrementally — never as a big-bang rewrite. |
+| 6 | Should the policy engine be one system from V4.2? | **No — repo/team scope in V4.2, org scope in V4.8 (staged).** | Inheritance/authority (ADR-003) requires the multi-repo model (V4.8-E01) to exist; a single-shot policy engine in V4.2 would guess at org semantics. Confirmed as staged. |
 | 7 | Does the digital twin need its own subsystem? | **No.** | V4-E06 is a *seed projection* over the index (layered view), never a separate CQRS/graph system. Confirmed per `MASTER_VISION.md` capability D and ADR-002. |
-| 8 | Security upgrades: one security stage (V6)? | **V6 is the engine, but screening upgrades are continuous.** | Per `MASTER_VISION.md` capability T, every stage that adds an untrusted input (V4 index, V5 agents, V7 memory, V8 CI logs, V9 webhooks, V10 plugins) must upgrade injection screening/redaction *in that stage*. V6-E01/E02 do not absorb later stages' security work. Each stage below lists its own "Security implications". |
+| 8 | Security upgrades: one security stage (V4.2)? | **V4.2 is the engine, but screening upgrades are continuous.** | Per `MASTER_VISION.md` capability T, every stage that adds an untrusted input (V4 index, V4.0 agents, V4.4 memory, V4.6 CI logs, V4.8 webhooks, V4.10 plugins) must upgrade injection screening/redaction *in that stage*. V4.2-E01/E02 do not absorb later stages' security work. Each stage below lists its own "Security implications". |
 
-**Net result:** the stage order V4→V10 stands. Three refinements are adopted:
-(a) C5 gets an in-process concurrency fix inside V5-E01, queues stay V9-E04;
-(b) storage schema consolidation is an ADR-gated soft dependency of V7, not a
-Phase 0 rewrite; (c) security is continuous-per-stage with V6 as the deep engine
+**Net result:** the stage order V4→V4.10 stands. Three refinements are adopted:
+(a) C5 gets an in-process concurrency fix inside V4.0-E01, queues stay V4.8-E04;
+(b) storage schema consolidation is an ADR-gated soft dependency of V4.4, not a
+Phase 0 rewrite; (c) security is continuous-per-stage with V4.2 as the deep engine
 stage. No epic was moved between stages.
 
 ---
@@ -136,7 +136,7 @@ and report schema only gain fields, never lose or repurpose any.
   `findings_count`, `health_score` may see different numbers; this is a
   correctness fix, documented as a behavior change in `MIGRATION_PLAN.md`.
 - Storage: additive columns only; existing SQLite files open without migration
-  steps; dashboard `ALTER TABLE` pattern continues until the V7-gated ADR.
+  steps; dashboard `ALTER TABLE` pattern continues until the V4.4-gated ADR.
 - GitHub comments: no identity/fingerprint changes; existing state markers keep
   matching.
 
@@ -151,7 +151,7 @@ and report schema only gain fields, never lose or repurpose any.
 - No prompt/context changes → token consumption unchanged.
 - First *visibility*: per-run token and estimated-cost figures appear in report
   and dashboard. This is the measurement baseline all later cost work
-  (V5-E07 arbitration, `COST_TOKEN_ARCHITECTURE.md`) consumes.
+  (V4.0-E07 arbitration, `COST_TOKEN_ARCHITECTURE.md`) consumes.
 
 ### What MUST NOT be built yet in this stage
 - No new review modes, providers, rule packs, or Action inputs.
@@ -250,9 +250,9 @@ multiply it.
 - New subsystem (likely module): `ai_pr_reviewer/evidence.py` — append-only
   evidence records referenced by findings; redacted at write.
 - `reporter.py` / `dashboard/app.py`: additive report fields + read-only
-  intelligence endpoints (no versioning yet — that is V9-E03).
+  intelligence endpoints (no versioning yet — that is V4.8-E03).
 - `storage.py` and `dashboard/storage.py`: additive tables
-  (`repo_index`, `evidence`, `finding_provenance`) following the V7-gated
+  (`repo_index`, `evidence`, `finding_provenance`) following the V4.4-gated
   consolidation ADR drafted in this stage (see §0 #5).
 
 ### Prerequisites & dependencies
@@ -346,15 +346,15 @@ multiply it.
 - Zero-key path unchanged: static engine does full index locally, no model cost.
 
 ### What MUST NOT be built yet in this stage
-- No multi-agent fan-out, specialists, councils, or merger (V5).
+- No multi-agent fan-out, specialists, councils, or merger (V4.0).
 - No vector database / embedding service / graph database (ADR-002) — retrieval
   is lexical/symbolic and deterministic first; embeddings, if ever, are an
   implementation detail behind V4-E02's contract, not new infrastructure.
 - No standalone "digital twin" service, CQRS, or separate store.
 - No security scanning engine, test intelligence, or dependency intelligence
-  (V6) — the index *stores* structure, it does not *judge* it.
-- No history/memory/issues (V7), no CI/events (V8), no org model/API versioning
-  (V9), no plugins (V10).
+  (V4.2) — the index *stores* structure, it does not *judge* it.
+- No history/memory/issues (V4.4), no CI/events (V4.6), no org model/API versioning
+  (V4.8), no plugins (V4.10).
 - No change to review modes or number of provider passes.
 
 ### Exit criteria
@@ -377,7 +377,7 @@ multiply it.
 
 ---
 
-## V5 — Multi-agent engineering review
+## V4.0 — Multi-agent engineering review
 
 ### Objective
 Turn one monolithic provider pass into a bounded council of specialist
@@ -398,16 +398,16 @@ multi-agent evaluation harness. Output must remain one coherent GitHub review.
 
 ### Major capabilities
 - Bounded fan-out orchestration (in-process concurrency + in-process slice of
-  C5 breaker safety; no queues) (V5-E01)
+  C5 breaker safety; no queues) (V4.0-E01)
 - Specialist reviewer contracts: typed spec (role, scope, input contract,
-  output schema) over extracted shared prompt-builder (V5-E02)
-- Provenance-aware finding merger (V5-E03)
-- Risk engine v1 + adaptive review depth (V5-E04)
+  output schema) over extracted shared prompt-builder (V4.0-E02)
+- Provenance-aware finding merger (V4.0-E03)
+- Risk engine v1 + adaptive review depth (V4.0-E04)
 - Provider capability registry + task routing (replaces 7 hard-coded wiring
-  sites) (V5-E05)
-- Council synthesis: one summary from specialist outputs (V5-E06)
-- Cost/token arbitration: budgets from Phase 0 telemetry (V5-E07)
-- Multi-agent evaluation harness extension (V5-E08)
+  sites) (V4.0-E05)
+- Council synthesis: one summary from specialist outputs (V4.0-E06)
+- Cost/token arbitration: budgets from Phase 0 telemetry (V4.0-E07)
+- Multi-agent evaluation harness extension (V4.0-E08)
 
 ### Architecture changes
 - `orchestrator.py` splits into a thin composition root + new subsystem (likely
@@ -420,7 +420,7 @@ multi-agent evaluation harness. Output must remain one coherent GitHub review.
   prompts. Provider protocol gains optional `capabilities()` (informal
   contract today → declared).
 - `model_router.py`: evolve to capability registry + task routing
-  (V5-E05) — selecting provider/model *per task* (synthesis vs specialist vs
+  (V4.0-E05) — selecting provider/model *per task* (synthesis vs specialist vs
   static) instead of one backend per run; `select_backend`/`build_provider`/
   `AI_BACKENDS` collapse into registry data.
 - `circuit.py`: per-backend-per-task breaker instances (or lock-guarded state)
@@ -437,7 +437,7 @@ multi-agent evaluation harness. Output must remain one coherent GitHub review.
 ### Prerequisites & dependencies
 - Hard: V4-E04 (evidence) + V4-E05 (provenance & identity) — merger and
   attribution are impossible on v1 findings (C3/C4); rationale: §0 #1.
-- Hard: V3-E02 telemetry + V3-E03 harness; V5-E08 extends the harness —
+- Hard: V3-E02 telemetry + V3-E03 harness; V4.0-E08 extends the harness —
   multi-agent cannot ship without before/after quality + cost comparison.
 - Hard: V4-E02 budgets (token-aware) for arbitration to be more than guessing.
 - Soft: V4-E03 impact feeds risk features; V4-E01 index feeds depth decisions —
@@ -488,7 +488,7 @@ multi-agent evaluation harness. Output must remain one coherent GitHub review.
 - Routing: capability registry drives provider/model choice per task; unknown
   capability → config error, not silent fallback; retired-model scan still
   green.
-- Evaluation: V5-E08 harness compares single-pass vs council on golden corpus —
+- Evaluation: V4.0-E08 harness compares single-pass vs council on golden corpus —
   quality delta (finding precision/recall vs reference set), cost delta, latency
   delta; exit gate is quality-not-worse at bounded cost.
 - Degradation: budget exhausted mid-council → partial specialist set +
@@ -506,7 +506,7 @@ multi-agent evaluation harness. Output must remain one coherent GitHub review.
   (merged result posts through existing sync path).
 - Cost: default depth must not increase median spend on small PRs beyond
   budget guard (proposed baseline: ≤ 1.2× Phase 0 median on the golden corpus —
-  proposed baseline), enforced by V5-E08 regression check.
+  proposed baseline), enforced by V4.0-E08 regression check.
 - Storage: additive usage/attribution tables; no schema break before the
   storage consolidation ADR (§0 #5).
 
@@ -521,28 +521,28 @@ multi-agent evaluation harness. Output must remain one coherent GitHub review.
   (proposed baseline: < 2× report JSON bytes — proposed baseline).
 
 ### Token/cost implications
-- This is the stage where cost goes wrong: arbitration (V5-E07) enforces
+- This is the stage where cost goes wrong: arbitration (V4.0-E07) enforces
   per-run token budget (from Phase 0 measured baselines), per-task allocation
   (synthesis reserved share — proposed baseline: 10% of budget reserved for
   synthesis — proposed baseline), and hard stop → static degradation.
-- Capability routing (V5-E05) sends cheap tasks to cheap models where
+- Capability routing (V4.0-E05) sends cheap tasks to cheap models where
   configured; BYO-key users control which models specialists may use.
 - Zero-key path: static specialists (rule packs scoped per role) — council
   architecture must work with zero API cost, honestly labelled.
 
 ### What MUST NOT be built yet in this stage
-- No queues, workers, message bus, or cross-process coordination (V9-E04) —
+- No queues, workers, message bus, or cross-process coordination (V4.8-E04) —
   in-process bounded fan-out only.
 - No autonomous actions: specialists suggest; only existing comment posting
   writes anything.
 - No self-improving/memory-writing agents; no agent that edits its own prompts
   at runtime.
-- No multi-repo/org awareness, no per-repo learned preferences (V7/V9).
+- No multi-repo/org awareness, no per-repo learned preferences (V4.4/V4.8).
 - No new provider adapters beyond registry refactor of existing three + static
-  (V10-E02 ecosystem).
-- No policy engine (V6-E07), no security deep scan (V6-E01) — a security
+  (V4.10-E02 ecosystem).
+- No policy engine (V4.2-E07), no security deep scan (V4.2-E01) — a security
   *specialist* may exist only as thin scope over existing static SEC rules, the
-  engine stage is V6.
+  engine stage is V4.2.
 
 ### Exit criteria
 1. Planner→executor→merger→synthesizer pipeline runs in tests with mock
@@ -552,7 +552,7 @@ multi-agent evaluation harness. Output must remain one coherent GitHub review.
    sites outside registry data (assert by test that inspects wiring).
 3. Merger golden suite green; report shows unioned findings with complete
    per-agent provenance and single merged GitHub comments.
-4. V5-E08 harness report exists in CI: council vs single-pass quality/cost/
+4. V4.0-E08 harness report exists in CI: council vs single-pass quality/cost/
    latency deltas on golden corpus; gate: quality ≥ baseline, cost ≤ cap.
 5. Budget-exhaustion and provider-failure drills produce correctly labelled
    degraded runs; `fail_on` and exit codes unchanged for equivalent findings.
@@ -564,7 +564,7 @@ multi-agent evaluation harness. Output must remain one coherent GitHub review.
 
 ---
 
-## V6 — Security + testing + architecture intelligence
+## V4.2 — Security + testing + architecture intelligence
 
 ### Objective
 Add the judgment engines that need repository structure but must not wait for
@@ -591,21 +591,21 @@ making *evidence-backed* claims about risk, not pattern hits alone.
 
 ### Major capabilities
 - Security engine: deterministic checks (SAST-lite: taint-ish flow over index,
-  secrets, injection shapes) + AI analysis scoped by the engine (V6-E01)
+  secrets, injection shapes) + AI analysis scoped by the engine (V4.2-E01)
 - AI security v2: adversarial/jailbreak/injection regression corpus feeding
-  prompt hardening (V6-E02)
+  prompt hardening (V4.2-E02)
 - Test intelligence: test→code mapping, changed-line coverage inference,
-  flaky/stale test signals from diff history within repo scope (V6-E03)
+  flaky/stale test signals from diff history within repo scope (V4.2-E03)
 - Architecture intelligence: layer/dependency rule checker over index
-  (V6-E04)
+  (V4.2-E04)
 - Advanced verification tiers: deterministic tiers T1 coverage → T2 static
-  confirmation → T3 test-run evidence (V6-E05)
+  confirmation → T3 test-run evidence (V4.2-E05)
 - Dependency intelligence: manifest parse, advisory matching, transitive path
-  evidence (V6-E06)
+  evidence (V4.2-E06)
 - Policy engine v1: deterministic evaluation of repo/team policy over findings
-  and changes (V6-E07)
+  and changes (V4.2-E07)
 - Security evaluation corpus: labeled fixtures, false-positive/negative gates
-  (V6-E08)
+  (V4.2-E08)
 
 ### Architecture changes
 - New subsystem (likely module): `ai_pr_reviewer/security_eng/` (name TBD) —
@@ -629,30 +629,30 @@ making *evidence-backed* claims about risk, not pattern hits alone.
   input versioned with the release; fetching adds an outbound network surface
   with pinned host allowlist.
 - `orchestrator`/planner: security/arch/test specialists become first-class
-  scopes in V5 contracts (V5-E02), not new wiring.
+  scopes in V4.0 contracts (V4.0-E02), not new wiring.
 
 ### Prerequisites & dependencies
 - Hard: V4-E01 (index) + V4-E03 (impact) + V4-E04 (evidence) — flow analysis,
   test mapping, arch rules, and evidence-backed findings all read the index and
   write evidence.
-- Hard: V5-E02 (specialist contracts) for scoped AI passes; V4-E05 provenance
+- Hard: V4.0-E02 (specialist contracts) for scoped AI passes; V4-E05 provenance
   for attributed security findings.
-- Hard: V3-E03/V5-E08 harness for corpus scoring.
-- Soft: V5-E04 risk feeds severity calibration; V4-E02 budgets bound AI scans.
-- Soft (deferred): V7 history would improve flaky/stale-test signals — V6 ships
-  diff-local inference only; V8 CI data would improve test truth — V6 uses
+- Hard: V3-E03/V4.0-E08 harness for corpus scoring.
+- Soft: V4.0-E04 risk feeds severity calibration; V4-E02 budgets bound AI scans.
+- Soft (deferred): V4.4 history would improve flaky/stale-test signals — V4.2 ships
+  diff-local inference only; V4.6 CI data would improve test truth — V4.2 uses
   static inference only. Document as known limits.
 
 ### Risks
 - False-positive flood destroying trust (classic SAST failure) — corpus gates
-  (V6-E08) with explicit precision floor before default-on.
+  (V4.2-E08) with explicit precision floor before default-on.
 - Advisory data staleness → wrong claims; snapshot freshness must be labelled
   in output ("advisories as of <date>").
 - Verification tier creep: model claim about a test run accepted as evidence →
   violates determinism; T3 requires *observed* results only.
 - AI security v2 corpus rot against evolving models; corpus is versioned
   assets, refreshed per stage.
-- Policy engine scope creep into org semantics before V9 model exists.
+- Policy engine scope creep into org semantics before V4.8 model exists.
 
 ### Security implications
 - Security engine *reads more untrusted code* → its own prompt surfaces are new
@@ -674,7 +674,7 @@ making *evidence-backed* claims about risk, not pattern hits alone.
   CI.
 
 ### Testing requirements
-- V6-E08 corpus: labeled fixtures with gates — proposed baseline: precision
+- V4.2-E08 corpus: labeled fixtures with gates — proposed baseline: precision
   ≥ 0.7, recall ≥ 0.6 on the seeded corpus before security engine default-on
   (proposed baseline), static SEC rules keep 100% recall on their existing
   fixtures.
@@ -694,7 +694,7 @@ making *evidence-backed* claims about risk, not pattern hits alone.
 
 ### Migration requirements
 - Config: `.ai-pr-reviewer.yml` gains new optional keys (`policy`, arch rules);
-  absent keys → behavior identical to V5. Privacy `exclude` semantics unchanged.
+  absent keys → behavior identical to V4.0. Privacy `exclude` semantics unchanged.
 - Findings: new categories may appear (security/test/arch) — severity
   threshold behavior unchanged; users with `severity_threshold: high` see no
   new comments by default. Findings appear in report (visible) even when below
@@ -710,7 +710,7 @@ making *evidence-backed* claims about risk, not pattern hits alone.
   traversal caps (proposed baseline: ≤ 50k nodes traversed per rule — proposed
   baseline), timeout budget in-run (proposed baseline: ≤ 10 s total static
   analysis — proposed baseline), truncated → "partial analysis" label.
-- AI security passes reuse V5 bounded fan-out; incremental cost on top of
+- AI security passes reuse V4.0 bounded fan-out; incremental cost on top of
   council (proposed baseline: security scope adds ≤ 40% tokens on security-
   relevant PRs — proposed baseline), zero extra calls on pure-docs PRs.
 - Advisory fetch is lazy + cached (proposed baseline: 24 h cache — proposed
@@ -721,7 +721,7 @@ making *evidence-backed* claims about risk, not pattern hits alone.
   cost; AI only for judgment on candidate findings (pre-filtered).
 - Corpus gates double as cost gates: precision floor means fewer spurious AI
   follow-ups.
-- Per-scope budgets from V5 arbitration; report breaks out security-scope spend.
+- Per-scope budgets from V4.0 arbitration; report breaks out security-scope spend.
 
 ### What MUST NOT be built yet in this stage
 - No autonomous remediation, no auto-generated patches applied anywhere, no
@@ -729,15 +729,15 @@ making *evidence-backed* claims about risk, not pattern hits alone.
 - No penetration testing, no runtime/DAST execution, no exploit verification.
 - No compliance/certification claims (SOC2/PCI "pass/fail") — policy engine
   reports evidence-backed violations only.
-- No org-level policy inheritance or multi-repo policy (V9-E02).
+- No org-level policy inheritance or multi-repo policy (V4.8-E02).
 - No secrets *vaulting*, no secret rotation, no outbound scanning of registries
   beyond pinned advisory fetch.
-- No incident automation, no CI/CD control (V8 is read-only intelligence).
+- No incident automation, no CI/CD control (V4.6 is read-only intelligence).
 - No dependency auto-upgrade PRs.
 
 ### Exit criteria
 1. Security engine runs on golden corpus with precision/recall at or above the
-   V6-E08 floor; every emitted finding carries ≥ 1 evidence record with a
+   V4.2-E08 floor; every emitted finding carries ≥ 1 evidence record with a
    resolvable locator (file@sha:line range) or it is dropped.
 2. Arch rules + test intel fixtures green in CI; partial-analysis labelling
    proven by cap-exhaustion test.
@@ -750,12 +750,12 @@ making *evidence-backed* claims about risk, not pattern hits alone.
    malformed-manifest fuzz suite green.
 6. AI security corpus regression green; `scan_prompt_injection` pattern set
    versioned with corpus.
-7. Golden-corpus harness shows no quality regression vs V5; cost within
+7. Golden-corpus harness shows no quality regression vs V4.0; cost within
    proposed caps; full suite + docker build green.
 
 ---
 
-## V7 — Historical / project / team intelligence
+## V4.4 — Historical / project / team intelligence
 
 ### Objective
 Make the platform remember and learn from the project's own past: git history
@@ -780,19 +780,19 @@ changed before, what was decided, and what keeps breaking.
 
 ### Major capabilities
 - Git history intelligence: churn, blast radius, revert/fix patterns, hot-spot
-  decay over time (V7-E01)
+  decay over time (V4.4-E01)
 - Memory hierarchy: org→team→repo→component→PR→finding levels with authority
-  model (human-approved > observed > inferred) (V7-E02)
+  model (human-approved > observed > inferred) (V4.4-E02)
 - Finding relations: regression_of / caused_by / duplicates / fixed_by edges
-  over fingerprint v2 identities (V7-E03)
+  over fingerprint v2 identities (V4.4-E03)
 - Issue/requirement linkage: PR↔issue↔requirement association with evidence
-  (V7-E04)
+  (V4.4-E04)
 - Team/repository analytics: aggregate trends, hotspots, class movement —
-  **no individual rankings** (V7-E05)
+  **no individual rankings** (V4.4-E05)
 - Historical evidence in review: history + relations + linked issues flow into
-  context and finding verdicts (V7-E06)
+  context and finding verdicts (V4.4-E06)
 - Memory security: authority enforcement, poisoning defenses, provenance on
-  every memory read (V7-E07)
+  every memory read (V4.4-E07)
 
 ### Architecture changes
 - New subsystem (likely module): `ai_pr_reviewer/history/` — git log/blame/
@@ -822,15 +822,15 @@ changed before, what was decided, and what keeps breaking.
 
 ### Prerequisites & dependencies
 - Hard: V4-E05 (identity — relations need identity to attach to), V4-E04
-  (evidence), storage ADR from V4/V7 gate (§0 #5).
+  (evidence), storage ADR from V4/V4.4 gate (§0 #5).
 - Hard: V3-E04 (storage debt: retention, connection lifecycle — history data
   grows unbounded).
-- Hard: V7-E02 → V7-E07 ordering inside stage (authority model before mass
+- Hard: V4.4-E02 → V4.4-E07 ordering inside stage (authority model before mass
   memory writes; memory security with the surface).
-- Soft: V5-E03 merger (relations across specialist findings), V6-E03 test
-  intelligence (flaky-test signals gain history), V6-E07 policy (team-scope
+- Soft: V4.0-E03 merger (relations across specialist findings), V4.2-E03 test
+  intelligence (flaky-test signals gain history), V4.2-E07 policy (team-scope
   policy gives memory a consumer).
-- Soft: V7-E01 before V7-E06; V7-E03/V7-E04 feed V7-E06.
+- Soft: V4.4-E01 before V4.4-E06; V4.4-E03/V4.4-E04 feed V4.4-E06.
 
 ### Risks
 - **Memory poisoning**: hostile PR/issue text landing in approved memory →
@@ -842,7 +842,7 @@ changed before, what was decided, and what keeps breaking.
   preconditions + confidence threshold, capped per run.
 - Analytics slowly drifting into individual ranking territory (reputationally
   and ethically toxic) → schema and UI tests assert no per-user dimensions
-  exist in V7-E05 outputs.
+  exist in V4.4-E05 outputs.
 - Git-history availability in Action runners (shallow clone default) →
   graceful degradation mandatory, documented checkout requirement.
 
@@ -856,7 +856,7 @@ changed before, what was decided, and what keeps breaking.
   authority + provenance in prompt; inferred content cannot be presented as
   project rule; write path: approved-level writes only from dashboard (existing
   human-only rule), engine writes restricted to labelled observed/inferred
-  slots — enforced in storage layer, tested (V7-E07).
+  slots — enforced in storage layer, tested (V4.4-E07).
 - Analytics privacy: aggregate-only outputs; no author-dimension queries
   exposed by API (test asserts query builder has no author group-by — proposed
   baseline design control).
@@ -889,7 +889,7 @@ changed before, what was decided, and what keeps breaking.
 - Report JSON additive (`history`, `relations`, `linked_issues`); findings
   themselves unchanged unless historical evidence changes verification state —
   state transitions logged with provenance.
-- Dashboard: additive views; existing routes untouched (API versioning is V9).
+- Dashboard: additive views; existing routes untouched (API versioning is V4.8).
 - Action inputs: additive only (e.g. `history_depth`), defaults preserve
   current behavior.
 
@@ -917,13 +917,13 @@ changed before, what was decided, and what keeps breaking.
 ### What MUST NOT be built yet in this stage
 - **No individual developer rankings, quality scores, leaderboards, or
   per-author analytics — anywhere, in any shape** (vision §6, hard invariant).
-- No org-wide analytics or cross-repo comparison (V10-E05) — repository
+- No org-wide analytics or cross-repo comparison (V4.10-E05) — repository
   boundary is the unit.
 - No autonomous memory writes of AI inference as truth; no auto-promotion; no
   "the platform decided" flows.
 - No requirement-compliance certification; gap detection is evidence-backed
   signal only.
-- No webhooks/event platform (V8), no CI data (V8), no org model (V9).
+- No webhooks/event platform (V4.6), no CI data (V4.6), no org model (V4.8).
 - No LLM-based summarization of *all* history — bounded digests only.
 
 ### Exit criteria
@@ -944,7 +944,7 @@ changed before, what was decided, and what keeps breaking.
 
 ---
 
-## V8 — CI/CD + release + incident intelligence
+## V4.6 — CI/CD + release + incident intelligence
 
 ### Objective
 Connect the review to everything around the merge: ingest CI run results and
@@ -971,46 +971,46 @@ and incidents — it never triggers, gates, or rolls back anything.
 
 ### Major capabilities
 - CI ingestion: GitHub Actions (and later generic) run/job results for the PR
-  head and recent base history (V8-E01)
+  head and recent base history (V4.6-E01)
 - Test-failure correlation: cluster failures across runs/PRs, link to files via
-  V6 test intel + V7 history (V8-E02)
-- Release intelligence: tags/releases/changelog state (V8-E03)
-- Docs intelligence: docs↔code drift signals with evidence (V8-E04)
-- Infrastructure intelligence: IaC parsing + rule checks (V8-E05)
+  V4.2 test intel + V4.4 history (V4.6-E02)
+- Release intelligence: tags/releases/changelog state (V4.6-E03)
+- Docs intelligence: docs↔code drift signals with evidence (V4.6-E04)
+- Infrastructure intelligence: IaC parsing + rule checks (V4.6-E05)
 - Incident intelligence: read-only linkage of human-supplied incident records
-  to code/areas (V8-E06)
+  to code/areas (V4.6-E06)
 - Internal event platform v1: normalized append-only event stream (in-process
-  producer → durable local log) — **no queues/workers yet** (V8-E07)
+  producer → durable local log) — **no queues/workers yet** (V4.6-E07)
 
 ### Architecture changes
 - `github_client.py`: CI/release/issue-event read endpoints with rate-limit
   handling (C8 continues), all classified read-only; polling schedules inside
-  a run, no webhooks yet (webhooks = V9).
+  a run, no webhooks yet (webhooks = V4.8).
 - New subsystem (likely module): `ai_pr_reviewer/events/` — event schema
   (versioned envelope: type, source, subject, payload, provenance), producer
   API, append-only local log in storage, replay for tests. This is the
-  foundation V9 workers consume; V8 writes and reads it only.
+  foundation V4.8 workers consume; V4.6 writes and reads it only.
 - New subsystems (likely modules): `ci_correlation.py`,
   `release_intel.py`, `docs_intel.py`, `infra_intel.py`, `incident_intel.py` —
-  each reads index (V4) + history (V7) + test intel (V6), emits evidence
+  each reads index (V4) + history (V4.4) + test intel (V4.2), emits evidence
   records, and contributes findings or *context* to the review; none get
-  independent provider routing (they ride V5 task contracts).
+  independent provider routing (they ride V4.0 task contracts).
 - `context.py` planner input: CI/incident signals feed risk features
-  (V5-E04) as explainable additions.
+  (V4.0-E04) as explainable additions.
 - `dashboard/`: CI/release/incident views over the event log + stored
   correlations; `reporter.py` gains a "pipeline evidence" section.
 - Storage: `events`, `ci_runs`, `test_failures`, `releases`, `incidents`
   tables on the consolidated layout (increment #2 of the §0 #5 ADR).
 
 ### Prerequisites & dependencies
-- Hard: V4 (index/evidence/read contracts) for every correlation; V6-E03 test
-  intelligence for test-failure correlation; V7-E01 history for cross-run
+- Hard: V4 (index/evidence/read contracts) for every correlation; V4.2-E03 test
+  intelligence for test-failure correlation; V4.4-E01 history for cross-run
   patterns.
-- Hard: V6-E07 policy for release/docs rules to reference.
-- Hard: internal ordering — V8-E01 → V8-E02 (correlation needs raw runs);
-  V8-E07 event schema early (it is the seam the others publish to), but no
-  worker/queue semantics in V8 (§0 #4).
-- Soft: V7-E04 linkage patterns reused for incident linkage; V5-E04 risk
+- Hard: V4.2-E07 policy for release/docs rules to reference.
+- Hard: internal ordering — V4.6-E01 → V4.6-E02 (correlation needs raw runs);
+  V4.6-E07 event schema early (it is the seam the others publish to), but no
+  worker/queue semantics in V4.6 (§0 #4).
+- Soft: V4.4-E04 linkage patterns reused for incident linkage; V4.0-E04 risk
   integration.
 
 ### Risks
@@ -1018,7 +1018,7 @@ and incidents — it never triggers, gates, or rolls back anything.
   ingest, retention (proposed baseline: raw CI runs retained 90 days —
   proposed baseline).
 - Correlation false confidence ("test failed → PR caused it") → correlation is
-  labelled *correlation*, causation requires V7 history evidence; UI/report
+  labelled *correlation*, causation requires V4.4 history evidence; UI/report
   wording gated by honesty tests.
 - Event schema churn before consumers exist → schema versioned from day one,
   additive-only rule.
@@ -1032,12 +1032,12 @@ and incidents — it never triggers, gates, or rolls back anything.
   screened before prompts; CI logs are a classic secret-leak channel →
   `redact_secrets` mandatory on ingest *and* on store, plus truncation.
 - Workflow YAML in a PR is attacker-controlled: parsing only, no execution, no
-  `uses:` resolution, no action-graph execution — V8 reads what CI *reported*,
+  `uses:` resolution, no action-graph execution — V4.6 reads what CI *reported*,
   it never interprets a workflow as instructions.
 - Incident records: human-supplied but third-party text → same fencing,
-  authority model from V7 applies (incident linkage is observed-level).
+  authority model from V4.4 applies (incident linkage is observed-level).
 - Event log: append-only, schema-validated, size-capped, redacted at ingest;
-  event consumption by future V9 workers re-validates (never trust your own
+  event consumption by future V4.8 workers re-validates (never trust your own
   past input blindly).
 - Read-only scope is the security property: token permission set unchanged
   (contents: read, pull-requests: write for comments only).
@@ -1061,10 +1061,10 @@ and incidents — it never triggers, gates, or rolls back anything.
   V3 behavior unchanged when inputs absent (degrade with labels).
 - Action inputs: additive (e.g. `ci_context: auto|off`), default `auto` =
   read-if-available with graceful absence; documented fetch-depth addition from
-  V7 remains documented.
+  V4.4 remains documented.
 - Report JSON additive (`pipeline`, `correlations`, `releases`); event log is
   internal, not part of the public report contract.
-- Dashboard additive views; no API versioning yet (V9-E03).
+- Dashboard additive views; no API versioning yet (V4.8-E03).
 - Storage additive on consolidated layout; retention policies documented in
   `MIGRATION_PLAN.md`.
 
@@ -1076,7 +1076,7 @@ and incidents — it never triggers, gates, or rolls back anything.
   scheduled; dashboard views paginate (no O(all) scans — C9 exit condition
   enforced).
 - Latency: CI correlation is context-stage only (before provider), within the
-  existing run budget; no second provider pass added by V8 itself.
+  existing run budget; no second provider pass added by V4.6 itself.
 
 ### Token/cost implications
 - CI/release/docs signals enter as *structured summaries computed deterministically
@@ -1090,9 +1090,9 @@ and incidents — it never triggers, gates, or rolls back anything.
 ### What MUST NOT be built yet in this stage
 - **No CI control of any kind**: no triggering/re-running jobs, no merge gates,
   no status writes, no deployment actions (vision §6 hard rule).
-- No queue separation, no workers, no broker (V9-E04) — event platform v1 is
+- No queue separation, no workers, no broker (V4.8-E04) — event platform v1 is
   durable log + schema + replay only.
-- No external webhook endpoints (V9) — polling only.
+- No external webhook endpoints (V4.8) — polling only.
 - No third-party CI systems beyond GitHub Actions in v1 (contract allows more
   later); no proprietary SaaS dependencies.
 - No incident *response* automation; no paging/on-call integration; no root-
@@ -1113,11 +1113,11 @@ and incidents — it never triggers, gates, or rolls back anything.
 6. Golden harness ≥ baseline; full suite + docker build green; zero-key path
    exercises everything local (CI features labelled "GitHub data required"
    when absent).
-7. Token/cost telemetry shows V8 overhead within proposed caps.
+7. Token/cost telemetry shows V4.6 overhead within proposed caps.
 
 ---
 
-## V9 — Organization platform
+## V4.8 — Organization platform
 
 ### Objective
 Generalize the single-repo system into an organization platform: a multi-repo/
@@ -1141,19 +1141,19 @@ matters more than new intelligence.
 
 ### Major capabilities
 - Multi-repo/org model: org→repo identity, config scope, storage schema
-  (V9-E01)
-- Org policy engine: inheritance/override of V6 repo/team policy (V9-E02)
+  (V4.8-E01)
+- Org policy engine: inheritance/override of V4.2 repo/team policy (V4.8-E02)
 - Versioned public API: `/api/v1` contract, authz per scope, deprecation
-  policy (V9-E03)
+  policy (V4.8-E03)
 - Event-driven workers: queue + workers **only for measured bottlenecks**
-  (CI ingestion, history digests, index build, analytics rollups) (V9-E04)
-- Org memory: V7 hierarchy extended to org/team levels with authority
-  propagation (V9-E05)
+  (CI ingestion, history digests, index build, analytics rollups) (V4.8-E04)
+- Org memory: V4.4 hierarchy extended to org/team levels with authority
+  propagation (V4.8-E05)
 - Extensibility contract v1: declared seams (provider registry, rule packs,
   read contracts, event schema) frozen as documented, tested interfaces
-  (V9-E06)
+  (V4.8-E06)
 - Observability platform: metrics, structured audit, health/error-budget views
-  (V9-E07)
+  (V4.8-E07)
 
 ### Architecture changes
 - `dashboard/app.py` routes split behind a versioned API layer (likely
@@ -1162,10 +1162,10 @@ matters more than new intelligence.
 - Storage: org/repo scoping across all tables — consolidated layout increment
   #3; row-level scope filter enforced in the data-access layer (never per-
   route), tested as an invariant.
-- `policy/` (V6) gains inheritance resolution (org → repo, local override
+- `policy/` (V4.2) gains inheritance resolution (org → repo, local override
   rules, audit trail of effective policy).
 - New subsystem (likely module): `ai_pr_reviewer/queue/` — durable job queue
-  + worker entrypoints over the V8 event log; **C5 breaker/telemetry design
+  + worker entrypoints over the V4.6 event log; **C5 breaker/telemetry design
   must be worker-safe (per-process instances) before this ships**; in-process
   path remains fully functional for single-process/Action deployments.
 - `memory.py`/storage: org/team levels, promotion workflow (human approval
@@ -1178,21 +1178,21 @@ matters more than new intelligence.
   requirement for V3 users.
 
 ### Prerequisites & dependencies
-- Hard: V8-E07 (event platform v1 — workers consume it; §0 #4), V6-E07 (policy
-  v1 to inherit), V7-E02/V7-E07 (memory hierarchy + authority to extend),
-  V4-E07/V9-E01 ordering (read contracts must be org-scoped before exposure).
+- Hard: V4.6-E07 (event platform v1 — workers consume it; §0 #4), V4.2-E07 (policy
+  v1 to inherit), V4.4-E02/V4.4-E07 (memory hierarchy + authority to extend),
+  V4-E07/V4.8-E01 ordering (read contracts must be org-scoped before exposure).
 - Hard: storage consolidation ADR executed (increment #3) — org scoping on
   triplicated schemas (C9) is untenable.
-- Hard: V9-E01 → V9-E02 → V9-E03 (org model precedes policy, both precede
-  public API freeze); V9-E06 after the seams it freezes are exercised (V4–V8).
-- Soft: V9-E04 workers start only with a measured bottleneck from V9-E07
+- Hard: V4.8-E01 → V4.8-E02 → V4.8-E03 (org model precedes policy, both precede
+  public API freeze); V4.8-E06 after the seams it freezes are exercised (V4–V4.6).
+- Soft: V4.8-E04 workers start only with a measured bottleneck from V4.8-E07
   observability (workers are evidence-driven, not architecture-driven).
-- Soft: V5-E05 registry and V8 event schema feed V9-E06 contract tests.
+- Soft: V4.0-E05 registry and V4.6 event schema feed V4.8-E06 contract tests.
 
 ### Risks
 - **Premature queue migration**: rewriting ingestion to workers without
   measurement burns a stage and risks reliability (violates "no rewrite").
-  Control: workers gated on V9-E07 metrics showing a real bottleneck.
+  Control: workers gated on V4.8-E07 metrics showing a real bottleneck.
 - API freeze too early → version churn; control: mark v1 endpoints
   experimental until two consumers exist (dashboard + one test client).
 - Scope-based authz bug = cross-tenant data leak (when multi-repo orgs share a
@@ -1211,10 +1211,10 @@ matters more than new intelligence.
   constant-time token compare kept; weak-token refusal kept; reads default
   authenticated (the `DASHBOARD_REQUIRE_TOKEN_FOR_READS=0` escape hatch becomes
   a loud, documented risk flag).
-- Org memory inherits V7 authority rules; org-level entries require human
+- Org memory inherits V4.4 authority rules; org-level entries require human
   approval; poisoning blast radius is org-wide → approval + provenance +
   audit on every read.
-- Event/webhook groundwork: V9 may expose inbound webhooks (if built — see
+- Event/webhook groundwork: V4.8 may expose inbound webhooks (if built — see
   "must not" for the conservative stance) → HMAC signature verification,
   replay protection, payload caps; otherwise polling stays.
 - Workers process untrusted-derived data (CI logs, diffs) → same fencing in
@@ -1262,7 +1262,7 @@ matters more than new intelligence.
   enforced by perf tests): dashboard list endpoints bounded pagination,
   analytics precomputed.
 - Workers: parallelism bounded (proposed baseline: ≤ 2 workers per host —
-  proposed baseline initially), queue depth alarms via V9-E07.
+  proposed baseline initially), queue depth alarms via V4.8-E07.
 - API latency budgets (proposed baseline: p95 ≤ 300 ms for read endpoints on
   warm cache — proposed baseline).
 - Action-path latency unaffected (no queue in the PR critical path).
@@ -1271,20 +1271,20 @@ matters more than new intelligence.
 - Org memory and policy context can bloat prompts → per-repo context budgets
   remain hard caps; org contributions to prompts bounded (proposed baseline:
   ≤ 10% of context budget — proposed baseline).
-- V9-E07 provides cost rollups per org/repo (from Phase 0 telemetry lineage)
+- V4.8-E07 provides cost rollups per org/repo (from Phase 0 telemetry lineage)
   — aggregate only.
 - Workers add compute cost only where justified; run-before-build rule: no
-  queue without a measured bottleneck (evidence from V9-E07).
+  queue without a measured bottleneck (evidence from V4.8-E07).
 
 ### What MUST NOT be built yet in this stage
-- **No full multi-tenancy** (V10-E03): org model ≠ tenant isolation product;
+- **No full multi-tenancy** (V4.10-E03): org model ≠ tenant isolation product;
   no billing, no per-tenant encryption, no SSO/SAML (unless a concrete
   enterprise requirement reopens it via ADR).
-- No plugin marketplace or third-party plugin execution (V10-E01) — only the
-  contract (V9-E06).
+- No plugin marketplace or third-party plugin execution (V4.10-E01) — only the
+  contract (V4.8-E06).
 - No hosted SaaS offering, no control plane, no automatic upgrades of user
   deployments.
-- No IDE/CLI ecosystem expansion beyond current CLI (V10-E04).
+- No IDE/CLI ecosystem expansion beyond current CLI (V4.10-E04).
 - No org-wide individual analytics (permanent prohibition) and no developer
   scoring of any kind.
 - No event *bus* semantics beyond log + queue: no stream processing framework,
@@ -1300,7 +1300,7 @@ matters more than new intelligence.
    dashboard SPA runs entirely on v1; legacy routes emit deprecation headers.
 4. Storage org-scoping migration idempotency test green (run twice);
    consolidated layout in use; JsonStorage fate decided and documented.
-5. Workers ship **only** with a V9-E07- documented bottleneck; parity tests
+5. Workers ship **only** with a V4.8-E07- documented bottleneck; parity tests
    (queue on/off → same review results) green; kill-worker drill green.
 6. Org memory promotion + authority tests green; org-level entries all carry
    human-approval provenance.
@@ -1311,7 +1311,7 @@ matters more than new intelligence.
 
 ---
 
-## V10 — Ecosystem / platform
+## V4.10 — Ecosystem / platform
 
 ### Objective
 Open the stabilized seams to the world (and optionally to hosting): a sandboxed
@@ -1320,7 +1320,7 @@ ecosystem including optional local providers, an *optional* hosted
 multi-tenant foundation, an IDE/CLI ecosystem around the same engine, org-scale
 analytics, and the engineering command center that pulls org, review,
 verification, and cost signals into one operational surface. Everything here
-consumes contracts frozen in V9 — this stage ships surfaces, not new
+consumes contracts frozen in V4.8 — this stage ships surfaces, not new
 intelligence cores.
 
 ### User value
@@ -1336,17 +1336,17 @@ intelligence cores.
 
 ### Major capabilities
 - Sandboxed plugin system: rule packs / analyzers / report renderers with
-  capability-based permissions (V10-E01)
+  capability-based permissions (V4.10-E01)
 - Provider capability ecosystem: declarative capability manifests, local/offline
-  provider adapters, community provider contract (V10-E02)
+  provider adapters, community provider contract (V4.10-E02)
 - Hosted multi-tenant foundation (optional, explicitly labelled future option)
-  (V10-E03)
+  (V4.10-E03)
 - IDE/CLI ecosystem: LSP-ish/local review UX, CLI parity with Action modes
-  (V10-E04)
+  (V4.10-E04)
 - Org-scale analytics: longitudinal trends, cost/quality dashboards (no
-  individual rankings) (V10-E05)
+  individual rankings) (V4.10-E05)
 - Engineering command center: the dashboard becomes the operational surface
-  (V10-E06)
+  (V4.10-E06)
 
 ### Architecture changes
 - New subsystem (likely module): `ai_pr_reviewer/plugins/` — manifest schema
@@ -1356,30 +1356,30 @@ intelligence cores.
   disk. Rule packs remain the in-process *first-party* path (existing
   `static/engine.build_default_registry()` wiring) — plugins are the
   third-party path with stricter isolation.
-- `model_router.py` capability registry (V5-E05) becomes the plugin/provider
+- `model_router.py` capability registry (V4.0-E05) becomes the plugin/provider
   seam: local provider adapters are registry entries with capability
   manifests (context window, modalities, cost class, offline flag).
 - CLI (`cli.py`) and dashboard gain parity surfaces; likely new
   `ai_pr_reviewer/local_review.py` shared core so CLI/IDE/Action run the same
   pipeline (no forked logic).
-- Dashboard SPA → command center (V10-E06): aggregated views over org/repo
-  analytics (V10-E05), all read-only over `/api/v1`.
-- Hosted foundation (V10-E03, if pursued): deployment artifacts, tenant
-  isolation primitives, config service — **built on V9 storage/authz scope
+- Dashboard SPA → command center (V4.10-E06): aggregated views over org/repo
+  analytics (V4.10-E05), all read-only over `/api/v1`.
+- Hosted foundation (V4.10-E03, if pursued): deployment artifacts, tenant
+  isolation primitives, config service — **built on V4.8 storage/authz scope
   model, never a parallel architecture**; repository ships docs + compose
   files, not a SaaS control plane.
 
 ### Prerequisites & dependencies
-- Hard: V9-E06 (extensibility contract — plugins target frozen seams),
-  V9-E03 (versioned API — command center and IDE are API clients), V9-E01/
-  V9-E02 (org model + policy for org analytics and plugin governance).
-- Hard: V9-E07 observability (command center consumes it; security monitoring
+- Hard: V4.8-E06 (extensibility contract — plugins target frozen seams),
+  V4.8-E03 (versioned API — command center and IDE are API clients), V4.8-E01/
+  V4.8-E02 (org model + policy for org analytics and plugin governance).
+- Hard: V4.8-E07 observability (command center consumes it; security monitoring
   of plugin/runtime surfaces).
-- Hard: V5-E05 registry for V10-E02; V4 read contracts for local review
+- Hard: V4.0-E05 registry for V4.10-E02; V4 read contracts for local review
   parity.
-- Soft: V8 event platform for streaming command-center data (polling over
-  events is acceptable v1); V10-E03 strictly optional — never a prerequisite
-  for V10-E01/E02/E04/E05/E06.
+- Soft: V4.6 event platform for streaming command-center data (polling over
+  events is acceptable v1); V4.10-E03 strictly optional — never a prerequisite
+  for V4.10-E01/E02/E04/E05/E06.
 
 ### Risks
 - **Plugin sandbox escape** = arbitrary code with repo/token access — the
@@ -1390,11 +1390,11 @@ intelligence cores.
 - Provider ecosystem quality variance → capability manifests must be honest;
   unknown capabilities fail closed (config error), never silently degrade.
 - Hosted scope creep turns an optional foundation into a maintenance sink →
-  ADR gate required before any V10-E03 work starts (decision documented).
+  ADR gate required before any V4.10-E03 work starts (decision documented).
 - CLI/IDE parity drift (three surfaces, one pipeline) → shared-core invariant
   test (same diff → same findings across modes).
 - Org analytics drifting into individual surveillance → invariant test
-  carried forward from V7.
+  carried forward from V4.4.
 
 ### Security implications
 - **New untrusted input: plugin code itself** — third-party code is hostile by
@@ -1408,7 +1408,7 @@ intelligence cores.
   treats them like any provider (output untrusted), plus offline-mode
   guarantee ("no network egress" claim must be testable).
 - Hosted multi-tenancy (if built): tenant isolation is the whole game —
-  row-level scope from V9 becomes tenant-level with dedicated tests, key
+  row-level scope from V4.8 becomes tenant-level with dedicated tests, key
   management, and per-tenant encryption decisions via ADR; until then,
   multi-tenancy stays in DO_NOT_BUILD_YET.
 - IDE/CLI: local diffs are untrusted input exactly as in CI; local mode never
@@ -1457,11 +1457,11 @@ intelligence cores.
   registry caches manifests.
 - Command center: precomputed rollups (no live O(all) queries); event-driven
   refresh bounded.
-- Org analytics queries run precomputed from V9 observability store.
+- Org analytics queries run precomputed from V4.8 observability store.
 
 ### Token/cost implications
 - Local providers → zero token cost option (privacy + cost), honestly labelled
-  with their capability class; capability routing (V5-E05) can prefer cheap/
+  with their capability class; capability routing (V4.0-E05) can prefer cheap/
   local models per task type when configured.
 - Plugin/context additions bounded by existing V4 budgets — plugins cannot
   allocate their own unlimited context (budget API is the only path).
@@ -1471,15 +1471,15 @@ intelligence cores.
 ### What MUST NOT be built yet in this stage
 - **No plugin marketplace**: local/trusted-directory loading only — signing,
   distribution, review process are a separate decision, not implicit in
-  V10-E01.
+  V4.10-E01.
 - **No autonomous actions** remain forbidden: plugins cannot commit, merge,
   push, deploy, or modify code — capability system has no such capabilities to
   grant (vision §6, permanent).
 - No individual developer analytics (permanent).
-- Hosted multi-tenant (V10-E03) stays optional and ADR-gated — not started
+- Hosted multi-tenant (V4.10-E03) stays optional and ADR-gated — not started
   unless explicitly approved; no billing, SSO, or control-plane commitments by
   default.
-- No new intelligence domains (V4–V8 scope closed) — V10 ships surfaces on
+- No new intelligence domains (V4–V4.6 scope closed) — V4.10 ships surfaces on
   existing intelligence; any new analysis capability needs a new stage/ADR.
 - No removal of the free/zero-key path — local providers are additive to, not
   replacements for, the deterministic static engine.
@@ -1495,7 +1495,7 @@ intelligence cores.
 4. Parity test green: CLI == Action == sandbox findings on fixtures.
 5. Command center renders org health/cost/quality from precomputed rollups;
    no-individual-dimensions invariant still green; API consumers use v1 only.
-6. If V10-E03 pursued: ADR approved first, tenant-isolation matrix green,
+6. If V4.10-E03 pursued: ADR approved first, tenant-isolation matrix green,
    load baseline met (proposed baseline numbers set in that ADR); if not
    pursued: DO_NOT_BUILD_YET entry remains, explicitly re-affirmed.
 7. Full suite + docker build green; README/plugin-author docs published;

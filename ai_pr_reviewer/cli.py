@@ -20,6 +20,7 @@ from .github_sync import (LifecycleStats, link_comment_ids,  # C5 + V4-E10
                           record_comment_ids, render_finding_comment,
                           sync_finding_states, sync_sticky_summary)
 from .models import PRContext, ReviewKey, ReviewResult, SEVERITY_ORDER
+from .provider_registry import has_ai_credentials
 from . import reporter
 # filter_files / validate_findings / _is_excluded / _finding_row moved to
 # orchestrator.py; re-exported so `from ai_pr_reviewer.cli import filter_files`
@@ -305,7 +306,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     cfg = load_config(args)
     merge_dashboard_rules(cfg)
-    if not cfg.mock and not (cfg.anthropic_api_key or cfg.openai_api_key or cfg.gemini_api_key or cfg.openai_base_url):
+    if not cfg.mock and not has_ai_credentials(cfg):
         print("[ai-pr-reviewer] no AI API key set — falling back to the "
               "heuristic rule engine (mock mode).")
         cfg.mock = True

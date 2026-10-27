@@ -10,7 +10,10 @@ other model. Two implementations exist today:
 * ``ai_pr_reviewer.model_router.StaticProvider`` — adapts the existing
   ``StaticAnalyzer`` to this same contract.
 
-``model_router.get_provider(cfg, context)`` picks between them.
+``model_router.get_provider(cfg, context)`` picks between them. Which backends
+exist, what each can be asked to do and how each is built is declared in
+``ai_pr_reviewer.provider_registry`` (ADR-007); a backend's capabilities are
+registry data, not methods on the provider.
 """
 from __future__ import annotations
 

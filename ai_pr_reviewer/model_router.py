@@ -27,16 +27,20 @@ change what gets built. Don't overbuild this.
 from __future__ import annotations
 
 import logging
-import re
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable
 
-from .ai.claude import ClaudeProvider
+from .ai.claude import ClaudeProvider  # noqa: F401  (stable import path; providers are built via the registry)
 from .ai.provider import AIProvider
 from .analyzer import AnalysisOutcome, StaticAnalyzer
 from .circuit import (CLOSED, HALF_OPEN, OPEN, CircuitBreaker,
-                      DEFAULT_FAILURE_THRESHOLD, DEFAULT_RECOVERY_TIMEOUT)
+                      DEFAULT_FAILURE_THRESHOLD, DEFAULT_RECOVERY_TIMEOUT,
+                      active_registry)  # V4.0-E01-T02
+from .provider_registry import (MODEL_POLICY_EXPLICIT, STATIC_BACKEND, TASK_REVIEW,
+                                TASK_TYPES, ProviderRoutingError, ai_backend_names,
+                                get_spec, parse_order, resolve_factory,
+                                select_backend_name)
 from .retry import RetryPolicy
 from .telemetry import RunTelemetry, UsageRecord, event_ts
 
@@ -61,10 +65,17 @@ _REVIEW_MODE_MAX_TOKENS = {
     "automatic": 4_096,
 }
 
-# AI backends a provider_order may name. "static" is deliberately absent:
-# it is the deterministic final fallback, not something you opt into by
-# listing it (use --mock / no API key for a static-only run).
-AI_BACKENDS = ("claude", "openai", "gemini")
+# The backends a provider_order may name come from the provider registry
+# (``provider_registry``): ``AI_BACKENDS`` is resolved on access so it always
+# reflects the registered set. "static" is deliberately absent: it is the
+# deterministic final fallback, not something you opt into by listing it (use
+# --mock / no API key for a static-only run).
+
+
+def __getattr__(name: str):
+    if name == "AI_BACKENDS":
+        return ai_backend_names()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 @dataclass
@@ -130,38 +141,17 @@ def _review_mode(cfg: Config, context: ReviewContext) -> str:
 
 
 def select_backend(cfg: Config) -> str:
-    """Return "static" | "openai" | "gemini" | "claude" for this config."""
+    """Return the backend name this config selects, or "static".
+
+    The selection rule (model prefix, custom endpoint, which credentials are
+    present) is registry data — see ``provider_registry.select_backend_name``.
+    """
     if getattr(cfg, "mock", False):
-        return "static"
-
-    model = getattr(cfg, "model", "") or ""
-    anthropic_key = getattr(cfg, "anthropic_api_key", "")
-    openai_key = getattr(cfg, "openai_api_key", "")
-    gemini_key = getattr(cfg, "gemini_api_key", "")
-    openai_base_url = getattr(cfg, "openai_base_url", "")
-
-    use_openai = (model.startswith(("gpt-", "o1", "o3", "o4")) or
-                  bool(openai_base_url) or
-                  (openai_key and not anthropic_key and not gemini_key))
-    use_gemini = (model.startswith("gemini-") or
-                  (gemini_key and not anthropic_key and not openai_key and not use_openai))
-    use_claude = (model.startswith("claude-") or
-                  (anthropic_key and not use_openai and not use_gemini))
-
-    # A custom OpenAI-compatible endpoint (Ollama, vLLM, …) may need no key.
-    if use_openai and (openai_key or openai_base_url):
-        return "openai"
-    if use_gemini and gemini_key:
-        return "gemini"
-    if use_claude and anthropic_key:
-        return "claude"
-    return "static"
+        return STATIC_BACKEND
+    return select_backend_name(cfg)
 
 
 # ------------------------------------------------------------------ failover (C6)
-
-_ORDER_SPLIT_RE = re.compile(r"[,\s]+")
-
 
 def parse_provider_order(raw: str) -> list[str]:
     """``"claude, openai"`` -> ``["claude", "openai"]``.
@@ -170,17 +160,10 @@ def parse_provider_order(raw: str) -> list[str]:
     failover list must not kill a review) and duplicates keep their first
     position, so the configured order is preserved exactly.
     """
-    out: list[str] = []
-    for part in _ORDER_SPLIT_RE.split(raw or ""):
-        name = part.strip().lower()
-        if not name or name == "static":
-            continue
-        if name not in AI_BACKENDS:
-            log.warning("provider_order: ignoring unknown backend %r", part)
-            continue
-        if name not in out:
-            out.append(name)
-    return out
+    names, unknown = parse_order(raw)
+    for part in unknown:
+        log.warning("provider_order: ignoring unknown backend %r", part)
+    return names
 
 
 def provider_order(cfg: Config) -> list[str]:
@@ -192,33 +175,85 @@ def provider_order(cfg: Config) -> list[str]:
     if explicit:
         return explicit
     primary = select_backend(cfg)
-    return [primary] if primary in AI_BACKENDS else []
+    return [primary] if primary in ai_backend_names() else []
 
 
-def _backend_config_error(cfg: Config, backend: str) -> str | None:
-    """Why ``backend`` cannot run with this config, or None.
+def _backend_config_error(cfg: Config, backend: str,
+                          task: str = TASK_REVIEW) -> str | None:
+    """Why ``backend`` cannot run ``task`` with this config, or None.
 
-    Model IDs for OpenAI/Gemini turn over quickly and old ones get shut
-    down, so there is deliberately no built-in default for them: a stale
-    default would silently fail every review.
+    Two things are checked, both from the provider registry: the backend must
+    declare the task (a capability it does not claim is never assumed), and its
+    model policy must be satisfiable. Model IDs for OpenAI/Gemini turn over
+    quickly and old ones get shut down, so their registry entries carry no
+    default model: a stale default would silently fail every review.
     """
-    if backend in ("openai", "gemini") and not (getattr(cfg, "model", "") or "").strip():
-        return (f"the {backend} provider needs an explicit model id — set the "
+    spec = get_spec(backend)
+    if spec is None:
+        return f"unknown provider backend {backend!r}."
+    if task not in spec.tasks:
+        return (f"the {backend} provider cannot run the {task!r} task (it supports: "
+                f"{', '.join(sorted(spec.tasks))}) \u2014 list a backend that supports "
+                f"it in `provider_order`, or drop {backend!r} from it.")
+    if spec.model_policy == MODEL_POLICY_EXPLICIT \
+            and not (getattr(cfg, "model", "") or "").strip():
+        return (f"the {backend} provider needs an explicit model id \u2014 set the "
                 f"`model` input (or --model) to a model your account can call.")
     return None
 
 
-def provider_config_error(cfg: Config) -> str | None:
+def provider_config_error(cfg: Config, task: str = TASK_REVIEW) -> str | None:
     """Human-readable config error for the *first* configured backend, or None.
 
-    The primary backend has to be usable or the run cannot start — later
-    backends in a failover chain are optional, so an unusable one degrades
-    to a runtime warning instead (see ``run_analysis``).
+    The primary backend has to be able to run ``task`` or the run cannot start
+    — later backends in a failover chain are optional, so an unusable one
+    degrades to a runtime warning instead (see ``run_analysis``).
     """
     order = provider_order(cfg)
     if not order:
+        return _static_task_error(task)
+    return _backend_config_error(cfg, order[0], task)
+
+
+def _static_task_error(task: str) -> str | None:
+    """The static engine is the implicit backend when nothing else is
+    configured; it must be able to run the task too."""
+    if task not in TASK_TYPES:
+        return f"unknown task {task!r}; known tasks: {', '.join(TASK_TYPES)}."
+    spec = get_spec(STATIC_BACKEND)
+    if spec is not None and task in spec.tasks:
         return None
-    return _backend_config_error(cfg, order[0])
+    return (f"no AI backend is configured and the static rule engine cannot run the "
+            f"{task!r} task \u2014 configure an AI backend (and drop --mock).")
+
+
+def route_task(cfg: Config, task: str = TASK_REVIEW) -> str:
+    """Backend name that should run ``task``: the first backend in
+    ``provider_order`` that declares the task and is usable with this config.
+
+    Pure routing — circuit-breaker state is the caller's concern (see
+    ``get_provider``). With no AI backend configured the static engine runs the
+    task if it declares it. Raises :class:`ProviderRoutingError` (a config
+    error, exit 1) when nothing can: an impossible task/provider pair is never
+    downgraded silently.
+    """
+    if task not in TASK_TYPES:
+        raise ProviderRoutingError(f"unknown task {task!r}; known tasks: "
+                                   f"{', '.join(TASK_TYPES)}.")
+    order = provider_order(cfg)
+    if not order:
+        error = _static_task_error(task)
+        if error:
+            raise ProviderRoutingError(error)
+        return STATIC_BACKEND
+    problems: list[str] = []
+    for backend in order:
+        error = _backend_config_error(cfg, backend, task)
+        if error is None:
+            return backend
+        problems.append(error)
+    raise ProviderRoutingError(f"no configured backend can run the {task!r} task: "
+                               + " ".join(problems))
 
 
 # --- circuit breakers (one per backend, in-memory, process-local) ----------
@@ -230,6 +265,12 @@ def breaker_for(backend: str, *,
                 failure_threshold: int = DEFAULT_FAILURE_THRESHOLD,
                 recovery_timeout: float = DEFAULT_RECOVERY_TIMEOUT) -> CircuitBreaker:
     """The (lazily created) breaker guarding ``backend``."""
+    # V4.0-E01-T02 (C5): inside a fan-out task the breaker comes from that
+    # task's private registry, never from the process-global one below.
+    scoped = active_registry()
+    if scoped is not None:
+        return scoped.breaker_for(backend, failure_threshold=failure_threshold,
+                                  recovery_timeout=recovery_timeout)
     breaker = _BREAKERS.get(backend)
     if breaker is None:
         breaker = CircuitBreaker(failure_threshold=failure_threshold,
@@ -253,7 +294,10 @@ def reset_circuits(*, clock: Callable[[], float] = time.monotonic) -> None:
 def build_provider(cfg: Config, context: ReviewContext, backend: str) -> AIProvider:
     """Construct the provider for one backend (may raise ``ValueError`` for
     a bad configuration — callers decide whether that is fatal)."""
-    if backend == "static":
+    spec = get_spec(backend)
+    if spec is None:
+        raise ValueError(f"unknown provider backend {backend!r}.")
+    if not spec.ai:
         return StaticProvider()
 
     config_error = _backend_config_error(cfg, backend)
@@ -262,65 +306,54 @@ def build_provider(cfg: Config, context: ReviewContext, backend: str) -> AIProvi
 
     model = getattr(cfg, "model", "") or ""
     review_mode = _review_mode(cfg, context)
-    max_tokens = _REVIEW_MODE_MAX_TOKENS[review_mode]
-    batch_chars = getattr(cfg, "batch_chars", 80_000)
-    focus_areas = getattr(cfg, "focus_areas", None)
-    risk = classify_risk(context)
+    kwargs = {
+        "api_key": (getattr(cfg, spec.credential_field, "") if spec.credential_field
+                    else "") or spec.placeholder_key,
+        "model": model or spec.default_model or "",
+        "max_tokens": _REVIEW_MODE_MAX_TOKENS[review_mode],
+        "batch_chars": getattr(cfg, "batch_chars", 80_000),
+        "focus_areas": getattr(cfg, "focus_areas", None),
+        "retry": RetryPolicy(),
+    }
+    if spec.endpoint_field:
+        kwargs["base_url"] = getattr(cfg, spec.endpoint_field, "")
+    provider = resolve_factory(spec)(**kwargs)
 
-    if backend == "openai":
-        from .ai.openai import OpenAIProvider
-        provider = OpenAIProvider(
-            api_key=getattr(cfg, "openai_api_key", "") or "unused",
-            model=model,
-            max_tokens=max_tokens,
-            batch_chars=batch_chars,
-            focus_areas=focus_areas,
-            base_url=getattr(cfg, "openai_base_url", ""),
-            retry=RetryPolicy(),
-        )
-    elif backend == "gemini":
-        from .ai.gemini import GeminiProvider
-        provider = GeminiProvider(
-            api_key=cfg.gemini_api_key,
-            model=model,
-            max_tokens=max_tokens,
-            batch_chars=batch_chars,
-            focus_areas=focus_areas,
-            retry=RetryPolicy(),
-        )
-    else:
-        provider = ClaudeProvider(
-            api_key=cfg.anthropic_api_key,
-            model=model or "claude-sonnet-4-6",
-            max_tokens=max_tokens,
-            batch_chars=batch_chars,
-            focus_areas=focus_areas,
-            retry=RetryPolicy(),
-        )
-    if risk.level == "high":
-        provider.startup_warnings.append(f"high-risk PR ({'; '.join(risk.reasons)})")
+    risk = classify_risk(context)
+    notes = getattr(provider, "startup_warnings", None)
+    if risk.level == "high" and isinstance(notes, list):
+        notes.append(f"high-risk PR ({'; '.join(risk.reasons)})")
     return provider
 
 
-def get_provider(cfg: Config, context: ReviewContext) -> AIProvider:
-    """The provider this run starts with: first configured backend whose
-    circuit allows an attempt, else the deterministic static analyzer."""
+def get_provider(cfg: Config, context: ReviewContext, *,
+                 task: str = TASK_REVIEW) -> AIProvider:
+    """The provider this run starts with: first configured backend that can run
+    ``task`` and whose circuit allows an attempt, else the deterministic static
+    analyzer (when it can run the task too)."""
     order = provider_order(cfg)
     if not order:
+        error = _static_task_error(task)
+        if error:
+            raise ProviderRoutingError(error)
         return StaticProvider()
 
     # The primary must be usable — a broken configuration is an error, not
     # something to silently fall back from.
-    config_error = provider_config_error(cfg)
+    config_error = provider_config_error(cfg, task)
     if config_error:
-        raise ValueError(config_error)
+        raise ProviderRoutingError(config_error)
 
     for backend in order:
-        if _backend_config_error(cfg, backend) and backend != order[0]:
+        if _backend_config_error(cfg, backend, task) and backend != order[0]:
             continue                                  # optional: skipped at runtime
         if not breaker_for(backend).can_attempt():
             continue
         return build_provider(cfg, context, backend)
+    error = _static_task_error(task)
+    if error:
+        raise ProviderRoutingError(f"every backend for the {task!r} task is "
+                                   f"circuit-open and the fallback cannot help: {error}")
     return StaticProvider()       # every AI backend is circuit-open right now
 
 
@@ -490,10 +523,12 @@ def _attach_events(outcome: AnalysisOutcome, events: list[dict]) -> None:
     tel.events = [*events, *tel.events]
 
 
-__all__ = [
+# AI_BACKENDS is resolved by the module-level __getattr__ above (registry-backed),
+# which static analysis cannot see.
+__all__ = [  # noqa: F822
     "AI_BACKENDS", "CircuitBreaker", "ReviewRisk", "StaticProvider",
     "build_provider", "breaker_for", "classify_risk", "get_provider",
     "parse_provider_order", "provider_config_error", "provider_order",
-    "reset_circuits", "run_analysis", "select_backend",
+    "reset_circuits", "route_task", "run_analysis", "select_backend",
     "CLOSED", "OPEN", "HALF_OPEN",
 ]

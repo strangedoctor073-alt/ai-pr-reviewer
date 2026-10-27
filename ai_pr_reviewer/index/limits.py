@@ -39,7 +39,7 @@ from ..repo_context import _safe_repo_path
 # is never prompt-attached in E01-T05) changes no review output.
 
 #: Default cap on inventoried files (matches the documented 1000-file
-#: build cap C8 in V4_V10_ROADMAP).
+#: build cap C8 in V4_STAGES_ROADMAP).
 DEFAULT_MAX_FILES = 1_000
 #: Default cap on total bytes *read* while extracting symbols (10 MiB).
 DEFAULT_MAX_BYTES = 10 * 1024 * 1024

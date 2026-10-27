@@ -2,7 +2,7 @@
 
 > Status: planning document (v1) — created during remediation to resolve BLOCK-01.
 > Repository state: commit `2841b23`.
-> Canonical stage structure: Phase 0/"V3.x", V4, V5, V6, V7, V8, V9, V10.
+> Canonical stage structure: Phase 0/"V3.x", V4, V4.0, V4.2, V4.4, V4.6, V4.8, V4.10.
 
 ---
 
@@ -23,7 +23,7 @@ AI is used for **judgment, summarization, and synthesis** — never for identity
 | Lifecycle transitions | `findings.py` | State machine, not judgment |
 | Verification arithmetic | `verification.py` | Coverage math, not judgment |
 | Redaction / fencing | `security.py` | Security-critical, must be total |
-| Policy evaluation | `rules.py` (today) → `policy/` (V6) | Rules are rules |
+| Policy evaluation | `rules.py` (today) → `policy/` (V4.2) | Rules are rules |
 | Static rules | `static/` | Regex/AST, not judgment |
 | Budget enforcement | `context.py` → `context/` (V4) | Hard caps, not judgment |
 | Anchoring | `orchestrator.py` | Line math, not judgment |
@@ -38,9 +38,9 @@ AI is used for **judgment, summarization, and synthesis** — never for identity
 | Fix suggestions | current | Suggest fixes | Never apply; verify deterministically |
 | Context ranking | V4 | Rank retrieved context | Enforce budgets, redact, fence |
 | Impact analysis | V4 | (deterministic graph traversal) | — |
-| Risk scoring | V5 | (deterministic feature scoring) | — |
-| Test intelligence | V6 | (deterministic mapping) | — |
-| Architecture intelligence | V6 | (deterministic rule checks) | — |
+| Risk scoring | V4.0 | (deterministic feature scoring) | — |
+| Test intelligence | V4.2 | (deterministic mapping) | — |
+| Architecture intelligence | V4.2 | (deterministic rule checks) | — |
 
 ### 2.3 AI-generated (AI creates content, human/disposition owns persistence)
 
@@ -48,24 +48,24 @@ AI is used for **judgment, summarization, and synthesis** — never for identity
 |---|---|---|---|
 | Review summary | current | Markdown text | Posted as review comment (ephemeral) |
 | Finding explanations | current | Text per finding | Stored with finding (pipeline-owned) |
-| Council synthesis | V5 | Merged summary | Posted as review comment (ephemeral) |
-| Fix plans | V6 | Suggested approach text | Stored with finding (pipeline-owned) |
+| Council synthesis | V4.0 | Merged summary | Posted as review comment (ephemeral) |
+| Fix plans | V4.2 | Suggested approach text | Stored with finding (pipeline-owned) |
 
 ### 2.4 AI-verified (AI output checked by deterministic evidence)
 
 | System | Stage | Verification |
 |---|---|---|
 | Fix verification | current (C4) | Deterministic coverage check — AI cannot claim "resolved" |
-| Suggestion verification | V6 | Test evidence tiers — AI cannot claim "verified" without deterministic backing |
+| Suggestion verification | V4.2 | Test evidence tiers — AI cannot claim "verified" without deterministic backing |
 
 ### 2.5 Human-approved (only humans create persistent truth)
 
 | System | Stage | Rule |
 |---|---|---|
 | Project memory | current (C7) | Engine has no `add_repo_memory` path; dashboard/CLI only |
-| Memory hierarchy | V7 | Authority model: human > curated > evidence > observed > inferred |
-| Org memory | V9 | Human approval required |
-| Policy | current → V6/V9 | Human-authored YAML; engine evaluates, never writes |
+| Memory hierarchy | V4.4 | Authority model: human > curated > evidence > observed > inferred |
+| Org memory | V4.8 | Human approval required |
+| Policy | current → V4.2/V4.8 | Human-authored YAML; engine evaluates, never writes |
 | Mute/dismissal | current | Dashboard feedback (human action) |
 
 ---
@@ -81,12 +81,12 @@ AI is used for **judgment, summarization, and synthesis** — never for identity
 - Circuit breakers: per-backend, process-global, threshold 2, recovery 60s.
 - Retry: `RetryPolicy` (3 attempts, 1s base, 30s cap, 25% jitter).
 
-### 3.2 V5 evolution: capability registry + task routing
+### 3.2 V4.0 evolution: capability registry + task routing
 
 ```
 model_router.py
   ↓
-Provider Capability Registry (V5-E05)
+Provider Capability Registry (V4.0-E05)
   ├── provider metadata: name, models, capabilities, cost tier, latency class
   ├── task types: review, security-review, test-review, arch-review, synthesis
   └── routing: task type + PR risk + cost budget → provider selection
@@ -98,27 +98,27 @@ Provider Capability Registry (V5-E05)
 
 **Per-task breakers** (new): circuit breakers become per-(provider, task) instead of per-provider, so a security-review failure does not block a general review.
 
-### 3.3 V10 evolution: provider ecosystem
+### 3.3 V4.10 evolution: provider ecosystem
 
 - Local providers (Ollama, vLLM) via the same `AIProvider` protocol.
-- Provider plugins via the extensibility contract (V9-E06).
+- Provider plugins via the extensibility contract (V4.8-E06).
 - Capability negotiation: provider advertises capabilities; router matches tasks to capabilities.
 
 ---
 
-## 4. Specialist agents (V5)
+## 4. Specialist agents (V4.0)
 
 ### 4.1 Architecture
 
 ```
-Review Orchestrator (V5-E01)
+Review Orchestrator (V4.0-E01)
   ├── Planner: selects specialists based on risk + context
   ├── Executor: bounded fan-out (max N specialists, per-agent budget)
-  ├── Merger: provenance-aware dedup via occurrence key (V5-E03)
-  └── Synthesizer: council summary (V5-E06)
+  ├── Merger: provenance-aware dedup via occurrence key (V4.0-E03)
+  └── Synthesizer: council summary (V4.0-E06)
 ```
 
-### 4.2 Specialist contracts (V5-E02)
+### 4.2 Specialist contracts (V4.0-E02)
 
 Each specialist is a prompt template + task type + capability requirement:
 
@@ -130,23 +130,23 @@ Each specialist is a prompt template + task type + capability requirement:
 | Performance reviewer | perf-review | perf-sensitive files changed | base |
 | Architecture reviewer | arch-review | arch-sensitive files changed | base |
 
-**Activation rule**: specialists activate only when risk features (V5-E04) or file-type triggers justify them. The planner must degrade gracefully if the index (V4-E01) is absent.
+**Activation rule**: specialists activate only when risk features (V4.0-E04) or file-type triggers justify them. The planner must degrade gracefully if the index (V4-E01) is absent.
 
 ### 4.3 Bounded fan-out
 
 - **Max specialists per run**: 5 (proposed baseline).
 - **Per-agent token budget**: 60,000 tokens (proposed baseline).
-- **Per-run token cap**: 300,000 tokens (proposed baseline); V5-E07 arbitrates.
+- **Per-run token cap**: 300,000 tokens (proposed baseline); V4.0-E07 arbitrates.
 - **Concurrency**: in-process, bounded (C5 fix: per-call breaker state or lock).
-- **No queues**: fan-out is in-process; queues remain V9-E04.
+- **No queues**: fan-out is in-process; queues remain V4.8-E04.
 
-### 4.4 Finding merger (V5-E03)
+### 4.4 Finding merger (V4.0-E03)
 
 - Provenance-aware: each finding carries (fingerprint, provenance) where provenance = (engine, model, agent).
 - Dedup: occurrence key (from V4-E05) enables cross-engine matching without changing v1 identity.
 - Attribution preserved: merged findings retain per-agent provenance; the report shows which agent found what.
 
-### 4.5 Council synthesis (V5-E06)
+### 4.5 Council synthesis (V4.0-E06)
 
 - Merged findings → single summary.
 - Per-task usage reported (tokens, latency, agent count).
@@ -214,7 +214,7 @@ Every important finding carries evidence:
 }
 ```
 
-### 6.2 Evidence levels (V6-E05)
+### 6.2 Evidence levels (V4.2-E05)
 
 | Tier | Name | What it proves | Who verifies |
 |---|---|---|---|
@@ -245,7 +245,7 @@ Every important finding carries evidence:
 - Static fallback is honestly labelled "not AI" (`engine="static"`, `fallback_used=True`).
 - Degraded runs store findings but withhold `last_reviewed_sha` advance (current behavior, preserved).
 
-### 8.2 Agent failure (V5)
+### 8.2 Agent failure (V4.0)
 
 - Per-agent breaker: if a specialist fails, it is skipped; the merger proceeds with remaining agents.
 - If all agents fail: fall back to single-provider review with honest attribution.
@@ -286,7 +286,7 @@ Every important finding carries evidence:
 - Precision, recall, false-positive rate measured per provider.
 - Run periodically (not on every PR) to control cost.
 
-### 10.2 Multi-agent evaluation (V5-E08)
+### 10.2 Multi-agent evaluation (V4.0-E08)
 
 - A/B comparison: single-provider vs council on the same corpus.
 - Quality: precision/recall delta (must be ≥ baseline).
@@ -295,7 +295,7 @@ Every important finding carries evidence:
 
 ### 10.3 Routing evaluation
 
-- Route → precision/recall correlation (V5-E05 registry data).
+- Route → precision/recall correlation (V4.0-E05 registry data).
 - Fail-closed: if routing cannot select a provider, fall back to static.
 
 ---

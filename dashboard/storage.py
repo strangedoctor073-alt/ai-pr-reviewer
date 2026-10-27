@@ -278,6 +278,9 @@ class DbStorage(DbFeedbackMixin):
             # V4-E09: rule reads + (dashboard-only) rule authoring.
             schema.CAP_SUPPRESSION_RULES,
             schema.CAP_FEEDBACK_ADMIN,
+            # V4.4-E05: trend/hotspot reads over aggregation-at-write
+            # projections.
+            schema.CAP_ANALYTICS_PROJECTIONS,
         }
 
     def init(self) -> None:
@@ -422,10 +425,26 @@ class DbStorage(DbFeedbackMixin):
         stats = report.get("stats") or {}
         rid = report.get("id", "")
 
-        from .models_db import ReportRow
-
         with self.Session() as session:
-            row = session.get(ReportRow, rid) or ReportRow(id=rid)
+            existing = session.get(ReportRow, rid)
+            # V4.4-E05-T01/T02: snapshot the report's PRIOR contribution
+            # (if any) before mutating it, so a re-upsert of the same id
+            # (test_db_upsert_is_idempotent) nets to zero instead of
+            # double-counting — the projection stays reproducible from a
+            # from-scratch scan at every point, edits included.
+            old_snapshot = None
+            if existing is not None:
+                old_snapshot = {
+                    "repo": existing.repo,
+                    "reviewed_at": existing.reviewed_at,
+                    "findings_count": existing.findings_count,
+                    "severity_counts": dict(existing.severity_counts or {}),
+                    "category_counts": dict(existing.categories or {}),
+                    "duration_ms": existing.duration_ms,
+                    "health_score": existing.health_score,
+                    "fallback_used": existing.fallback_used,
+                }
+            row = existing or ReportRow(id=rid)
             row.repo = pr.get("repo", "")
             row.pr_number = int(pr.get("number") or 0)
             row.pr_title = pr.get("title", "")[:300]
@@ -460,8 +479,154 @@ class DbStorage(DbFeedbackMixin):
                                 if isinstance(health, (int, float)) else 100.0)
             row.payload = report
             session.add(row)
+            # V4.4-E05-T01: aggregation-at-write, same transaction as the
+            # report write itself.
+            new_snapshot = {
+                "repo": row.repo,
+                "reviewed_at": row.reviewed_at,
+                "findings_count": row.findings_count,
+                "severity_counts": dict(row.severity_counts or {}),
+                "category_counts": dict(row.categories or {}),
+                "duration_ms": row.duration_ms,
+                "health_score": row.health_score,
+                "fallback_used": row.fallback_used,
+            }
+            self._apply_daily_projection_delta(session, old_snapshot, new_snapshot)
             session.commit()
         return rid
+
+    # --------------------------------------------------- V4.4-E05 analytics
+    def _apply_daily_projection_delta(self, session, old: dict | None,
+                                       new: dict) -> None:
+        """Aggregation-at-write (V4.4-E05-T01).
+
+        Subtracts ``old``'s prior contribution (if this upsert replaces an
+        existing report) and adds ``new``'s, against the (repo, date)
+        projection row — never a full ``reports`` scan. Keeps the
+        projection exactly equal to a from-scratch recomputation at every
+        point, including edits (V4.4-E05-T02 reproducibility).
+        """
+        from .models_db import RepoDailyMetricsRow
+        schema = _schema()
+        now = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
+
+        def _apply(repo: str, reviewed_at: str, sign: int, data: dict) -> None:
+            if not repo:
+                return
+            date = schema.analytics_date(reviewed_at)
+            key = schema.analytics_projection_key(repo, date)
+            proj = session.get(RepoDailyMetricsRow, key)
+            if proj is None:
+                if sign < 0:
+                    return  # nothing to subtract from a row that never existed
+                # Explicit zeros: mapped_column(default=...) is an
+                # INSERT-time default, not a Python attribute default, so
+                # a freshly-constructed, unflushed row reads back None
+                # here, not 0.
+                proj = RepoDailyMetricsRow(
+                    id=key, repo=repo, date=date,
+                    reviews_count=0, findings_count=0,
+                    severity_counts={}, category_counts={},
+                    duration_ms_sum=0, health_score_sum=0.0,
+                    fallback_count=0, updated_at="")
+            proj.reviews_count = max(0, proj.reviews_count + sign)
+            proj.findings_count = max(
+                0, proj.findings_count + sign * data["findings_count"])
+            sev = dict(proj.severity_counts or {})
+            for s, n in data["severity_counts"].items():
+                sev[s] = max(0, sev.get(s, 0) + sign * n)
+            proj.severity_counts = {s: n for s, n in sev.items() if n}
+            cat = dict(proj.category_counts or {})
+            for c, n in data["category_counts"].items():
+                cat[c] = max(0, cat.get(c, 0) + sign * n)
+            proj.category_counts = {c: n for c, n in cat.items() if n}
+            proj.duration_ms_sum = max(
+                0, proj.duration_ms_sum + sign * data["duration_ms"])
+            proj.health_score_sum = max(
+                0.0, proj.health_score_sum + sign * data["health_score"])
+            proj.fallback_count = max(
+                0, proj.fallback_count + sign * data["fallback_used"])
+            proj.updated_at = now
+            if proj.reviews_count <= 0:
+                if proj in session:
+                    session.delete(proj)
+                return
+            session.add(proj)
+
+        if old is not None:
+            _apply(old["repo"], old["reviewed_at"], -1, old)
+        _apply(new["repo"], new["reviewed_at"], 1, new)
+
+    def trends(self, repo: str = "", days: int = 30) -> dict:
+        """V4.4-E05-T04: daily time series over the projection table only
+        — never the ``reports`` table ("replace O(all) reads", T01)."""
+        from .models_db import RepoDailyMetricsRow
+        schema = _schema()
+        cutoff = (_dt.datetime.now(_dt.timezone.utc)
+                  - _dt.timedelta(days=max(1, int(days)))).date().isoformat()
+        with self.Session() as session:
+            q = session.query(RepoDailyMetricsRow).filter(
+                RepoDailyMetricsRow.date >= cutoff)
+            if repo:
+                q = q.filter(RepoDailyMetricsRow.repo == repo)
+            rows = q.order_by(RepoDailyMetricsRow.date.asc()).all()
+            series = [
+                {
+                    "date": r.date,
+                    "repo": r.repo,
+                    "reviews_count": r.reviews_count,
+                    "findings_count": r.findings_count,
+                    "severity_counts": dict(r.severity_counts or {}),
+                    "avg_health_score": (
+                        round(r.health_score_sum / r.reviews_count, 1)
+                        if r.reviews_count else None),
+                }
+                for r in rows
+            ]
+        return {"repo": repo, "days": days, "series": series,
+                "min_cohort_size": schema.MIN_COHORT_SIZE}
+
+    def hotspots(self, days: int = 30, limit: int = 10) -> dict:
+        """V4.4-E05-T04: repos ranked by critical+high findings in the
+        window, over the projection table only. V4.4-E05-T03: repos with
+        fewer than ``MIN_COHORT_SIZE`` reviews in the window are
+        suppressed from the ranking (a single-PR repo would otherwise
+        surface one person's single review as a "hotspot")."""
+        from .models_db import RepoDailyMetricsRow
+        schema = _schema()
+        cutoff = (_dt.datetime.now(_dt.timezone.utc)
+                  - _dt.timedelta(days=max(1, int(days)))).date().isoformat()
+        by_repo: dict[str, dict] = {}
+        with self.Session() as session:
+            rows = session.query(RepoDailyMetricsRow).filter(
+                RepoDailyMetricsRow.date >= cutoff).all()
+            for r in rows:
+                agg = by_repo.setdefault(r.repo, {
+                    "repo": r.repo, "reviews_count": 0, "findings_count": 0,
+                    "critical_high_count": 0, "health_score_sum": 0.0,
+                })
+                agg["reviews_count"] += r.reviews_count
+                agg["findings_count"] += r.findings_count
+                sev = r.severity_counts or {}
+                agg["critical_high_count"] += (sev.get("critical", 0)
+                                                + sev.get("high", 0))
+                agg["health_score_sum"] += r.health_score_sum
+        suppressed = sum(1 for a in by_repo.values()
+                          if a["reviews_count"] < schema.MIN_COHORT_SIZE)
+        ranked = sorted(
+            (a for a in by_repo.values()
+             if a["reviews_count"] >= schema.MIN_COHORT_SIZE),
+            key=lambda a: (a["critical_high_count"], a["findings_count"]),
+            reverse=True,
+        )[:max(1, int(limit))]
+        for a in ranked:
+            a["avg_health_score"] = (
+                round(a["health_score_sum"] / a["reviews_count"], 1)
+                if a["reviews_count"] else None)
+            del a["health_score_sum"]
+        return {"days": days, "hotspots": ranked,
+                "min_cohort_size": schema.MIN_COHORT_SIZE,
+                "suppressed_small_cohorts": suppressed}
 
     def get(self, rid: str) -> dict | None:
         from .models_db import ReportRow
@@ -1134,6 +1299,9 @@ class JsonStorage(JsonFeedbackMixin):
             # V4-E09: rule reads + (dashboard-only) rule authoring.
             schema.CAP_SUPPRESSION_RULES,
             schema.CAP_FEEDBACK_ADMIN,
+            # V4.4-E05: trend/hotspot reads over aggregation-at-write
+            # projections.
+            schema.CAP_ANALYTICS_PROJECTIONS,
         }
 
     def _path(self, rid: str) -> Path:
@@ -1162,9 +1330,34 @@ class JsonStorage(JsonFeedbackMixin):
     def _telemetry_file(self) -> Path:
         return self.data_dir / "telemetry.json"
 
+    def _analytics_file(self) -> Path:
+        return self.data_dir / "analytics_daily.json"
+
     def init(self) -> None:
         self.reports_dir.mkdir(parents=True, exist_ok=True)
         self.data_dir.mkdir(parents=True, exist_ok=True)
+
+    @staticmethod
+    def _projection_snapshot(report: dict) -> dict:
+        """The fields _apply_daily_projection_delta needs, from a raw
+        report dict — shared by the old-report and new-report side of an
+        upsert so the two snapshots are always computed identically."""
+        findings = report.get("findings", [])
+        counts = Counter(f.get("severity") for f in findings)
+        cats = Counter(f.get("category", "bug") for f in findings)
+        pr = report.get("pr", {}) or {}
+        health = report.get("health_score", 100)
+        return {
+            "repo": pr.get("repo", ""),
+            "reviewed_at": report.get("reviewed_at", ""),
+            "findings_count": len(findings),
+            "severity_counts": {s: counts[s] for s in SEV_KEYS if counts.get(s)},
+            "category_counts": dict(cats),
+            "duration_ms": int(report.get("duration_ms") or 0),
+            "health_score": (float(health)
+                              if isinstance(health, (int, float)) else 100.0),
+            "fallback_used": 1 if report.get("fallback_used") else 0,
+        }
 
     def upsert(self, report: dict) -> str:
         findings = report.get("findings", [])
@@ -1174,10 +1367,144 @@ class JsonStorage(JsonFeedbackMixin):
         rid = report["id"]
         with self._lock:
             self.reports_dir.mkdir(parents=True, exist_ok=True)
+            # V4.4-E05-T01/T02: snapshot the prior report's contribution
+            # (if any) before it's overwritten, so a re-upsert of the
+            # same id nets to zero instead of double-counting — mirrors
+            # DbStorage.upsert's idempotency handling exactly.
+            existing_path = self._path(rid)
+            old_snapshot = None
+            if existing_path.exists():
+                try:
+                    old_report = json.loads(existing_path.read_text(encoding="utf-8"))
+                    old_snapshot = self._projection_snapshot(old_report)
+                except (OSError, json.JSONDecodeError) as exc:
+                    log.warning("JsonStorage: could not read prior report "
+                                "%s for projection delta (%s)", rid, exc)
             tmp = self._path(rid).with_suffix(".tmp")
             tmp.write_text(json.dumps(report, indent=2), encoding="utf-8")
             os.replace(tmp, self._path(rid))
+            new_snapshot = self._projection_snapshot(report)
+            self._apply_daily_projection_delta(old_snapshot, new_snapshot)
         return rid
+
+    # --------------------------------------------------- V4.4-E05 analytics
+    def _apply_daily_projection_delta(self, old: dict | None, new: dict) -> None:
+        """Aggregation-at-write (V4.4-E05-T01), JSON backend. Caller holds
+        ``self._lock``. Mirrors DbStorage's delta logic exactly so both
+        backends are reproducible against a from-scratch scan (T02)."""
+        schema = _schema()
+        now = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
+        p = self._analytics_file()
+        rows = self._read_memory_rows(p) or []
+        by_key = {r["id"]: r for r in rows if isinstance(r, dict) and r.get("id")}
+
+        def _apply(repo: str, reviewed_at: str, sign: int, data: dict) -> None:
+            if not repo:
+                return
+            date = schema.analytics_date(reviewed_at)
+            key = schema.analytics_projection_key(repo, date)
+            row = by_key.get(key)
+            if row is None:
+                if sign < 0:
+                    return
+                row = {"id": key, "repo": repo, "date": date,
+                       "reviews_count": 0, "findings_count": 0,
+                       "severity_counts": {}, "category_counts": {},
+                       "duration_ms_sum": 0, "health_score_sum": 0.0,
+                       "fallback_count": 0, "updated_at": ""}
+                by_key[key] = row
+            row["reviews_count"] = max(0, row["reviews_count"] + sign)
+            row["findings_count"] = max(
+                0, row["findings_count"] + sign * data["findings_count"])
+            sev = dict(row["severity_counts"])
+            for s, n in data["severity_counts"].items():
+                sev[s] = max(0, sev.get(s, 0) + sign * n)
+            row["severity_counts"] = {s: n for s, n in sev.items() if n}
+            cat = dict(row["category_counts"])
+            for c, n in data["category_counts"].items():
+                cat[c] = max(0, cat.get(c, 0) + sign * n)
+            row["category_counts"] = {c: n for c, n in cat.items() if n}
+            row["duration_ms_sum"] = max(
+                0, row["duration_ms_sum"] + sign * data["duration_ms"])
+            row["health_score_sum"] = max(
+                0.0, row["health_score_sum"] + sign * data["health_score"])
+            row["fallback_count"] = max(
+                0, row["fallback_count"] + sign * data["fallback_used"])
+            row["updated_at"] = now
+            if row["reviews_count"] <= 0:
+                by_key.pop(key, None)
+
+        if old is not None:
+            _apply(old["repo"], old["reviewed_at"], -1, old)
+        _apply(new["repo"], new["reviewed_at"], 1, new)
+        self._write_memory_rows(p, list(by_key.values()))
+
+    def trends(self, repo: str = "", days: int = 30) -> dict:
+        """V4.4-E05-T04: daily series over the projection file only
+        ("replace O(all) reads", T01) — never a scan of reports_dir."""
+        schema = _schema()
+        cutoff = (_dt.datetime.now(_dt.timezone.utc)
+                  - _dt.timedelta(days=max(1, int(days)))).date().isoformat()
+        with self._lock:
+            rows = self._read_memory_rows(self._analytics_file()) or []
+        series = sorted(
+            (
+                {
+                    "date": r.get("date", ""),
+                    "repo": r.get("repo", ""),
+                    "reviews_count": r.get("reviews_count", 0),
+                    "findings_count": r.get("findings_count", 0),
+                    "severity_counts": dict(r.get("severity_counts") or {}),
+                    "avg_health_score": (
+                        round(r["health_score_sum"] / r["reviews_count"], 1)
+                        if r.get("reviews_count") else None),
+                }
+                for r in rows
+                if r.get("date", "") >= cutoff and (not repo or r.get("repo") == repo)
+            ),
+            key=lambda row: row["date"],
+        )
+        return {"repo": repo, "days": days, "series": series,
+                "min_cohort_size": schema.MIN_COHORT_SIZE}
+
+    def hotspots(self, days: int = 30, limit: int = 10) -> dict:
+        """V4.4-E05-T04/T03: see DbStorage.hotspots — same ranking and
+        small-cohort suppression, JSON backend."""
+        schema = _schema()
+        cutoff = (_dt.datetime.now(_dt.timezone.utc)
+                  - _dt.timedelta(days=max(1, int(days)))).date().isoformat()
+        with self._lock:
+            rows = self._read_memory_rows(self._analytics_file()) or []
+        by_repo: dict[str, dict] = {}
+        for r in rows:
+            if r.get("date", "") < cutoff:
+                continue
+            agg = by_repo.setdefault(r.get("repo", ""), {
+                "repo": r.get("repo", ""), "reviews_count": 0,
+                "findings_count": 0, "critical_high_count": 0,
+                "health_score_sum": 0.0,
+            })
+            agg["reviews_count"] += r.get("reviews_count", 0)
+            agg["findings_count"] += r.get("findings_count", 0)
+            sev = r.get("severity_counts") or {}
+            agg["critical_high_count"] += sev.get("critical", 0) + sev.get("high", 0)
+            agg["health_score_sum"] += r.get("health_score_sum", 0.0)
+        suppressed = sum(1 for a in by_repo.values()
+                          if a["reviews_count"] < schema.MIN_COHORT_SIZE)
+        ranked = sorted(
+            (a for a in by_repo.values()
+             if a["reviews_count"] >= schema.MIN_COHORT_SIZE),
+            key=lambda a: (a["critical_high_count"], a["findings_count"]),
+            reverse=True,
+        )[:max(1, int(limit))]
+        for a in ranked:
+            a["avg_health_score"] = (
+                round(a["health_score_sum"] / a["reviews_count"], 1)
+                if a["reviews_count"] else None)
+            del a["health_score_sum"]
+        return {"days": days, "hotspots": ranked,
+                "min_cohort_size": schema.MIN_COHORT_SIZE,
+                "suppressed_small_cohorts": suppressed}
 
     def get(self, rid: str) -> dict | None:
         path = self._path(rid)

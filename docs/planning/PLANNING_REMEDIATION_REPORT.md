@@ -21,16 +21,16 @@
 | ARCH-06 (dismissed vestigial) | INFO | **Verified accurate** | No change needed |
 | ARCH-07 (2MB writes-only) | INFO | **Verified accurate** | No change needed |
 | DEP-01 (soft→hard elevation) | MEDIUM | **Resolved** | EPIC_BACKLOG deps promoted to match roadmaps (see §5) |
-| DEP-02 (V5-E01 missing V3-E03) | MEDIUM | **Resolved** | Added as soft dependency (see §5) |
-| DEP-03 (V7-E02 missing V4-E05) | MEDIUM | **Resolved** | Added as soft dependency (see §5) |
-| DEP-04 (V6-E03 forward ref) | LOW | **Not addressed** | Acceptable as soft forward reference |
+| DEP-02 (V4.0-E01 missing V3-E03) | MEDIUM | **Resolved** | Added as soft dependency (see §5) |
+| DEP-03 (V4.4-E02 missing V4-E05) | MEDIUM | **Resolved** | Added as soft dependency (see §5) |
+| DEP-04 (V4.2-E03 forward ref) | LOW | **Not addressed** | Acceptable as soft forward reference |
 | DM-02 (stale caveat) | MEDIUM | **Resolved** | Superseded by DEPENDENCY_GRAPH.md creation; DATA_MODEL.md caveat now stale but harmless |
 | DM-03 (invented entity names) | MEDIUM | **Not addressed** | Out of scope; DATA_MODEL.md uses conceptual names with explicit "inside the Finding table" notes |
 | DM-04 (ReviewRun home) | LOW | **Not addressed** | Out of scope; minor imprecision |
 | DM-05 (Verification class) | LOW | **Not addressed** | Out of scope; aspirational label |
 | DM-06 (MemoryEntry name) | LOW | **Not addressed** | Out of scope; conceptual name with current-name note |
 | DM-07–DM-15 | INFO | **Verified accurate** | No change needed |
-| STAGE-01 (V8 naming drift) | LOW | **Not addressed** | Out of scope; minor naming inconsistency |
+| STAGE-01 (V4.6 naming drift) | LOW | **Not addressed** | Out of scope; minor naming inconsistency |
 | TEST-01 (memory poisoning) | MEDIUM | **Resolved** | Added to TESTING_EVALUATION_PLAN.md §6.3 (see §6) |
 | TEST-02 (impact analysis) | MEDIUM | **Resolved** | Added to TESTING_EVALUATION_PLAN.md §6.4 (see §6) |
 | TEST-03 (finding relations) | MEDIUM | **Resolved** | Added to TESTING_EVALUATION_PLAN.md §6.5 (see §6) |
@@ -140,34 +140,34 @@ ARCH-02, ARCH-04, ARCH-05 were discovered during verification but are **not addr
 
 ### 5.1 DEP-01 (resolved): Systematic soft→hard elevation
 
-**Finding:** `V4_V10_ROADMAP.md` and `MASTER_ROADMAP.md` consistently elevate `EPIC_BACKLOG.md` soft dependencies to stage-level hard dependencies.
+**Finding:** `V4_STAGES_ROADMAP.md` and `MASTER_ROADMAP.md` consistently elevate `EPIC_BACKLOG.md` soft dependencies to stage-level hard dependencies.
 
 **Resolution:** Updated `EPIC_BACKLOG.md` to promote the soft dependencies to hard, matching the roadmaps. This makes the backlog consistent with the roadmaps and ensures implementers working from the backlog know these are gating.
 
 | Epic | Before | After |
 |---|---|---|
 | V4-E01 | V3-E02 soft, V3-E03 soft | V3-E02 hard, V3-E03 hard |
-| V6-E01 | V4-E01 soft | V4-E01 hard |
-| V8-E02 | V6-E03 soft | V6-E03 hard |
-| V8-E05 | V6-E07 soft | V6-E07 hard |
+| V4.2-E01 | V4-E01 soft | V4-E01 hard |
+| V4.6-E02 | V4.2-E03 soft | V4.2-E03 hard |
+| V4.6-E05 | V4.2-E07 soft | V4.2-E07 hard |
 
-### 5.2 DEP-02 (resolved): V5-E01 missing V3-E03
+### 5.2 DEP-02 (resolved): V4.0-E01 missing V3-E03
 
-**Finding:** `V5-E01` (fan-out orchestration) does not list `V3-E03` (evaluation harness) as a dependency.
+**Finding:** `V4.0-E01` (fan-out orchestration) does not list `V3-E03` (evaluation harness) as a dependency.
 
-**Resolution:** Added `V3-E03` as a soft dependency on `V5-E01` in `EPIC_BACKLOG.md`. Rationale: the harness measures multi-agent quality; while V5-E01 can technically ship without it, the harness is needed to prove the fan-out improves (or at least does not degrade) review quality.
+**Resolution:** Added `V3-E03` as a soft dependency on `V4.0-E01` in `EPIC_BACKLOG.md`. Rationale: the harness measures multi-agent quality; while V4.0-E01 can technically ship without it, the harness is needed to prove the fan-out improves (or at least does not degrade) review quality.
 
-### 5.3 DEP-03 (resolved): V7-E02 missing V4-E05
+### 5.3 DEP-03 (resolved): V4.4-E02 missing V4-E05
 
-**Finding:** `V7-E02` (memory hierarchy) does not list `V4-E05` (finding identity v2) as a dependency.
+**Finding:** `V4.4-E02` (memory hierarchy) does not list `V4-E05` (finding identity v2) as a dependency.
 
-**Resolution:** Added `V4-E05` as a soft dependency on `V7-E02` in `EPIC_BACKLOG.md`. Rationale: memory entries reference findings by fingerprint; identity v2 changes the fingerprint model. While memory can technically ship without identity v2, the hierarchy should be designed with the v2 model in mind.
+**Resolution:** Added `V4-E05` as a soft dependency on `V4.4-E02` in `EPIC_BACKLOG.md`. Rationale: memory entries reference findings by fingerprint; identity v2 changes the fingerprint model. While memory can technically ship without identity v2, the hierarchy should be designed with the v2 model in mind.
 
-### 5.4 DEP-04 (not addressed): V6-E03 forward reference
+### 5.4 DEP-04 (not addressed): V4.2-E03 forward reference
 
-**Finding:** `V6-E03` soft-depends on `V8-E02` (forward reference to later stage).
+**Finding:** `V4.2-E03` soft-depends on `V4.6-E02` (forward reference to later stage).
 
-**Resolution:** Not addressed. This is an acceptable soft forward reference — V6-E03 can ship without V8-E02, and the dependency is noted for when V8 lands.
+**Resolution:** Not addressed. This is an acceptable soft forward reference — V4.2-E03 can ship without V4.6-E02, and the dependency is noted for when V4.6 lands.
 
 ---
 
@@ -177,11 +177,11 @@ Added 5 new testing sections to `TESTING_EVALUATION_PLAN.md` (§6.3–6.7):
 
 | Section | Capability | Key tests |
 |---|---|---|
-| §6.3 | Memory poisoning & memory security (V7-E07) | Poisoning corpus, authority matrix, isolation, no-engine-write invariant |
+| §6.3 | Memory poisoning & memory security (V4.4-E07) | Poisoning corpus, authority matrix, isolation, no-engine-write invariant |
 | §6.4 | Change impact analysis (V4-E03) | Impact corpus, determinism, budget-exhaustion |
-| §6.5 | Finding relations (V7-E03) | Relations corpus, identity continuity, regression detection |
-| §6.6 | Team/repository analytics (V7-E05) | No-individual-rankings invariant (hard gate), aggregation correctness, privacy |
-| §6.7 | Provider failover for capability registry (V5-E05) | Routing fail-closed, per-task breaker, capability negotiation, cost-aware routing |
+| §6.5 | Finding relations (V4.4-E03) | Relations corpus, identity continuity, regression detection |
+| §6.6 | Team/repository analytics (V4.4-E05) | No-individual-rankings invariant (hard gate), aggregation correctness, privacy |
+| §6.7 | Provider failover for capability registry (V4.0-E05) | Routing fail-closed, per-task breaker, capability negotiation, cost-aware routing |
 
 All additions are consistent with the existing testing strategy (hermetic CI path, cost accounting, documented owners).
 
@@ -218,7 +218,7 @@ EPIC_BACKLOG.md               FINAL_CONSISTENCY_AUDIT.md
 MASTER_ROADMAP.md             MASTER_VISION.md
 MIGRATION_PLAN.md             SECURITY_ROADMAP.md
 TARGET_ARCHITECTURE.md        TESTING_EVALUATION_PLAN.md
-V4_V10_ROADMAP.md
+V4_STAGES_ROADMAP.md
 ```
 
 Plus `PLANNING_REMEDIATION_REPORT.md` (this file) = 17 total.
@@ -230,7 +230,7 @@ All cross-references between planning documents now point to real files. The onl
 ### 8.3 Terminology consistency
 
 - Epic IDs: all 57 canonical IDs used consistently across all documents.
-- Stage names: consistent except for minor V8 naming drift (STAGE-01, not addressed).
+- Stage names: consistent except for minor V4.6 naming drift (STAGE-01, not addressed).
 - Defect IDs (D1–D7): consistent across all documents.
 - Constraint IDs (C1–C14): consistent across all documents.
 - ADR IDs: consistent; planned ADRs (017–021) clearly marked as planned.
@@ -246,14 +246,14 @@ The following audit findings were **not addressed** in this remediation. They ar
 | ARCH-02 | LOW | "22 test files" — actually 21 + conftest | Minor imprecision in header summary |
 | ARCH-04 | LOW | "~24 routes" — actually 23 | Minor imprecision |
 | ARCH-05 | LOW | "8 markdown findings" is a function default | Minor imprecision |
-| DEP-04 | LOW | V6-E03 forward reference to V8-E02 | Acceptable as soft forward reference |
+| DEP-04 | LOW | V4.2-E03 forward reference to V4.6-E02 | Acceptable as soft forward reference |
 | DM-02 | MEDIUM | DATA_MODEL.md stale caveat about EPIC_BACKLOG | Superseded by DEPENDENCY_GRAPH.md; caveat is harmless |
 | DM-03 | MEDIUM | "SecurityFinding"/"ArchitectureFinding" invented terms | Conceptual names with explicit "inside Finding table" notes |
 | DM-04 | LOW | "ReviewRun" home says "relational (SQLite now)" | Minor imprecision |
 | DM-05 | LOW | "Verification" classed as "event record" | Aspirational label |
 | DM-06 | LOW | "MemoryEntry" name doesn't match current tables | Conceptual name with current-name note |
-| STAGE-01 | LOW | V8 stage name drift | Minor naming inconsistency |
-| COST-01 | LOW | V5 token cap not reconciled with V4 budgets | Noted in COST_TOKEN_ARCHITECTURE.md |
+| STAGE-01 | LOW | V4.6 stage name drift | Minor naming inconsistency |
+| COST-01 | LOW | V4.0 token cap not reconciled with V4 budgets | Noted in COST_TOKEN_ARCHITECTURE.md |
 
 **Recommendation:** Address the MEDIUM items (DM-02, DM-03) in a future documentation pass. The LOW items are cosmetic and can be corrected opportunistically.
 
@@ -274,13 +274,13 @@ The following audit findings were **not addressed** in this remediation. They ar
 | Do-Not-Build boundary respected | ✅ Yes | ✅ Yes |
 | Git/repository safety | ✅ Yes | ✅ Yes |
 | Epic ID integrity | ✅ Yes | ✅ Yes |
-| V4–V10 structure consistency | ✅ Yes | ✅ Yes |
+| V4–V4.10 structure consistency | ✅ Yes | ✅ Yes |
 
 ### 10.2 Recommendation
 
 **READY TO FREEZE** — with the following conditions:
 
-1. The 5 planned ADRs (017–021) should be written before their corresponding implementation epics begin (ADR-017 before V4-E02, ADR-018 before V5-E04, ADR-019 before V7-E03, ADR-020 before V8-E02, ADR-021 before V9-E03).
+1. The 5 planned ADRs (017–021) should be written before their corresponding implementation epics begin (ADR-017 before V4-E02, ADR-018 before V4.0-E04, ADR-019 before V4.4-E03, ADR-020 before V4.6-E02, ADR-021 before V4.8-E03).
 2. The 12 remaining LOW/MEDIUM issues (§9) should be addressed in a future documentation pass but are not blocking.
 3. The architecture should be re-audited after the planned ADRs are written and before V4 implementation begins.
 
@@ -312,6 +312,6 @@ The following audit findings were **not addressed** in this remediation. They ar
 - Migration: `MIGRATION_PLAN.md`
 - Decisions: `ADR_INDEX.md`
 - Refusal list: `DO_NOT_BUILD_YET.md`
-- Roadmap: `MASTER_ROADMAP.md`, `V4_V10_ROADMAP.md`
+- Roadmap: `MASTER_ROADMAP.md`, `V4_STAGES_ROADMAP.md`
 - Epics: `EPIC_BACKLOG.md`
 - Evolution: `ARCHITECTURE_EVOLUTION.md`
