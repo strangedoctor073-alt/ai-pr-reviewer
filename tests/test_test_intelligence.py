@@ -583,7 +583,27 @@ class TestModuleInvariants:
         assert len(EVIDENCE_KINDS) == 7
 
     def test_not_imported_by_existing_engine_modules(self):
+        """``test_intel`` stays an opt-in leaf: no engine module may
+        reference it — with one sanctioned exception, added by the epic
+        that owns the reader contract. V4.2-E05-T03 (verification tier T2)
+        imports exactly ``observed_test_evidence`` (E03-T04's own docstring
+        names that reader); every other module still may not even mention
+        the module, and the reader may not pull anything else from it."""
+        allowed = {"verification.py"}
         for py in (ROOT / "ai_pr_reviewer").rglob("*.py"):
             if py.name == "test_intel.py":
                 continue
-            assert "test_intel" not in py.read_text("utf-8"), py
+            text = py.read_text("utf-8")
+            if py.name in allowed:
+                tree = ast.parse(text)
+                for n in ast.walk(tree):
+                    if isinstance(n, ast.ImportFrom) \
+                            and "test_intel" in (n.module or ""):
+                        assert {a.name for a in n.names} == \
+                            {"observed_test_evidence"}, (py, "imports more "
+                            "than the sanctioned T2 reader")
+                    if isinstance(n, ast.Import):
+                        assert not any("test_intel" in a.name for a in n.names), \
+                            (py, "must use the sanctioned relative import")
+                continue
+            assert "test_intel" not in text, py

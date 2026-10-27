@@ -173,6 +173,35 @@ def static_recheck_confirms(finding: Finding, fd: FileDiff | None,
     return True
 
 
+def observed_test_evidence_confirms(finding: Finding) -> bool:
+    """T2: does *observed* test evidence pass over this finding's file?
+
+    The consumed test-evidence adapter (E05-T03): read-only over records
+    the pipeline already holds in ``Finding.evidence`` — never an
+    execution, never a fetch.
+
+    * ADR-012: only **observed** ``tev1`` records count (origins
+      ``ci_ingest``/``test_report``). Static mappings are display-only, a
+      model's "tests pass" claim is not a record at all, and a tampered
+      record fails its integrity check — all three yield nothing.
+    * a passing record must **name this file in ``covers``** — attribution
+      is explicit, never stem-guessed; an unrelated or absent pass
+      confirms nothing.
+    * ``failed``/``errored``/``skipped`` never confirm — and, deliberately,
+      never downgrade anything either: tiers escalate attribution, the
+      three-state machine stays the coverage floor's alone.
+    """
+    if not finding.file:
+        return False
+    # Lazy: a review that never escalates never imports the taxonomy module.
+    from .test_intel import observed_test_evidence
+
+    for ev in observed_test_evidence(finding.evidence):
+        if ev.outcome == "passed" and finding.file in ev.covers:
+            return True
+    return False
+
+
 def _fp(f: Finding) -> str:
     return f.fingerprint or fingerprint_finding(f)
 
@@ -294,4 +323,6 @@ __all__ = [
     "stronger_tier",
     # V4.2-E05-T02: the static re-check tier handler.
     "static_recheck_confirms",
+    # V4.2-E05-T03: the consumed test-evidence adapter (ADR-012).
+    "observed_test_evidence_confirms",
 ]

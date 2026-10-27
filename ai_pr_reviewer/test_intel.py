@@ -22,8 +22,10 @@ Hard rules for this module (V4.2 charter, ADR-002/004/012):
 
 Not wired into the pipeline on purpose: calling :func:`analyze_test_gaps`
 from the orchestrator is a Wave-2 integration step (it would change default
-output, which needs human sign-off). Nothing in this module is imported by
-existing code.
+output, which needs human sign-off). The one reader that exists is
+verification tier T2 (``verification.observed_test_evidence_confirms``
+consuming :func:`observed_test_evidence`); nothing else in the engine
+imports this module and no gap finding reaches a report yet.
 
 Index limits that shape the answers (document, do not fix):
 
