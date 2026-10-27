@@ -1156,8 +1156,8 @@ class TestDefectReintroductionSpotChecks:
             return real_lifecycle(previous, current[:cap], files,
                                   incremental, head)
 
-        def capped_verify(findings, previous, current, files):
-            return real_verify(findings, previous, current[:cap], files)
+        def capped_verify(findings, previous, current, files, **kw):
+            return real_verify(findings, previous, current[:cap], files, **kw)
 
         monkeypatch.setattr(orch.ReviewOrchestrator, "_apply_lifecycle",
                             staticmethod(capped_lifecycle))

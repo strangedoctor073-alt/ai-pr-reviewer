@@ -184,6 +184,12 @@ class Config:
     risk_depth_cap: str = ""           # "" | low | standard | deep (can only lower)
     risk_max_specialists: int = 0      # 0 = no cap
 
+    # V4.2-E05-T04: verification tier escalation above the T0 coverage
+    # floor. Default OFF; plain env var (VERIFICATION_TIERS), deliberately
+    # not an INPUT_* action input -- enabling it changes what evidence a
+    # "resolved" claim rests on, which needs human sign-off (plan §F).
+    verification_tiers: bool = False
+
 
 def load_config(args) -> Config:
     _warn_unknown_inputs()
@@ -243,6 +249,9 @@ def load_config(args) -> Config:
                                      "INPUT_FANOUT_ENABLED", "FANOUT_ENABLED",
                                      default=False)
     _load_risk_engine_config(cfg)
+    # V4.2-E05-T04: no CLI flag and no INPUT_* on purpose (see the field).
+    cfg.verification_tiers = _bool_field(None, "VERIFICATION_TIERS",
+                                         default=False)
     return cfg
 
 

@@ -99,6 +99,9 @@ LIFECYCLE_FIELDS = (
     # to forge "evidence: ..." claims or attribution (roadmap V4 security
     # implication: "model output must not forge evidence claims").
     "evidence", "provenance_sources", "merged_fingerprints",
+    # V4.2-E05 (T04): tier attribution is pipeline-owned like every other
+    # verification field -- model output can never claim evidence it lacks.
+    "verification_tier",
 )
 
 # V4-E04 (ADR-004): evidence is a *record, not prose*. The kind set is
@@ -600,6 +603,10 @@ class Finding:
     # merged_fingerprints: v1 fingerprints folded into this finding by
     # dedup (V4-E05) -- an audit trail so a merge is never silent.
     merged_fingerprints: tuple[str, ...] = ()
+    # --- V4.2-E05 T04 (pipeline-owned; see LIFECYCLE_FIELDS) ---
+    # Which evidence the verification decision rested on (t0|t1|t2;
+    # None = not verified yet). Attribution only, never a fourth state.
+    verification_tier: str | None = None
 
     def __setattr__(self, name: str, value: Any) -> None:
         """V4-E04: the scalar provenance strings are redacted, single-line
@@ -636,6 +643,9 @@ class Finding:
             "verification_status": self.verification_status,
             "verification_reason": self.verification_reason,
             "verified_at": self.verified_at,
+            # V4.2-E05-T04 (additive): tier attribution, grouped with the
+            # verification fields it annotates.
+            "verification_tier": self.verification_tier,
             # V4-E04: redacted/single-line/bounded at the report boundary
             # too (clean values pass through byte-identically): the
             # orchestrator assigns these attributes directly, so no
@@ -711,6 +721,7 @@ class Finding:
         conf = str(d.get("confidence", DEFAULT_CONFIDENCE)).lower()
         comment_id = d.get("github_comment_id")
         vstatus = str(d.get("verification_status") or "").strip().lower()
+        vtier = str(d.get("verification_tier") or "").strip().lower()
         suggestion = d.get("suggestion")
         if suggestion is not None and not isinstance(suggestion, str):
             suggestion = None
@@ -734,6 +745,9 @@ class Finding:
             verification_status=vstatus if vstatus in VERIFICATION_STATUSES else None,
             verification_reason=_opt_str(d.get("verification_reason")),
             verified_at=_opt_str(d.get("verified_at")),
+            # V4.2-E05-T04: closed vocabulary — a tampered row claiming an
+            # unknown tier degrades to None instead of minting evidence.
+            verification_tier=vtier if vtier in VERIFICATION_TIERS else None,
             provenance_engine=_safe_line(d.get("provenance_engine"),
                                          MAX_PROVENANCE_FIELD_CHARS),
             provenance_model=_safe_line(d.get("provenance_model"),

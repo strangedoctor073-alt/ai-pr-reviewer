@@ -54,6 +54,8 @@ REQUIRED_FINDING_KEYS = {
     # V4-E04 (T02/T03): frozen the same way provenance was in V3 — once a
     # field ships in every report, removing it is a breaking change.
     "provenance_sources", "evidence", "merged_fingerprints",
+    # V4.2-E05-T04: tier attribution frozen on the same rule.
+    "verification_tier",
 }
 
 

@@ -43,7 +43,8 @@ from .findings import (apply_lifecycle, deduplicate,  # provided by findings.py
 from .model_router import (classify_risk, get_provider,  # model_router.py
                            run_analysis)
 from .telemetry import to_telemetry_row                 # V3-E02-T02/T04
-from .verification import verification_counts, verify_findings  # C4
+from .verification import (escalation_from_config, verification_counts,
+                           verify_findings)  # C4 + V4.2-E05-T04
 
 # Lifecycle fields persisted with each finding (Finding.to_dict() may or may
 # not emit them yet — see _finding_row). V4-E04: derived from the single
@@ -362,8 +363,12 @@ class ReviewOrchestrator:
         # D2: verification must receive the UNCAPPED ``current`` set — fed the
         # max_comments-capped list, a still-present finding beyond the cap
         # looked absent and closed itself as "resolved".
-        lifecycle_findings = verify_findings(lifecycle_findings, previous,
-                                             reported, files)
+        # V4.2-E05-T04: opt-in tier escalation (default OFF) — the
+        # resolutions above still rest on the coverage floor until the env
+        # flag turns the tier handlers on.
+        lifecycle_findings = verify_findings(
+            lifecycle_findings, previous, reported, files,
+            escalation=escalation_from_config(cfg))
         # ... then park anything the dashboard user muted (see
         # _apply_dismissals) — after the lifecycle so a mute can never
         # overwrite a "resolved" transition, and before the health score

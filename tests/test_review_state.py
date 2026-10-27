@@ -35,6 +35,8 @@ NEW_FINDING_FIELDS = [
     # V4-E04 (T02/T03): embedded evidence, multi-source provenance and the
     # dedup merge trail — appended, pipeline-owned, never model output.
     "provenance_sources", "evidence", "merged_fingerprints",
+    # V4.2-E05 (T04): tier attribution — appended, pipeline-owned.
+    "verification_tier",
 ]
 
 

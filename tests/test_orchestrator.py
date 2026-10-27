@@ -839,9 +839,9 @@ def test_verification_receives_the_uncapped_finding_list(monkeypatch):
     seen: dict[str, list] = {}
     real_verify = orch.verify_findings
 
-    def spy(findings_, previous_, current, files):
+    def spy(findings_, previous_, current, files, **kw):
         seen["current"] = list(current)
-        return real_verify(findings_, previous_, current, files)
+        return real_verify(findings_, previous_, current, files, **kw)
 
     monkeypatch.setattr(orch, "verify_findings", spy)
     w = Wired(monkeypatch, findings=findings, previous=previous)

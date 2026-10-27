@@ -61,8 +61,9 @@ pipeline-owned like every other verification field.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from .diff_parser import FileDiff
 from .findings import fingerprint_finding
@@ -232,8 +233,41 @@ def _coverage(f: Finding, files_by_path: dict[str, FileDiff]) -> str:
     return "partial"
 
 
+#: Default per-run budget for tier-handler checks (one ``verify_findings``
+#: call): the opt-in can never grow into an unbounded scan of a huge review.
+MAX_TIER_ESCALATIONS = 200
+
+
+@dataclass(frozen=True)
+class TierEscalation:
+    """Opt-in, budgeted escalation above the T0 coverage floor (E05-T04).
+
+    Default OFF: with it, every decision is stamped ``t0`` and not one tier
+    handler runs — bit-identical to pre-E05 behavior. Enabling it changes
+    *attribution* (which evidence a ``resolved`` rests on), never the
+    three-state result itself. One budget unit buys one handler check.
+    """
+
+    enabled: bool = False
+    max_checks: int = MAX_TIER_ESCALATIONS
+
+    def __post_init__(self) -> None:
+        if self.max_checks < 0:
+            raise ValueError(
+                f"TierEscalation.max_checks must be >= 0, got {self.max_checks}")
+
+
+def escalation_from_config(cfg: Any) -> TierEscalation:
+    """The config seam for the orchestrator: ``Config.verification_tiers``
+    (plain env ``VERIFICATION_TIERS``, default off). An absent attribute
+    means off, so a hand-built config-like object cannot crash a review."""
+    return TierEscalation(enabled=bool(getattr(cfg, "verification_tiers", False)))
+
+
 def verify_findings(findings: list[Finding], previous: list[Finding],
-                    current: list[Finding], files: list[FileDiff]) -> list[Finding]:
+                    current: list[Finding], files: list[FileDiff],
+                    *,
+                    escalation: TierEscalation | None = None) -> list[Finding]:
     """Annotate ``findings`` with verification metadata (in place).
 
     ``previous``  — what the last review stored (the baseline to compare).
@@ -244,6 +278,12 @@ def verify_findings(findings: list[Finding], previous: list[Finding],
     Findings with no previous state are left untouched: there is nothing to
     verify yet, and "not verified" must stay distinguishable from
     "unable to verify".
+
+    ``escalation`` (V4.2-E05-T04) — opt-in, budgeted tier escalation. Every
+    decision made here is stamped with the tier its evidence rests on
+    (``t0`` = the coverage floor itself); only a ``resolved`` decision can
+    escalate, and only within ``escalation.max_checks``. Default off, so
+    pre-E05 callers keep their behavior apart from the stamp.
     """
     if not previous:
         return findings
@@ -252,6 +292,34 @@ def verify_findings(findings: list[Finding], previous: list[Finding],
     cur_fps = {_fp(f) for f in current}
     files_by_path = {f.path: f for f in files}
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+    esc = escalation if escalation is not None else TierEscalation()
+    # One budget unit per tier-handler check. The registry builds lazily on
+    # the first T1 attempt, so disabled escalation never touches the rule
+    # corpus and a starved budget never pays for it.
+    budget = esc.max_checks if esc.enabled else 0
+    registry = None
+
+    def _escalate(f: Finding, coverage: str) -> str:
+        nonlocal budget, registry
+        # T2 first: observed evidence outranks a static re-check, needs no
+        # file hunks (so it also covers a file-missing resolution) and is
+        # the ADR-012 check the plan orders above T1.
+        if budget > 0:
+            budget -= 1
+            if observed_test_evidence_confirms(f):
+                return VERIFICATION_TIER_T2
+        # T1 only over a fully-reviewed file: partial coverage never
+        # resolved anyway, and file-missing has no hunks to re-check.
+        if budget > 0 and coverage == "all":
+            budget -= 1
+            if registry is None:
+                from .static.engine import build_default_registry
+                registry = build_default_registry()
+            if static_recheck_confirms(f, files_by_path.get(f.file),
+                                       registry=registry):
+                return VERIFICATION_TIER_T1
+        return VERIFICATION_TIER_T0
 
     for f in findings:
         fp = _fp(f)
@@ -262,6 +330,7 @@ def verify_findings(findings: list[Finding], previous: list[Finding],
             f.verification_status = VERIFICATION_PRESENT
             f.verification_reason = REASON_PRESENT
             f.verified_at = now
+            f.verification_tier = VERIFICATION_TIER_T0   # floor only, never up
             continue
 
         if f.state == "resolved":
@@ -270,18 +339,22 @@ def verify_findings(findings: list[Finding], previous: list[Finding],
                 f.verification_status = VERIFICATION_RESOLVED
                 f.verification_reason = REASON_RESOLVED_REMOVED
                 f.verified_at = now
+                f.verification_tier = _escalate(f, coverage)
             elif coverage == "all":
                 f.verification_status = VERIFICATION_RESOLVED
                 f.verification_reason = REASON_RESOLVED
                 f.verified_at = now
+                f.verification_tier = _escalate(f, coverage)
             else:
                 _unverify(f, REASON_PARTIAL if coverage == "partial"
                           else REASON_NOT_REVIEWED, now)
+                f.verification_tier = VERIFICATION_TIER_T0   # inconclusive
             continue
 
         # Seen before, not reported now, and never re-examined this run
         # (an untouched file on an incremental review).
         _unverify(f, REASON_NOT_REEXAMINED, now)
+        f.verification_tier = VERIFICATION_TIER_T0   # inconclusive
 
     return findings
 
@@ -325,4 +398,6 @@ __all__ = [
     "static_recheck_confirms",
     # V4.2-E05-T03: the consumed test-evidence adapter (ADR-012).
     "observed_test_evidence_confirms",
+    # V4.2-E05-T04: opt-in, budgeted escalation wiring.
+    "MAX_TIER_ESCALATIONS", "TierEscalation", "escalation_from_config",
 ]
