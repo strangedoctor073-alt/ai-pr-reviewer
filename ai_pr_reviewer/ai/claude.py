@@ -216,6 +216,19 @@ class ClaudeProvider:
         only; copied from the retry policy."""
         return list(getattr(self._retry, "events", []))
 
+    def capabilities(self) -> frozenset[str]:
+        """Declared task types (V4.0-E02-T02, ADR-007 optional seam).
+
+        Delegates to the provider registry — one source of capability
+        truth (``ProviderSpec.tasks``); routing reads the same entry. An
+        out-of-tree provider may instead declare its own subset without
+        registering (see ``ai.provider.capabilities_of``).
+        """
+        from ..provider_registry import get_spec
+
+        spec = get_spec(self.backend)
+        return frozenset(spec.tasks) if spec is not None else frozenset()
+
     def _static_fallback_findings(self, batch_files: list[FileDiff]) -> list[Finding]:
         """Run the deterministic rule engine over just the files in a batch
         that Claude failed to review, so one bad batch doesn't throw away
