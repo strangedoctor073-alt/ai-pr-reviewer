@@ -34,6 +34,30 @@ Deliberate limits (all of them security/product decisions):
 * ``fingerprint_finding`` identity comes from ``findings.py``, so the
   comparison is stable across pushes (line numbers move, the fingerprint
   does not).
+
+Verification tiers (V4.2-E05 — C2 naming: T0/T1/T2)
+---------------------------------------------------
+
+The three-state result above records *what* verification concluded; the
+tier records *what evidence it concluded from* — additive attribution,
+never a fourth state:
+
+``t0`` (coverage floor)
+    the diff-coverage check this module has always run; its decisions
+    stay bit-identical to pre-tier behavior.
+``t1`` (static re-check — handler, E05-T02)
+    the deterministic rule that produced the finding matches no
+    non-comment hunk line of the file anymore.
+``t2`` (observed test evidence — adapter, E05-T03)
+    an intact, canonical ``tev1`` record with a *passed* observed
+    outcome covers the finding's file (ADR-012: never a model claim,
+    never an in-review test execution).
+
+Attribution itself is unconditional (E05-T04 stamps the tier that made
+each decision); *escalation* above T0 is opt-in (``VERIFICATION_TIERS``
+env, default off) and budgeted (``MAX_TIER_ESCALATIONS``). The tier
+lives in ``models.VERIFICATION_TIERS`` — the closed vocabulary — and is
+pipeline-owned like every other verification field.
 """
 from __future__ import annotations
 
@@ -42,6 +66,8 @@ from datetime import datetime, timezone
 from .diff_parser import FileDiff
 from .findings import fingerprint_finding
 from .models import (Finding, VERIFICATION_PRESENT, VERIFICATION_RESOLVED,
+                     VERIFICATION_TIER_T0, VERIFICATION_TIER_T1,
+                     VERIFICATION_TIER_T2, VERIFICATION_TIERS,
                      VERIFICATION_UNVERIFIED)
 
 REASON_RESOLVED = "the flagged code was part of this review and was not reported again"
@@ -50,6 +76,38 @@ REASON_PRESENT = "the reviewer still reports this finding"
 REASON_NOT_REVIEWED = "the flagged code was not part of this review"
 REASON_PARTIAL = "only part of the flagged code was part of this review"
 REASON_NOT_REEXAMINED = "the finding was not re-reviewed in this run"
+
+#: Strict tier order — escalation may only ever move up this ladder.
+VERIFICATION_TIER_RANK = {tier: rank for rank, tier in enumerate(VERIFICATION_TIERS)}
+
+#: Which evidence kind each tier stands on (report/debug rendering; the
+#: semantics C2 pinned — labels, never branch conditions).
+TIER_EVIDENCE = {
+    VERIFICATION_TIER_T0: "diff-coverage",
+    VERIFICATION_TIER_T1: "static-recheck",
+    VERIFICATION_TIER_T2: "test-evidence",
+}
+
+
+def stronger_tier(*tiers: str | None) -> str | None:
+    """The strongest tier among ``tiers`` (``None`` means "no tier yet").
+
+    Closed vocabulary: a value outside ``models.VERIFICATION_TIERS``
+    raises instead of winning silently — a tier is pipeline-owned
+    evidence attribution, and tolerating an unknown value here would let
+    a caller mint an evidence kind the report then renders as trusted.
+    """
+    best: str | None = None
+    for tier in tiers:
+        if tier is None:
+            continue
+        if tier not in VERIFICATION_TIERS:
+            raise ValueError(
+                f"unknown verification tier {tier!r}; "
+                f"known: {list(VERIFICATION_TIERS)}")
+        if best is None or VERIFICATION_TIER_RANK[tier] > VERIFICATION_TIER_RANK[best]:
+            best = tier
+    return best
 
 
 def _fp(f: Finding) -> str:
@@ -167,4 +225,8 @@ __all__ = [
     "verify_findings", "verification_counts",
     "REASON_RESOLVED", "REASON_RESOLVED_REMOVED", "REASON_PRESENT",
     "REASON_NOT_REVIEWED", "REASON_PARTIAL", "REASON_NOT_REEXAMINED",
+    # V4.2-E05-T01: the tier model (constants re-exported from models).
+    "VERIFICATION_TIERS", "VERIFICATION_TIER_T0", "VERIFICATION_TIER_T1",
+    "VERIFICATION_TIER_T2", "VERIFICATION_TIER_RANK", "TIER_EVIDENCE",
+    "stronger_tier",
 ]

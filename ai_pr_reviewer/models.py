@@ -508,6 +508,21 @@ VERIFICATION_STATUSES = (
     VERIFICATION_RESOLVED, VERIFICATION_PRESENT, VERIFICATION_UNVERIFIED,
 )
 
+# Verification tiers (V4.2-E05; naming per plan §B.7 C2: the backlog's
+# T0/T1/T2, not the roadmap's 1-based T1/T2/T3). Additive attribution for a
+# verification_status: T0 is the diff-coverage floor that exists today, T1 a
+# static re-check of the rule that produced the finding, T2 *observed* test
+# evidence (ADR-012 — a model's claim about tests is never evidence). The
+# tuple is the closed vocabulary ``Finding.from_dict`` validates against;
+# like the statuses above the tier is pipeline-owned and rides in
+# LIFECYCLE_FIELDS, so model output can never mint one.
+VERIFICATION_TIER_T0 = "t0"
+VERIFICATION_TIER_T1 = "t1"
+VERIFICATION_TIER_T2 = "t2"
+VERIFICATION_TIERS = (
+    VERIFICATION_TIER_T0, VERIFICATION_TIER_T1, VERIFICATION_TIER_T2,
+)
+
 
 def _enum_value(v: Any) -> Any:
     """Return the plain value for an Enum member, else the value unchanged."""
