@@ -62,6 +62,7 @@ pipeline-owned like every other verification field.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 
 from .diff_parser import FileDiff
 from .findings import fingerprint_finding
@@ -69,6 +70,9 @@ from .models import (Finding, VERIFICATION_PRESENT, VERIFICATION_RESOLVED,
                      VERIFICATION_TIER_T0, VERIFICATION_TIER_T1,
                      VERIFICATION_TIER_T2, VERIFICATION_TIERS,
                      VERIFICATION_UNVERIFIED)
+
+if TYPE_CHECKING:
+    from .static.registry import RuleRegistry
 
 REASON_RESOLVED = "the flagged code was part of this review and was not reported again"
 REASON_RESOLVED_REMOVED = "the file is no longer part of the reviewed change"
@@ -108,6 +112,65 @@ def stronger_tier(*tiers: str | None) -> str | None:
         if best is None or VERIFICATION_TIER_RANK[tier] > VERIFICATION_TIER_RANK[best]:
             best = tier
     return best
+
+
+# ------------------------------------------------- tier handlers (E05-T02/T03)
+
+def static_recheck_confirms(finding: Finding, fd: FileDiff | None,
+                            *, registry: RuleRegistry | None = None) -> bool:
+    """T1: does the line rule that produced ``finding`` still match this
+    file's hunks? ``True`` means the pattern is gone.
+
+    Bounded re-check over the diff this review already has in memory —
+    no file read, no process, no network (the E05 exit scan pins that):
+
+    * **only line rules** carry a pattern, so a file-rule (``AST*``) or
+      diff-rule (``TEST001``) finding honestly never confirms (``False``);
+    * **added *and* context lines are scanned**, unlike the engine (added
+      only): a pattern sitting in a context line is still in the file —
+      without this, a committed-but-unfixed flagged line would read as
+      "gone" and false-confirm the resolution;
+    * **removed lines are never scanned** — they are the pre-fix content;
+      matching them is the fix, not a counter-example;
+    * **comment lines are skipped with the engine's own predicate**, so a
+      commented-out pattern counts as gone exactly when the engine would
+      stop firing on it;
+    * the engine's **language filter is mirrored**: a rule that could
+      never fire for this file cannot speak to it.
+
+    Absent evidence returns ``False`` — escalation may only move up on
+    positive confirmation, never on silence.
+    """
+    if fd is None or fd.is_binary or not finding.rule_id:
+        return False
+    if fd.path != finding.file:
+        # Caller mix-up guard: confirming this file against another file's
+        # clean hunks would attribute someone else's diff to the finding.
+        # (Production looks the FileDiff up by ``finding.file`` — this only
+        # ever fires for a hand-assembled call.)
+        return False
+    # Lazy: verification stays import-cheap for callers that never
+    # escalate, and the static stack pulls in the whole rule corpus.
+    from .static.engine import _COMMENT_LINE_RE, build_default_registry
+    from .static.registry import lang_of
+
+    if registry is None:
+        registry = build_default_registry()
+    rule = next((r for r in registry.line_rules
+                 if r.rule_id == finding.rule_id), None)
+    if rule is None:
+        return False
+    if rule.languages and lang_of(fd.path) not in rule.languages:
+        return False
+    for hunk in fd.hunks:
+        for hl in hunk.lines:
+            if hl.tag == "-":
+                continue                       # pre-fix content, expected to match
+            if _COMMENT_LINE_RE.match(hl.text):
+                continue                       # the engine skips these too
+            if rule.pattern.search(hl.text):
+                return False                   # pattern still present in hunks
+    return True
 
 
 def _fp(f: Finding) -> str:
@@ -229,4 +292,6 @@ __all__ = [
     "VERIFICATION_TIERS", "VERIFICATION_TIER_T0", "VERIFICATION_TIER_T1",
     "VERIFICATION_TIER_T2", "VERIFICATION_TIER_RANK", "TIER_EVIDENCE",
     "stronger_tier",
+    # V4.2-E05-T02: the static re-check tier handler.
+    "static_recheck_confirms",
 ]

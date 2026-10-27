@@ -19,7 +19,8 @@ from ai_pr_reviewer.models import (Finding, VERIFICATION_PRESENT,
                                    VERIFICATION_UNVERIFIED)
 from ai_pr_reviewer.verification import (REASON_PRESENT, REASON_RESOLVED,
                                          TIER_EVIDENCE, VERIFICATION_TIER_RANK,
-                                         stronger_tier, verify_findings)
+                                         static_recheck_confirms, stronger_tier,
+                                         verify_findings)
 
 PATH = "app/main.py"
 
@@ -126,3 +127,123 @@ def test_t0_decisions_are_unchanged_and_carry_no_tier_key_yet():
                           files=[_file(count=3)])       # lines 1-3, finding on 5
     assert out[0].verification_status == VERIFICATION_UNVERIFIED
     assert "verification_tier" not in out[0].to_dict()
+
+
+# ------------------------------------------- T1: static re-check (E05-T02)
+
+def _fd(seq: tuple[tuple[str, str], ...], path: str = PATH,
+        *, is_binary: bool = False) -> FileDiff:
+    """A one-hunk FileDiff from ``(tag, text)`` pairs — tag is ``+``/``-``/
+    a space, exactly as the diff parser produces them."""
+    lines = []
+    old_no = new_no = 0
+    for tag, text in seq:
+        if tag == "+":
+            new_no += 1
+        elif tag == "-":
+            old_no += 1
+        else:
+            old_no += 1
+            new_no += 1
+        lines.append(HunkLine(tag=tag, old_no=old_no, new_no=new_no, text=text))
+    hunk = Hunk(old_start=1, old_count=max(old_no, 1), new_start=1,
+                new_count=max(new_no, 1), lines=lines)
+    return FileDiff(old_path=path, new_path=path, hunks=[hunk],
+                    is_binary=is_binary)
+
+
+def _rule_finding(rule_id: str | None = "SEC003", path: str = PATH) -> Finding:
+    return Finding(file=path, line=5, severity="critical",
+                   title="Use of eval() executes arbitrary code",
+                   explanation="because", rule_id=rule_id)
+
+
+def test_static_recheck_confirms_when_the_pattern_left_the_hunks():
+    fd = _fd(((" ", "ctx"), ("+", "result = transform(value)")))
+    assert static_recheck_confirms(_rule_finding(), fd) is True
+
+
+def test_static_recheck_refuses_while_the_pattern_is_still_an_added_line():
+    fd = _fd(((" ", "ctx"), ("+", "x = eval(user_input)")))
+    assert static_recheck_confirms(_rule_finding(), fd) is False
+
+
+def test_static_recheck_refuses_while_the_pattern_sits_in_a_context_line():
+    """The committed-but-unfixed case: the flagged pattern is unchanged in
+    the file (context of this hunk) while the engine — which only scans
+    added lines — would not re-fire on it. The re-check must see it."""
+    fd = _fd(((" ", "x = eval(user_input)"), ("+", "y = transform(v)")))
+    assert static_recheck_confirms(_rule_finding(), fd) is False
+
+
+def test_removed_pre_fix_lines_never_block_the_recheck():
+    fd = _fd(((" ", "ctx"),
+              ("-", "x = eval(user_input)"),
+              ("+", "y = transform(v)")))
+    assert static_recheck_confirms(_rule_finding(), fd) is True
+
+
+def test_a_commented_out_pattern_counts_as_gone_engine_and_recheck_agree():
+    fd = _fd(((" ", "ctx"), ("+", "# eval(user_input)")))
+    assert static_recheck_confirms(_rule_finding(), fd) is True
+    # parity pin: the engine really would not fire on that line
+    from ai_pr_reviewer.static.engine import StaticEngine
+    fired = {f.rule_id for f in StaticEngine().run([fd])}
+    assert "SEC003" not in fired
+
+
+def test_ai_and_unknown_rule_ids_never_confirm():
+    fd = _fd(((" ", "ctx"), ("+", "result = transform(value)")))
+    assert static_recheck_confirms(_rule_finding(rule_id=None), fd) is False
+    assert static_recheck_confirms(_rule_finding(rule_id="ZZZ999"), fd) is False
+
+
+def test_a_non_line_rule_finding_cannot_be_rechecked():
+    """AST001 comes from a file rule (no regex to rescan) — honest absence,
+    never an escalation."""
+    fd = _fd(((" ", "ctx"), ("+", "def f(items=None):")))
+    assert static_recheck_confirms(_rule_finding(rule_id="AST001"), fd) is False
+
+
+def test_confirming_against_a_different_files_hunks_is_refused():
+    other = _fd(((" ", "ctx"), ("+", "result = transform(value)")),
+                path="other.py")
+    assert static_recheck_confirms(_rule_finding(), other) is False
+
+
+def test_missing_binary_and_language_mismatched_files_never_confirm():
+    clean = _fd(((" ", "ctx"), ("+", "result = transform(value)")))
+    # file not part of the diff at all
+    assert static_recheck_confirms(_rule_finding(), None) is False
+    # binary files are invisible to the engine, so they cannot confirm
+    assert static_recheck_confirms(
+        _rule_finding(), _fd(((" ", "ctx"),), is_binary=True)) is False
+    # SEC003 is a ("py", "js", "ts") rule: on a shell file it could never
+    # fire, so it cannot say the pattern is gone either (clean diff or not)
+    sh_clean = _fd(((" ", "ctx"), ("+", "result = transform(value)")),
+                   path="deploy.sh")
+    assert static_recheck_confirms(_rule_finding(path="deploy.sh"), sh_clean) is False
+    # control: the same clean diff on a .py file confirms
+    assert static_recheck_confirms(_rule_finding(), clean) is True
+
+
+def test_the_recheck_is_pure_and_deterministic():
+    fd = _fd(((" ", "ctx"), ("+", "result = transform(value)")))
+    finding = _rule_finding()
+    before = finding.to_dict()
+    first = static_recheck_confirms(finding, fd)
+    second = static_recheck_confirms(finding, fd)
+    assert first is second is True
+    assert finding.to_dict() == before      # no mutation of the finding
+
+
+def test_a_caller_supplied_registry_is_used_verbatim():
+    """T04 escalates many findings against ONE built registry — the handler
+    must consume what it is handed instead of rebuilding."""
+    from ai_pr_reviewer.static.engine import build_default_registry
+
+    reg = build_default_registry()
+    count = len(reg.line_rules)
+    fd = _fd(((" ", "ctx"), ("+", "result = transform(value)")))
+    assert static_recheck_confirms(_rule_finding(), fd, registry=reg) is True
+    assert len(reg.line_rules) == count
