@@ -36,6 +36,7 @@ from .diff_parser import FileDiff
 from .index.limits import is_contained, is_excluded
 from .models import (STATIC_ENGINE_ID, EvidenceRecord, Finding,
                      ProvenanceSource)
+from .repo_context import _safe_repo_path
 from .rules import SENSITIVE_EXCLUDE_GLOBS
 from .security import redact_secrets
 
@@ -802,7 +803,6 @@ def run_infra_check(*, repo_root: str, files, index=None,
 
 def _run(repo_root: str, files, index,
          scrub: Callable[[str], str] | None) -> InfraOutcome:
-    del index  # consumed by E05-T03; part of the seam since T02
     warnings: list[str] = []
     findings: list[Finding] = []
 
@@ -845,5 +845,134 @@ def _run(repo_root: str, files, index,
             finding = finding_from_hit(hit, anchor_line=anchor, scrub=scrub)
             if finding is not None:
                 findings.append(finding)
+    # V4.6-E05-T03: one aggregate deploy-path context finding over the
+    # whole change set (path classification only — no content read). It
+    # joins the rule findings additively; a missing index degrades to no
+    # inventory sentence, never an error.
+    ctx = deploy_path_context(files=files, index=index, scrub=scrub)
+    findings.extend(ctx.findings)
     return InfraOutcome(findings=tuple(findings),
                         warnings=tuple(warnings[:MAX_INFRA_WARNINGS]))
+
+
+# --------------------------------------------------- deploy-path context
+# V4.6-E05-T03. Not a misconfiguration rule: ONE aggregate context finding
+# ("this change touches deployment-relevant paths") so the reviewer sees
+# the blast radius, plus one inventory sentence when the repository index
+# is available. Path-based only — no content is read for classification,
+# and an unnameable path (traversal, absolute) is never classified.
+
+MAX_DEPLOY_LIST = 10
+DEPLOY_RULE_ID = "INFRA_DEPLOY_PATH"
+DEPLOY_CONTRACT = (
+    "checked: changed paths under .github/workflows/ (*.yml|*.yaml), "
+    "Dockerfile*, docker-compose*.yml|*.yaml, *.tf and *.tf.json — "
+    "classification context, not a rule violation")
+
+
+def _deploy_path(path: str) -> bool:
+    """True for a path that influences deployment configuration.
+
+    Bounded closed vocabulary (suffix/basename only — never content), and
+    a path that ``_safe_repo_path`` rejects (``..``, absolute, drive
+    letter) is not classifiable at all: it could not be checked out, so
+    calling it deploy-relevant would be a fiction. Classification runs on
+    the NORMALIZED path, so ``.github/workflows/../x.py`` is ``x.py``.
+    """
+    if not path:
+        return False
+    norm = _safe_repo_path(path)
+    if norm is None:
+        return False
+    low = norm.lower()
+    if _workflow_path(low):
+        return True
+    base = low.rsplit("/", 1)[-1]
+    if base.startswith("dockerfile"):
+        return True
+    if base.startswith("docker-compose") and base.endswith((".yml", ".yaml")):
+        return True
+    return low.endswith(".tf") or low.endswith(".tf.json")
+
+
+def _inventory_sentence(index) -> str:
+    """One bounded sentence about the repository's deploy-relevant paths,
+    or ``""`` when no index is available (silent degrade — the finding
+    itself is still emitted; a missing index is not an error)."""
+    paths = getattr(index, "paths", None)
+    if paths is None:
+        return ""
+    try:
+        count = sum(1 for p in paths if _deploy_path(str(p)))
+    except Exception:  # noqa: BLE001 — a broken index must not fail a review
+        return ""
+    return (f"The repository index lists {count} deployment-relevant "
+            f"path{'s' if count != 1 else ''} in total.")
+
+
+def deploy_path_context(*, files, index=None,
+                        scrub: Callable[[str], str] | None = None
+                        ) -> InfraOutcome:
+    """The E05-T03 aggregate deploy-path finding, or a true NOOP.
+
+    Evidence-or-dropped and redaction posture mirror
+    :func:`finding_from_hit`; severity/category are closed-vocabulary
+    constants (low / maintainability — this is context for the reviewer,
+    never a claim that anything is wrong).
+    """
+    changed: list[str] = []
+    anchor_file = ""
+    anchor_line: int | None = None
+    for fd in files:
+        if not fd.path or is_excluded(fd.path, SENSITIVE_EXCLUDE_GLOBS):
+            continue
+        if not _deploy_path(fd.path):
+            continue
+        if not changed:
+            anchor_file = fd.path
+            added = fd.added_lines()
+            anchor_line = added[0][0] if added else None
+        changed.append(fd.path)
+    if not changed:
+        return NOOP
+    listed = changed[:MAX_DEPLOY_LIST]
+    more = len(changed) - len(listed)
+    plural = "s" if len(changed) != 1 else ""
+    listing = ", ".join(listed) + (f" (+{more} more)" if more else "")
+    inventory = _inventory_sentence(index)
+    explanation = (
+        f"This change modifies {len(changed)} deployment-relevant "
+        f"path{plural}: {listing}. Deployment configuration takes effect "
+        f"on the next workflow run or deployment." +
+        (f" {inventory}" if inventory else ""))
+    try:
+        excerpt = EvidenceRecord.create(
+            kind="file_excerpt", locator=anchor_file,
+            summary=_clean(f"{len(changed)} deploy-relevant path"
+                           f"{'s' if len(changed) != 1 else ''} changed",
+                           MAX_EVIDENCE_SUMMARY_CHARS, scrub),
+            check_type="deploy_path_context", scrub=scrub)
+        ref = EvidenceRecord.create(
+            kind="rule_ref", locator=f"rule:{DEPLOY_RULE_ID}",
+            summary=_clean(DEPLOY_CONTRACT, MAX_EVIDENCE_SUMMARY_CHARS,
+                           scrub),
+            check_type="deploy_path_context", scrub=scrub)
+    except ValueError:
+        return NOOP                     # evidence-or-dropped
+    finding = Finding(
+        file=anchor_file, line=anchor_line, severity="low",
+        category="maintainability",
+        title=_clean(f"Change touches {len(changed)} deployment-relevant "
+                     f"path{plural}", MAX_TITLE_CHARS, scrub),
+        explanation=_clean(explanation, MAX_EXPLANATION_CHARS, scrub),
+        suggestion=None, confidence="high", rule_id=DEPLOY_RULE_ID,
+        evidence=(excerpt, ref),
+    )
+    source = ProvenanceSource(engine=STATIC_ENGINE_ID,
+                              model=_PROVENANCE_MODEL, origin="rule")
+    finding.provenance_engine = source.engine
+    finding.provenance_model = source.model
+    finding.provenance_agent = None
+    finding.provenance_origin = source.origin
+    finding.provenance_sources = (source,)
+    return InfraOutcome(findings=(finding,))

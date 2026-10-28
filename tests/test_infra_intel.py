@@ -284,11 +284,23 @@ from ai_pr_reviewer.cli import parse_args                        # noqa: E402
 from ai_pr_reviewer.config import load_config                    # noqa: E402
 from ai_pr_reviewer.diff_parser import (FileDiff, Hunk, HunkLine)  # noqa: E402
 from ai_pr_reviewer.infra_intel import (INFRA001, INFRA002, INFRA003,  # noqa: E402
-                                        INFRA004, INFRA005, InfraHit,
-                                        InfraOutcome, _check_dockerfile,
-                                        _check_workflow, _image_pinned,
-                                        _ref_pinned, finding_from_hit,
-                                        run_infra_check)
+                                        INFRA004, INFRA005, DEPLOY_RULE_ID,
+                                        InfraHit, InfraOutcome,
+                                        _check_dockerfile, _check_workflow,
+                                        _deploy_path, _image_pinned,
+                                        _ref_pinned, deploy_path_context,
+                                        finding_from_hit, run_infra_check)
+
+RULE_IDS = (INFRA001, INFRA002, INFRA003, INFRA004, INFRA005)
+
+
+def _rule_findings(outcome) -> list:
+    """The INFRA00x misconfiguration findings, sans deploy-path context."""
+    return [f for f in outcome.findings if f.rule_id in RULE_IDS]
+
+
+def _context_findings(outcome) -> list:
+    return [f for f in outcome.findings if f.rule_id == DEPLOY_RULE_ID]
 
 # ------------------------------------------------------------- unit matrices
 
@@ -468,6 +480,23 @@ jobs:
       - run: make
 """
 
+# Benign twins (V4.6-E05 exit: every rule has one): pinned refs, read-only
+# permissions, digest-free but specifically tagged base image.
+BENIGN_WORKFLOW = """name: ci
+on: push
+permissions:
+  contents: read
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      - run: make
+"""
+
+BENIGN_DOCKERFILE = ("FROM python:3.12-slim AS builder\n"
+                     "RUN echo hi\n"
+                     "FROM builder\n")
+
 # Base revision content (what the documented base checkout leaves on disk).
 BASE_CI = """name: ci
 on:
@@ -513,9 +542,9 @@ def test_added_workflow_yields_overpermission_findings_with_path_evidence():
                           files=[_added(".github/workflows/deploy.yml",
                                         DEPLOY)])
     assert out.warnings == ()
-    assert [f.rule_id for f in out.findings] == [INFRA001, INFRA002,
-                                                 INFRA003, INFRA003]
-    assert [f.line for f in out.findings] == [5, 5, 9, 10]
+    assert [f.rule_id for f in _rule_findings(out)] == [INFRA001, INFRA002,
+                                                        INFRA003, INFRA003]
+    assert [f.line for f in _rule_findings(out)] == [5, 5, 9, 10]
     first = out.findings[0]
     assert first.evidence[0].locator == ".github/workflows/deploy.yml:5"
     assert first.evidence[1].locator == f"rule:{INFRA001}"
@@ -531,8 +560,8 @@ def test_modified_workflow_is_spliced_from_base_copy(tmp_path):
     out = run_infra_check(repo_root=str(tmp_path), files=[
         _modified(".github/workflows/ci.yml", CI_MODIFICATION)])
     assert out.warnings == ()
-    assert [(f.rule_id, f.line) for f in out.findings] == [(INFRA002, 5),
-                                                           (INFRA003, 9)]
+    assert [(f.rule_id, f.line) for f in _rule_findings(out)] == [
+        (INFRA002, 5), (INFRA003, 9)]
 
 
 def test_disk_copy_mismatch_degrades_to_a_warning(tmp_path):
@@ -542,7 +571,7 @@ def test_disk_copy_mismatch_degrades_to_a_warning(tmp_path):
                 BASE_CI.replace("build", "buidl"))
     out = run_infra_check(repo_root=str(tmp_path), files=[
         _modified(".github/workflows/ci.yml", CI_MODIFICATION)])
-    assert out.findings == ()
+    assert _rule_findings(out) == []
     assert out.warnings == (
         "infra file not reviewed (on-disk copy does not match the diff): "
         ".github/workflows/ci.yml",)
@@ -551,23 +580,28 @@ def test_disk_copy_mismatch_degrades_to_a_warning(tmp_path):
 def test_missing_base_copy_is_a_warning(tmp_path):
     out = run_infra_check(repo_root=str(tmp_path), files=[
         _modified(".github/workflows/ci.yml", CI_MODIFICATION)])
-    assert out.findings == ()
+    assert _rule_findings(out) == []
     assert out.warnings == (
         "infra file not reviewed (on-disk copy unavailable): "
         ".github/workflows/ci.yml",)
 
 
 def test_deleted_and_binary_files_are_silent(tmp_path):
+    """No rule judging happens for deleted/binary files; the deploy-path
+    context is path-based and still flags the change (deleting a workflow
+    IS a deploy-path change)."""
     _write_base(tmp_path, ".github/workflows/ci.yml", BASE_CI)
     deleted = _modified(".github/workflows/ci.yml", CI_MODIFICATION)
     deleted.is_deleted = True
     out = run_infra_check(repo_root=str(tmp_path), files=[deleted])
-    assert out == InfraOutcome()
+    assert _rule_findings(out) == []
+    assert [f.rule_id for f in _context_findings(out)] == [DEPLOY_RULE_ID]
 
     binary = _modified(".github/workflows/ci.yml", CI_MODIFICATION)
     binary.is_binary = True
     out = run_infra_check(repo_root=str(tmp_path), files=[binary])
-    assert out == InfraOutcome()
+    assert _rule_findings(out) == []
+    assert [f.rule_id for f in _context_findings(out)] == [DEPLOY_RULE_ID]
 
 
 def test_path_traversal_old_copy_is_refused(tmp_path):
@@ -590,7 +624,7 @@ def test_sensitive_paths_are_skipped_silently(tmp_path):
 def test_malformed_proposed_yaml_degrades_to_a_warning(tmp_path):
     out = run_infra_check(repo_root=".", files=[
         _added(".github/workflows/bad.yml", "jobs:\n  steps: [unclosed\n")])
-    assert out.findings == ()
+    assert _rule_findings(out) == []      # no rule judged degraded content
     assert len(out.warnings) == 1
     assert out.warnings[0].startswith("infra file degraded (")
     assert out.warnings[0].endswith(".github/workflows/bad.yml")
@@ -684,3 +718,144 @@ def test_hook_joins_findings_and_warnings_when_enabled(monkeypatch):
     result = w.run()
     assert any(f.title == "INFRA canned" for f in result.findings)
     assert "canned infra warning" in result.warnings
+
+
+# ============================================================ V4.6-E05-T03
+# Deploy-path change risk context: one aggregate low/maintainability
+# finding (path classification only), plus an index inventory sentence
+# when an index is available. Silent no-op otherwise.
+
+@pytest.mark.parametrize("path,expected", [
+    (".github/workflows/ci.yml", True),
+    (".GITHUB/WORKFLOWS/CI.YAML", True),
+    ("Dockerfile", True),
+    ("dockerfile.dev", True),
+    ("build/Dockerfile", True),
+    ("docker-compose.yml", True),
+    ("deploy/docker-compose.override.yaml", True),
+    ("infra/main.tf", True),
+    ("infra/vars.tf.json", True),
+    ("src/main.py", False),
+    ("docker-compose-notes.md", False),
+    ("deploy/app.tfvars", False),
+    ("chart/Chart.yaml", False),
+    ("../outside.yml", False),                 # escapes the repository
+    ("/etc/passwd", False),                    # absolute
+    ("C:/x/main.tf", False),                   # drive letter
+    ("", False),
+    (".github/workflows/../x.py", False),      # normalizes out of workflows/
+])
+def test_deploy_path_classifier(path, expected):
+    assert _deploy_path(path) is expected
+
+
+def test_deploy_context_is_one_aggregate_low_finding():
+    out = run_infra_check(repo_root=".", files=[
+        _added(".github/workflows/ci.yml", BENIGN_WORKFLOW),
+        _added("Dockerfile", BENIGN_DOCKERFILE),
+        _added("src/app.py", "x = 1\n")])
+    assert out.warnings == ()
+    assert _rule_findings(out) == []           # both fixtures are benign
+    ctx = _context_findings(out)
+    assert len(ctx) == 1
+    f = ctx[0]
+    assert (f.severity, f.category, f.confidence) == ("low",
+                                                      "maintainability",
+                                                      "high")
+    assert f.rule_id == DEPLOY_RULE_ID
+    assert f.suggestion is None
+    assert f.title == "Change touches 2 deployment-relevant paths"
+    assert ".github/workflows/ci.yml" in f.explanation
+    assert "Dockerfile" in f.explanation
+    assert "src/app.py" not in f.explanation
+    assert f.line is not None                  # anchored on a changed line
+    assert (f.provenance_engine, f.provenance_model) == ("static",
+                                                         "infra-v1")
+    assert [(ev.kind, ev.locator) for ev in f.evidence] == [
+        ("file_excerpt", ".github/workflows/ci.yml"),
+        ("rule_ref", f"rule:{DEPLOY_RULE_ID}")]
+
+
+def test_deploy_context_listing_is_capped():
+    files = [_added(f"deploy/f{i}.tf", 'resource "x" "y" {}\n')
+             for i in range(12)]
+    out = run_infra_check(repo_root=".", files=files)
+    f = _context_findings(out)[0]
+    assert f.title == "Change touches 12 deployment-relevant paths"
+    assert "deploy/f9.tf (+2 more)" in f.explanation
+
+
+def test_deploy_context_inventory_sentence_from_index():
+    from types import SimpleNamespace
+    index = SimpleNamespace(paths={"Dockerfile", "infra/main.tf",
+                                   "src/a.py", ".github/workflows/ci.yml"})
+    out = run_infra_check(repo_root=".", files=[
+        _added("Dockerfile", BENIGN_DOCKERFILE)], index=index)
+    f = _context_findings(out)[0]
+    assert "The repository index lists 3 deployment-relevant paths" in \
+        f.explanation
+
+    # singular
+    index = SimpleNamespace(paths={"Dockerfile", "src/a.py"})
+    out = run_infra_check(repo_root=".", files=[
+        _added("Dockerfile", BENIGN_DOCKERFILE)], index=index)
+    f = _context_findings(out)[0]
+    assert "The repository index lists 1 deployment-relevant path in" in \
+        f.explanation
+
+
+def test_deploy_context_without_index_is_silent_not_a_warning():
+    out = run_infra_check(repo_root=".", files=[
+        _added("Dockerfile", BENIGN_DOCKERFILE)])
+    f = _context_findings(out)[0]
+    assert "repository index" not in f.explanation
+    assert out.warnings == ()
+
+    # an index without a paths attribute degrades the same way
+    from types import SimpleNamespace
+    out = run_infra_check(repo_root=".", files=[
+        _added("Dockerfile", BENIGN_DOCKERFILE)],
+        index=SimpleNamespace())
+    f = _context_findings(out)[0]
+    assert "repository index" not in f.explanation
+    assert out.warnings == ()
+
+
+def test_deploy_context_noop_without_deploy_paths():
+    out = run_infra_check(repo_root=".", files=[
+        _added("src/app.py", "x = 1\n"),
+        _modified("docs/readme.md", [(" ", 1, 1, "# hi")])])
+    assert out == InfraOutcome()
+
+
+def test_deploy_context_flags_deleted_deploy_files():
+    """The context is path-based: deleting a workflow is a deploy-path
+    change even though no rule can judge deleted content."""
+    fd = _modified(".github/workflows/ci.yml", CI_MODIFICATION)
+    fd.is_deleted = True
+    ctx = deploy_path_context(files=[fd])
+    assert [(f.rule_id, f.file) for f in ctx.findings] == [
+        (DEPLOY_RULE_ID, ".github/workflows/ci.yml")]
+
+
+def test_deploy_context_is_scrubbed():
+    out = run_infra_check(
+        repo_root=".",
+        files=[_added("hunter2/Dockerfile", BENIGN_DOCKERFILE)],
+        scrub=lambda t: t.replace("hunter2", "[GONE]"))
+    f = _context_findings(out)[0]
+    assert "hunter2" not in f.title + f.explanation
+    assert "[GONE]/Dockerfile" in f.explanation
+
+
+def test_deploy_context_joins_rule_findings(tmp_path):
+    """A misconfigured workflow change yields rule findings AND the
+    aggregate context finding."""
+    _write_base(tmp_path, ".github/workflows/ci.yml", BASE_CI)
+    out = run_infra_check(repo_root=str(tmp_path), files=[
+        _modified(".github/workflows/ci.yml", CI_MODIFICATION)])
+    assert [(f.rule_id, f.line) for f in _rule_findings(out)] == [
+        (INFRA002, 5), (INFRA003, 9)]
+    ctx = _context_findings(out)
+    assert len(ctx) == 1
+    assert ctx[0].file == ".github/workflows/ci.yml"
