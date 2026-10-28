@@ -348,3 +348,287 @@ def test_warnings_are_scrubbed_with_config_credentials(tmp_path):
         repo_root=str(tmp_path), sources=cfg, now=NOW,
         scrub=lambda t: t.replace("unreadable", "[GONE]"))
     assert warnings == ("incident source [GONE]: incidents/[GONE].json",)
+
+
+# ============================================================ V4.6-E06-T03
+# Change-linkage as confidence-labeled evidence: the match ladder (sha ->
+# exact path -> same directory -> nothing), evidence-or-dropped findings,
+# prophecy-free wording, and the opt-in wiring (config flag + hook).
+
+from ai_pr_reviewer.cli import parse_args                    # noqa: E402
+from ai_pr_reviewer.config import Config, load_config         # noqa: E402
+from ai_pr_reviewer.diff_parser import (FileDiff, Hunk,       # noqa: E402
+                                        HunkLine)
+from ai_pr_reviewer.incident_intel import (LINK_RULE_ID,      # noqa: E402
+                                           IncidentOutcome,
+                                           _norm, link_findings,
+                                           link_incidents,
+                                           run_incident_context)
+from ai_pr_reviewer.orchestrator import validate_findings     # noqa: E402
+
+ORG_RECORDS = (
+    IncidentRecord(incident_id="INC-42", title="Payments outage",
+                   severity="sev2",
+                   occurred_at="2026-01-15T10:00:00+00:00",
+                   paths=("src/payments.py",), source="s"),
+    IncidentRecord(incident_id="INC-7", title="Infra blip",
+                   paths=("infra/",), source="s"),
+    IncidentRecord(incident_id="INC-9", title="Sha-linked",
+                   change_shas=("a" * 40,), source="s"),
+)
+
+
+def _added(path: str) -> FileDiff:
+    lines = ["x = 1", "y = 2"]
+    return FileDiff(old_path="", new_path=path, is_new=True, hunks=[
+        Hunk(old_start=0, old_count=0, new_start=1, new_count=2,
+             lines=[HunkLine("+", None, i, t) for i, t in enumerate(lines, 1)])])
+
+
+def _modified(path: str) -> FileDiff:
+    return FileDiff(old_path=path, new_path=path, hunks=[
+        Hunk(old_start=1, old_count=1, new_start=1, new_count=1,
+             lines=[HunkLine(" ", 1, 1, "x = 1")])])
+
+
+ORG_FILES = [_modified("src/payments.py"), _added("infra/main.tf"),
+             _added("src/other.py")]
+
+
+# ------------------------------------------------------------- path norm
+
+@pytest.mark.parametrize("raw,expected", [
+    ("./a/b.py", "a/b.py"),
+    ("a/b.py", "a/b.py"),
+    # lstrip("./") would strip the CHARACTER SET and mangle "..foo":
+    ("..foo", "..foo"),
+    ("././x", "x"),
+    (".hidden/x", ".hidden/x"),
+    ("a\\b.py", "a/b.py"),
+])
+def test_norm_strips_prefix_not_character_set(raw, expected):
+    assert _norm(raw) == expected
+
+
+# ------------------------------------------------------------ match ladder
+
+def test_exact_path_match_is_high_confidence_with_full_evidence():
+    links = link_incidents(ORG_RECORDS, ORG_FILES, head_sha="a" * 40)
+    by_id = {l.record.incident_id: l for l in links}
+    assert by_id["INC-42"].confidence == "high"       # exact path hit
+    assert by_id["INC-7"].confidence == "medium"      # same directory only
+    assert by_id["INC-9"].confidence == "high"        # head-SHA hit
+
+    findings = link_findings(links, ORG_FILES)
+    f = next(x for x in findings if x.rule_id == LINK_RULE_ID
+             and "INC-42" in x.explanation)
+    assert (f.file, f.line) == ("src/payments.py", None)   # file-level
+    assert (f.severity, f.category, f.confidence) == (
+        "info", "maintainability", "high")
+    assert f.rule_id == LINK_RULE_ID
+    assert f.suggestion is None                      # evidence, never remediation
+    assert (f.provenance_engine, f.provenance_model,
+            f.provenance_origin) == ("static", "incident-v1", "rule")
+    assert [(ev.kind, ev.locator) for ev in f.evidence] == [
+        ("file_excerpt", "src/payments.py"),
+        ("history_event", "incident:INC-42"),
+        ("rule_ref", f"rule:{LINK_RULE_ID}"),
+    ]
+    assert all(ev.integrity_ok for ev in f.evidence)
+
+
+def test_same_directory_match_is_medium_confidence():
+    links = link_incidents(ORG_RECORDS, ORG_FILES)
+    link = next(l for l in links if l.record.incident_id == "INC-7")
+    assert link.confidence == "medium"
+    finding = next(f for f in link_findings((link,), ORG_FILES)
+                   if "INC-7" in f.explanation)
+    assert finding.confidence == "medium"
+    assert finding.file == "infra/main.tf"
+
+
+def test_sha_only_match_anchors_first_changed_file_in_diff_order():
+    """Anchor order is the DIFF's order, never set iteration (hash-seed
+    dependent): a sha-only link deterministically picks changed[0]."""
+    links = link_incidents(ORG_RECORDS, ORG_FILES,
+                           head_sha="A" * 40)        # case-insensitive
+    sha_link = next(l for l in links if l.record.incident_id == "INC-9")
+    assert sha_link.matched_paths == ()              # no path claim exists
+    finding = next(f for f in link_findings(links, ORG_FILES)
+                   if "INC-9" in f.explanation)
+    assert finding.file == "src/payments.py"         # ORG_FILES[0]
+    assert "head commit" in finding.explanation      # states HOW it matched
+
+
+def test_ambiguity_never_becomes_a_claim():
+    # An incident matching nothing is simply not surfaced...
+    assert link_incidents(ORG_RECORDS[:1], [_added("docs/x.md")]) == ()
+    # ...and a record with no identity/paths/shas can never link.
+    assert link_incidents((IncidentRecord(incident_id="X"),),
+                          ORG_FILES) == ()
+
+
+def test_link_findings_are_capped():
+    many = tuple(IncidentRecord(incident_id=f"I{i}",
+                                paths=(f"src/p{i}.py",)) for i in range(8))
+    files = [_added(f"src/p{i}.py") for i in range(8)]
+    assert len(link_incidents(many, files)) == 5
+
+
+# ------------------------------------------------- pipeline anchoring
+
+def test_incident_finding_line_none_anchors_in_validate_findings():
+    """``line=None`` is the file-level contract: it must pass anchoring
+    without ever pointing at an innocent line."""
+    links = link_incidents(ORG_RECORDS, ORG_FILES)
+    findings = link_findings(links, ORG_FILES)
+    cfg = Config(repo="acme/api", pr_number=7, severity_threshold="info")
+    _inline, reported, below, suppressed, dropped = validate_findings(
+        findings, ORG_FILES, cfg, "info")
+    assert dropped == []
+    assert below == []
+    assert {f.rule_id for f in reported} == {LINK_RULE_ID}
+
+
+# ------------------------------------------------- wording + redaction
+
+def test_explanation_is_retrospective_not_prophecy():
+    links = link_incidents(ORG_RECORDS, ORG_FILES)
+    for f in link_findings(links, ORG_FILES):
+        assert "not a prediction about this change" in f.explanation
+        assert "Historical context" in f.explanation
+        # no future-tense claim about THIS change survives
+        lowered = f.explanation.lower()
+        assert "will cause" not in lowered
+        assert "will break" not in lowered
+
+
+def test_incident_title_is_redacted_in_finding_text():
+    token = "ghp_" + "Abcdefghijklmnopqrstuvwxyz012345"
+    record = IncidentRecord(incident_id="INC-50",
+                            title=f"leak {token}",
+                            paths=("src/payments.py",), source="s")
+    links = link_incidents((record,), ORG_FILES)
+    for f in link_findings(links, ORG_FILES):
+        blob = f.title + f.explanation + " ".join(ev.summary
+                                                  for ev in f.evidence)
+        assert token not in blob
+        assert "[REDACTED]" in blob
+
+
+# ------------------------------------------------- entry point + NOOP
+
+def test_absent_config_is_a_true_noop(tmp_path):
+    out = run_incident_context(repo_root=str(tmp_path / "missing"),
+                               files=ORG_FILES)
+    assert out == IncidentOutcome()
+    assert out.findings == () and out.warnings == ()
+
+
+def test_configured_run_emits_findings_and_never_raises(tmp_path):
+    (tmp_path / "incidents").mkdir()
+    (tmp_path / "incidents" / "export.json").write_text(
+        json.dumps({"incidents": [
+            {"id": "INC-42", "title": "Payments outage",
+             "severity": "SEV2", "occurred_at": "2026-01-15T10:00:00Z",
+             "paths": ["src/payments.py"]}]}), encoding="utf-8")
+    (tmp_path / ".ai-pr-reviewer-incidents.json").write_text(
+        json.dumps({"retention_days": 0, "max_incidents": 10,
+                    "sources": ["incidents/export.json"]}),
+        encoding="utf-8")
+    out = run_incident_context(repo_root=str(tmp_path), files=ORG_FILES)
+    assert out.warnings == ()
+    assert [f.rule_id for f in out.findings] == [LINK_RULE_ID]
+    assert out.findings[0].confidence == "high"
+
+
+def test_crash_degrades_to_one_warning(monkeypatch):
+    from ai_pr_reviewer import incident_intel
+
+    def boom(*a, **k):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(incident_intel, "load_sources_config", boom)
+    out = run_incident_context(repo_root=".", files=ORG_FILES)
+    assert out.findings == ()
+    assert out.warnings == ("incident check failed (RuntimeError); skipped",)
+
+
+# ------------------------------------------------------------- config flag
+
+def test_incident_intel_flag_is_plain_env_default_off(monkeypatch):
+    monkeypatch.delenv("INCIDENT_INTEL", raising=False)
+    assert load_config(parse_args([])).incident_intel is False
+
+    monkeypatch.setenv("INCIDENT_INTEL", "true")
+    assert load_config(parse_args([])).incident_intel is True
+
+    # Deliberately NOT an action input: INPUT_* must not enable it.
+    monkeypatch.delenv("INCIDENT_INTEL", raising=False)
+    monkeypatch.setenv("INPUT_INCIDENT_INTEL", "1")
+    assert load_config(parse_args([])).incident_intel is False
+
+    # And no CLI flag exists.
+    with pytest.raises(SystemExit):
+        parse_args(["--incident-intel"])
+
+
+# ------------------------------------------------------- orchestrator hook
+
+def test_hook_is_off_by_default_and_never_runs_the_check(monkeypatch):
+    from test_orchestrator import Wired
+
+    def bomb(**kwargs):
+        raise AssertionError("incident check must not run when the flag is off")
+
+    import ai_pr_reviewer.incident_intel as incident_intel
+    monkeypatch.setattr(incident_intel, "run_incident_context", bomb)
+    w = Wired(monkeypatch)
+    result = w.run()
+    assert not [x for x in result.warnings if "incident" in x]
+
+
+def test_hook_joins_findings_and_warnings_when_enabled(monkeypatch):
+    from test_orchestrator import Wired, _finding
+
+    canned_finding = _finding(file="a.py", line=2, title="INC canned",
+                              severity="low")       # at Wired's threshold
+
+    def canned(**kwargs):
+        return IncidentOutcome(findings=(canned_finding,),
+                               warnings=("canned incident warning",))
+
+    import ai_pr_reviewer.incident_intel as incident_intel
+    monkeypatch.setattr(incident_intel, "run_incident_context", canned)
+    w = Wired(monkeypatch)
+    w.cfg.incident_intel = True
+    result = w.run()
+    assert any(f.title == "INC canned" for f in result.findings)
+    assert "canned incident warning" in result.warnings
+
+
+def test_hook_end_to_end_with_real_config(tmp_path, monkeypatch):
+    """Flag ON + a configured source: the incident finding flows through
+    the REAL hook. Severity info sits under Wired's ``low`` threshold, so
+    it lands in ``below_threshold`` — kept visible per D3, never lost."""
+    from test_orchestrator import Wired
+
+    (tmp_path / "incidents").mkdir()
+    (tmp_path / "incidents" / "export.json").write_text(
+        json.dumps({"incidents": [
+            {"id": "INC-42", "title": "Payments outage",
+             "paths": ["a.py"]}]}), encoding="utf-8")
+    (tmp_path / ".ai-pr-reviewer-incidents.json").write_text(
+        json.dumps({"retention_days": 0, "max_incidents": 10,
+                    "sources": ["incidents/export.json"]}),
+        encoding="utf-8")
+
+    w = Wired(monkeypatch)
+    w.cfg.incident_intel = True
+    w.cfg.repo_root = str(tmp_path)
+    result = w.run()
+    surfaced = list(result.findings) + list(result.below_threshold)
+    incident = [f for f in surfaced if f.rule_id == LINK_RULE_ID]
+    assert len(incident) == 1
+    assert incident[0].file == "a.py"                # a changed file (FULL_DIFF)
+    assert not [x for x in result.warnings if "incident check failed" in x]

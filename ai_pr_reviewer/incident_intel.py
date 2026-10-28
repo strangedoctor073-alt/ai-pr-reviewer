@@ -47,6 +47,8 @@ from pathlib import Path
 from typing import Callable
 
 from .index.limits import is_contained
+from .models import (STATIC_ENGINE_ID, EvidenceRecord, Finding,
+                     ProvenanceSource)
 from .security import redact_secrets
 
 log = logging.getLogger(__name__)
@@ -337,3 +339,224 @@ def ingest_incidents(*, repo_root: str, sources: IncidentSources,
     kept = apply_retention(tuple(records),
                            retention_days=sources.retention_days, now=now)
     return kept, tuple(warnings)
+
+
+# ------------------------------------------------------- change linkage
+# V4.6-E06-T03. Retrospective context, never prophecy: an incident link
+# states a HISTORICAL fact (this file was listed in that incident), it
+# never claims the current change will cause anything. Confidence labels
+# the strength of the match, not the risk of the change.
+
+MAX_LINK_FINDINGS = 5
+MAX_MATCHED_PATHS = 5
+LINK_RULE_ID = "INCIDENT_LINK"
+LINK_CONTRACT = (
+    "checked: an ingested incident record lists a path this change "
+    "modifies (exact match = high, same directory = medium), or the "
+    "incident references this PR's head commit (high); confidence "
+    "describes the match, not the risk of the change")
+CONFIDENCE_HIGH = "high"
+CONFIDENCE_MEDIUM = "medium"
+
+
+@dataclass(frozen=True)
+class IncidentLink:
+    """One incident connected to the current change set."""
+
+    record: IncidentRecord
+    matched_paths: tuple[str, ...] = ()
+    sha_matched: bool = False
+    # True when at least one match was an exact path hit (as opposed to
+    # same-directory only): set by the match ladder, never by callers.
+    _exact: bool = False
+
+    @property
+    def confidence(self) -> str:
+        # High = head-SHA hit or an exact path hit; medium = same-directory
+        # only. Labels the STRENGTH of the match, not the risk of the change.
+        return CONFIDENCE_HIGH if self.sha_matched or self._exact \
+            else CONFIDENCE_MEDIUM
+
+
+def _norm(path: str) -> str:
+    # Strip a leading "./" PREFIX, not a character set: lstrip("./") would
+    # mangle "..foo" into "foo" and silently change what matches.
+    norm = path.replace("\\", "/").strip()
+    while norm.startswith("./"):
+        norm = norm[2:]
+    return norm
+
+
+def _dirname(path: str) -> str:
+    norm = _norm(path)
+    return norm.rsplit("/", 1)[0] if "/" in norm else ""
+
+
+def link_incidents(records: tuple[IncidentRecord, ...], files,
+                   *, head_sha: str | None = None
+                   ) -> tuple[IncidentLink, ...]:
+    """Match incidents against the changed files. Deterministic order
+    (record order); one link per incident; at most
+    ``MAX_MATCHED_PATHS`` matched paths are carried per link.
+
+    Match ladder: incident references the PR head commit (high) ->
+    exact changed-path match (high) -> same-directory match (medium) ->
+    no link at all (an incident that matches nothing is simply not
+    surfaced; ambiguity never becomes a claim).
+    """
+    changed = [fd for fd in files if fd.path]
+    head = (head_sha or "").strip().lower()
+    links: list[IncidentLink] = []
+    for record in records:
+        exact: list[str] = []
+        dirs: list[str] = []
+        incident_dirs = {_dirname(p) for p in record.paths if _dirname(p)}
+        for fd in changed:
+            candidates = {n for n in (_norm(fd.path), _norm(fd.old_path))
+                          if n}
+            if candidates & {_norm(p) for p in record.paths}:
+                exact.append(fd.path)
+            elif {_dirname(c) for c in candidates} & incident_dirs:
+                dirs.append(fd.path)
+        sha_hit = bool(head and head in record.change_shas)
+        matched = tuple((exact + dirs)[:MAX_MATCHED_PATHS])
+        if not matched and not sha_hit:
+            continue
+        links.append(IncidentLink(record=record, matched_paths=matched,
+                                  sha_matched=sha_hit, _exact=bool(exact)))
+        if len(links) >= MAX_LINK_FINDINGS:
+            break
+    return tuple(links)
+
+
+# ------------------------------------------------------------- findings
+# MAX_TITLE_CHARS / _CONTROL are defined once in the T01 section above.
+
+MAX_EXPLANATION_CHARS = 900
+MAX_EVIDENCE_SUMMARY_CHARS = 400        # mirrors models.MAX_EVIDENCE_SUMMARY_CHARS
+
+
+def _clean_text(text: object, limit: int,
+                scrub: Callable[[str], str] | None) -> str:
+    out = redact_secrets(str(text if text is not None else ""))
+    if scrub is not None:
+        out = scrub(out)
+    out = " ".join(out.translate(_CONTROL).split())
+    return out[:limit].strip()
+
+
+def link_findings(links: tuple[IncidentLink, ...], files, *,
+                  scrub: Callable[[str], str] | None = None
+                  ) -> tuple[Finding, ...]:
+    """Turn links into ordinary pipeline findings — evidence-or-dropped,
+    deterministic provenance, no remediation, no prediction wording.
+
+    The finding's ``file`` is always a changed file (so anchoring in
+    ``validate_findings`` succeeds); the incident itself surfaces as a
+    ``history_event`` evidence record, not as a verdict on the diff.
+    """
+    # Membership is a set; ORDER is the diff's, so the sha-only fallback
+    # anchor below is deterministic (set iteration order is hash-seed
+    # dependent).
+    changed_paths = {fd.path for fd in files if fd.path}
+    ordered_paths = [fd.path for fd in files if fd.path]
+    out: list[Finding] = []
+    for link in links:
+        record = link.record
+        anchor = next((p for p in link.matched_paths if p in changed_paths),
+                      None)
+        if anchor is None:
+            # sha-only link: anchor on the first changed file (diff order)
+            anchor = ordered_paths[0] if ordered_paths else None
+        if anchor is None:
+            continue                        # nothing changed: no finding
+        where = ", ".join(link.matched_paths) if link.matched_paths \
+            else "this change's head commit"
+        when = f" on {record.occurred_at[:10]}" if record.occurred_at else ""
+        subject = record.title or record.summary or "incident record"
+        explanation = (
+            f"Incident {record.incident_id}{when} ({record.severity or 'unspecified severity'}) "
+            f"lists {where} in its record. The incident title on file: "
+            f"\"{subject}\". Historical context from the configured "
+            f"incident source — evidence about the past, not a prediction "
+            f"about this change.")
+        try:
+            file_ev = EvidenceRecord.create(
+                kind="file_excerpt", locator=anchor,
+                summary=_clean_text(
+                    f"matched via {where} (confidence: "
+                    f"{link.confidence})", MAX_EVIDENCE_SUMMARY_CHARS,
+                    scrub),
+                check_type="incident_link", scrub=scrub)
+            incident_ev = EvidenceRecord.create(
+                kind="history_event", locator=f"incident:{record.incident_id}",
+                summary=_clean_text(
+                    f"{record.incident_id} ({record.severity or 'n/a'})"
+                    f"{when}: {subject}", MAX_EVIDENCE_SUMMARY_CHARS,
+                    scrub),
+                check_type="incident_link", scrub=scrub)
+            ref_ev = EvidenceRecord.create(
+                kind="rule_ref", locator=f"rule:{LINK_RULE_ID}",
+                summary=_clean_text(LINK_CONTRACT,
+                                    MAX_EVIDENCE_SUMMARY_CHARS, scrub),
+                check_type="incident_link", scrub=scrub)
+        except ValueError:
+            continue                        # evidence-or-dropped
+        finding = Finding(
+            file=anchor, line=None, severity="info",
+            category="maintainability",
+            title=_clean_text(
+                f"Change touches files listed in incident "
+                f"{record.incident_id}", MAX_TITLE_CHARS, scrub),
+            explanation=_clean_text(explanation, MAX_EXPLANATION_CHARS,
+                                    scrub),
+            suggestion=None, confidence=link.confidence,
+            rule_id=LINK_RULE_ID, evidence=(file_ev, incident_ev, ref_ev),
+        )
+        source = ProvenanceSource(engine=STATIC_ENGINE_ID,
+                                  model="incident-v1", origin="rule")
+        finding.provenance_engine = source.engine
+        finding.provenance_model = source.model
+        finding.provenance_agent = None
+        finding.provenance_origin = source.origin
+        finding.provenance_sources = (source,)
+        out.append(finding)
+    return tuple(out)
+
+
+@dataclass(frozen=True)
+class IncidentOutcome:
+    findings: tuple[Finding, ...] = ()
+    warnings: tuple[str, ...] = ()
+
+
+NOOP = IncidentOutcome()
+
+
+def run_incident_context(*, repo_root: str, files,
+                         head_sha: str | None = None,
+                         scrub: Callable[[str], str] | None = None
+                         ) -> IncidentOutcome:
+    """Single entry point for the review pipeline (V4.6-E06-T03).
+
+    Absent configuration (no sources file, or an empty ``sources`` list)
+    is a true NOOP: no records, no warnings, byte-identical output.
+    Never raises: any failure becomes one warning and zero findings.
+    ``github_token``-style credentials never reach this module's inputs,
+    and nothing here can write, post or trigger (read-only contract,
+    test-enforced in T04).
+    """
+    try:
+        sources = load_sources_config(repo_root)
+        if sources is None or not sources.sources:
+            return NOOP
+        records, warnings = ingest_incidents(repo_root=repo_root,
+                                             sources=sources, scrub=scrub)
+        links = link_incidents(records, files, head_sha=head_sha)
+        return IncidentOutcome(
+            findings=link_findings(links, files, scrub=scrub),
+            warnings=warnings)
+    except Exception as exc:  # noqa: BLE001 — opt-in feature never fails a review
+        log.warning("incident check failed: %s", type(exc).__name__)
+        return IncidentOutcome(warnings=(
+            f"incident check failed ({type(exc).__name__}); skipped",))

@@ -352,6 +352,19 @@ class ReviewOrchestrator:
                 scrub=lambda t: _scrub(t, cfg))
             outcome.findings.extend(_infra.findings)
             warnings.extend(_infra.warnings)
+        # V4.6-E06-T03: retrospective incident linkage (opt-in, default
+        # OFF via INCIDENT_INTEL). Evidence-or-dropped and redacted like
+        # the hooks above; absent configuration is a true NOOP, and the
+        # module never raises (worst case: one warning, zero findings).
+        if getattr(cfg, "incident_intel", False):
+            from .incident_intel import run_incident_context
+            _inc = run_incident_context(
+                repo_root=getattr(cfg, "repo_root", None) or ".",
+                files=files,
+                head_sha=getattr(pr, "head_sha", None) or None,
+                scrub=lambda t: _scrub(t, cfg))
+            outcome.findings.extend(_inc.findings)
+            warnings.extend(_inc.warnings)
         findings = deduplicate(outcome.findings)
         # D4: ``max_comments`` is a *posting* limit only. ``reported`` is
         # every anchored finding this review found — the report, the health

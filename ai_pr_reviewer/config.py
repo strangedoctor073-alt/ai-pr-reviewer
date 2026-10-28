@@ -197,6 +197,13 @@ class Config:
     # review, which needs human sign-off (plan §F).
     infra_intel: bool = False
 
+    # V4.6-E06-T03: retrospective incident context (configured-source
+    # linkage evidence). Default OFF; plain env var (INCIDENT_INTEL),
+    # deliberately not an INPUT_* action input -- enabling it makes
+    # incident records surface in review output, which needs human
+    # sign-off (plan §F). Absent config is a true NOOP even when ON.
+    incident_intel: bool = False
+
 
 def load_config(args) -> Config:
     _warn_unknown_inputs()
@@ -261,6 +268,8 @@ def load_config(args) -> Config:
                                          default=False)
     # V4.6-E05-T02: no CLI flag and no INPUT_* on purpose (see the field).
     cfg.infra_intel = _bool_field(None, "INFRA_INTEL", default=False)
+    # V4.6-E06-T03: no CLI flag and no INPUT_* on purpose (see the field).
+    cfg.incident_intel = _bool_field(None, "INCIDENT_INTEL", default=False)
     return cfg
 
 
