@@ -235,3 +235,116 @@ def test_module_is_read_only_and_offline():
     assert _violations("eval('1')\n")
     assert not _violations("path.read_text(encoding='utf-8')\n")
     assert not _violations("import re\nre.compile('x')\n")
+
+
+# ============================================================ V4.6-E06-T02
+# Incident redaction corpus + retention pruning on ingest.
+
+from datetime import datetime, timezone                  # noqa: E402
+
+from ai_pr_reviewer.incident_intel import apply_retention  # noqa: E402
+
+NOW = datetime(2026, 6, 1, tzinfo=timezone.utc)
+
+# A credential per redact_secrets pattern family, all inside incident
+# fields. None may survive ingest — in records OR warnings.
+LEAK_CORPUS = {
+    "aws": "AKIA" + "ABCDEFGHIJKLMNOP",
+    "gh": "ghp_" + "Abcdefghijklmnopqrstuvwxyz012345",
+    "sk": "sk-" + "abcdefghijkmnopqrstuvwxyz012345",
+    "slack": "xoxb-abcdefghij-1234567890",
+    "google": "AIza" + "SyA" * 10 + "abc",
+    "bearer": "bearer " + "A" * 30,
+    "kv": "password: hunter2hunter2",
+    "db": "postgres://user:secretpass99@db:5432/x",
+}
+
+
+def _incident_export(**overrides) -> dict:
+    row = {"id": "INC-9", "title": "normal title",
+           "occurred_at": "2026-05-30T00:00:00+00:00"}
+    row.update(overrides)
+    return {"incidents": [row]}
+
+
+def _ingest(tmp_path, payload: dict, **kwargs):
+    (tmp_path / "incidents").mkdir(exist_ok=True)
+    (tmp_path / "incidents" / "export.json").write_text(
+        json.dumps(payload), encoding="utf-8")
+    sources = kwargs.pop("sources", None) or IncidentSources(
+        sources=("incidents/export.json",))
+    return ingest_incidents(repo_root=str(tmp_path), sources=sources,
+                            now=NOW, **kwargs)
+
+
+@pytest.mark.parametrize("family,secret", sorted(LEAK_CORPUS.items()))
+def test_leak_corpus_is_redacted_in_records(tmp_path, family, secret):
+    records, warnings = _ingest(tmp_path, _incident_export(
+        title=f"outage {secret}", summary=f"root cause {secret}",
+        severity=secret, paths=[f"src/{secret}.py"]))
+    assert warnings == ()
+    blob = repr(records)
+    assert secret not in blob, family
+    assert "[REDACTED]" in blob, family
+
+
+def test_leak_corpus_is_redacted_in_warnings(tmp_path):
+    # A source path containing a credential-shaped string: the warning
+    # text is cleaned with redact_secrets even without a scrub callback.
+    cfg = IncidentSources(sources=(f"incidents/{LEAK_CORPUS['kv']}.json",))
+    _, warnings = ingest_incidents(repo_root=str(tmp_path), sources=cfg,
+                                   now=NOW)
+    assert len(warnings) == 1
+    assert LEAK_CORPUS["kv"] not in warnings[0]
+    assert "[REDACTED]" in warnings[0]
+
+
+def test_retention_prunes_old_keeps_recent_and_undated(tmp_path):
+    payload = {"incidents": [
+        {"id": "OLD", "occurred_at": "2025-01-01T00:00:00+00:00"},
+        {"id": "RECENT", "occurred_at": "2026-05-30T00:00:00+00:00"},
+        {"id": "UNDATED", "occurred_at": "whenever"},
+    ]}
+    records, _ = _ingest(tmp_path, payload,
+                         sources=IncidentSources(retention_days=30,
+                                                 sources=(
+                                                     "incidents/export.json",)))
+    # OLD (5 months before NOW) is provably outside the window; UNDATED
+    # can never be proven old, so it stays (honest retention).
+    assert [r.incident_id for r in records] == ["RECENT", "UNDATED"]
+
+
+def test_retention_zero_keeps_everything(tmp_path):
+    payload = _incident_export(occurred_at="2020-01-01T00:00:00+00:00")
+    records, _ = _ingest(tmp_path, payload)
+    assert [r.incident_id for r in records] == ["INC-9"]
+
+
+def test_retention_boundary_is_inclusive(tmp_path):
+    payload = _incident_export(occurred_at="2026-05-02T00:00:00+00:00")
+    records, _ = _ingest(tmp_path, payload,
+                         sources=IncidentSources(retention_days=30,
+                                                 sources=(
+                                                     "incidents/export.json",)))
+    # exactly 30 days before NOW: inside the window, kept
+    assert [r.incident_id for r in records] == ["INC-9"]
+
+
+def test_apply_retention_direct_is_pure():
+    old = IncidentRecord(incident_id="OLD",
+                         occurred_at="2020-01-01T00:00:00+00:00")
+    fresh = IncidentRecord(incident_id="NEW",
+                           occurred_at="2026-05-31T00:00:00+00:00")
+    undated = IncidentRecord(incident_id="BLANK")
+    assert apply_retention((old, fresh, undated), retention_days=30,
+                           now=NOW) == (fresh, undated)
+    # retention_days=0 is the "keep everything" switch
+    assert apply_retention((old,), retention_days=0, now=NOW) == (old,)
+
+
+def test_warnings_are_scrubbed_with_config_credentials(tmp_path):
+    cfg = IncidentSources(sources=("incidents/unreadable.json",))
+    _, warnings = ingest_incidents(
+        repo_root=str(tmp_path), sources=cfg, now=NOW,
+        scrub=lambda t: t.replace("unreadable", "[GONE]"))
+    assert warnings == ("incident source [GONE]: incidents/[GONE].json",)

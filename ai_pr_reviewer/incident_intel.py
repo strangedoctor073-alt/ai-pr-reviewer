@@ -111,9 +111,10 @@ class IncidentSources:
     sources: tuple[str, ...] = ()
 
 
-def _warn(msg: str, warnings: list[str]) -> None:
+def _warn(msg: str, warnings: list[str],
+          scrub: Callable[[str], str] | None = None) -> None:
     if len(warnings) < MAX_WARNINGS:
-        warnings.append(_clean(msg, MAX_WARNING_CHARS))
+        warnings.append(_clean(msg, MAX_WARNING_CHARS, scrub))
 
 
 def _nonneg_int(value: object) -> int:
@@ -246,10 +247,40 @@ def _sources_filename() -> str:
             or DEFAULT_SOURCES_FILE)
 
 
+def apply_retention(records: tuple[IncidentRecord, ...], *,
+                    retention_days: int,
+                    now: datetime | None = None
+                    ) -> tuple[IncidentRecord, ...]:
+    """Drop incidents provably older than ``retention_days``.
+
+    Honesty rule: retention removes only what it can PROVE is old — a
+    record with an absent or unparseable ``occurred_at`` is kept (T01
+    records those as empty), because silently deleting an incident we
+    cannot date would hide context a review might need. ``now`` is
+    injectable so tests are deterministic.
+    """
+    if retention_days <= 0:
+        return records
+    moment = now or datetime.now(timezone.utc)
+    cutoff = moment.timestamp() - retention_days * 86_400
+    kept: list[IncidentRecord] = []
+    for record in records:
+        try:
+            occurred = datetime.fromisoformat(record.occurred_at)
+        except ValueError:
+            kept.append(record)         # undated: never provably old
+            continue
+        if occurred.timestamp() >= cutoff:
+            kept.append(record)
+    return tuple(kept)
+
+
 def ingest_incidents(*, repo_root: str, sources: IncidentSources,
-                     scrub: Callable[[str], str] | None = None
+                     scrub: Callable[[str], str] | None = None,
+                     now: datetime | None = None
                      ) -> tuple[tuple[IncidentRecord, ...], tuple[str, ...]]:
-    """Load every configured source file into normalized records.
+    """Load every configured source file into normalized records, then
+    apply the configured retention window (T02).
 
     Allow-list semantics: only paths the trusted config names are read,
     each containment-checked; an unnameable or unreadable path becomes a
@@ -260,34 +291,37 @@ def ingest_incidents(*, repo_root: str, sources: IncidentSources,
     records: list[IncidentRecord] = []
     seen: set[tuple[str, str]] = set()
     budget = sources.max_incidents or MAX_INCIDENTS
+
+    def warn(msg: str) -> None:
+        _warn(msg, warnings, scrub)
+
     for rel in sources.sources:
         if len(records) >= budget:
-            _warn(f"incident cap ({budget}) reached; remaining sources "
-                  f"not ingested", warnings)
+            warn(f"incident cap ({budget}) reached; remaining sources "
+                 f"not ingested")
             break
         if not is_contained(repo_root, rel):
-            _warn(f"incident source path escapes the repository: {rel}",
-                  warnings)
+            warn(f"incident source path escapes the repository: {rel}")
             continue
         path = Path(repo_root) / rel
         try:
             if path.stat().st_size > MAX_SOURCE_FILE_BYTES:
-                _warn(f"incident source exceeds size cap: {rel}", warnings)
+                warn(f"incident source exceeds size cap: {rel}")
                 continue
             data = json.loads(path.read_text(encoding="utf-8",
                                              errors="replace"))
         except OSError:
-            _warn(f"incident source unreadable: {rel}", warnings)
+            warn(f"incident source unreadable: {rel}")
             continue
         except ValueError as exc:
             # Type only, never file content (same rule as the infra
             # parsers: a parse failure cannot echo the file it failed on).
-            _warn(f"incident source is not valid JSON "
-                  f"({type(exc).__name__}): {rel}", warnings)
+            warn(f"incident source is not valid JSON "
+                 f"({type(exc).__name__}): {rel}")
             continue
         raw_list = data.get("incidents") if isinstance(data, dict) else None
         if not isinstance(raw_list, list):
-            _warn(f"incident source has no incidents list: {rel}", warnings)
+            warn(f"incident source has no incidents list: {rel}")
             continue
         for raw in raw_list:
             if len(records) >= budget:
@@ -300,4 +334,6 @@ def ingest_incidents(*, repo_root: str, sources: IncidentSources,
                 continue
             seen.add(key)
             records.append(record)
-    return tuple(records), tuple(warnings)
+    kept = apply_retention(tuple(records),
+                           retention_days=sources.retention_days, now=now)
+    return kept, tuple(warnings)
