@@ -23,11 +23,21 @@ is deliberately narrow:
 """
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable
 
 import yaml
 from yaml.nodes import MappingNode, SequenceNode, ScalarNode
+
+from .diff_parser import FileDiff
+from .index.limits import is_contained, is_excluded
+from .models import (STATIC_ENGINE_ID, EvidenceRecord, Finding,
+                     ProvenanceSource)
+from .rules import SENSITIVE_EXCLUDE_GLOBS
+from .security import redact_secrets
 
 # ------------------------------------------------------------------ caps
 # Hard bounds on hostile input: checked before (size) or during (nodes,
@@ -398,3 +408,442 @@ def parse_dockerfile(text: str, *, path: str = "") -> DockerfileDoc:
             build_vars.extend(_parse_vars(instr, rest, lineno))
     return DockerfileDoc(path=path, froms=tuple(froms),
                          build_vars=tuple(build_vars), ok=True)
+
+
+# ------------------------------------------------- misconfiguration rules
+# V4.6-E05-T02. Closed vocabulary: rule id, severity, category and
+# confidence come from the table below, never from file content.
+
+INFRA001 = "INFRA001"    # permissions: write-all
+INFRA002 = "INFRA002"    # pull_request_target + any write-level grant
+INFRA003 = "INFRA003"    # uses: not pinned to a full commit SHA
+INFRA004 = "INFRA004"    # secret-named ARG/ENV assigned a literal value
+INFRA005 = "INFRA005"    # FROM with neither a specific tag nor a digest
+
+
+@dataclass(frozen=True)
+class InfraRuleMeta:
+    severity: str
+    category: str
+    confidence: str
+    contract: str      # factual statement of what the check accepts
+
+
+_INFRA_RULES: dict[str, InfraRuleMeta] = {
+    INFRA001: InfraRuleMeta(
+        "high", "security", "high",
+        "checked: a permissions block whose whole-block value is write-all"),
+    INFRA002: InfraRuleMeta(
+        "high", "security", "high",
+        "checked: a pull_request_target trigger together with a write-level "
+        "grant (scope level 'write', or a write-all block)"),
+    INFRA003: InfraRuleMeta(
+        "medium", "security", "high",
+        "checked: a local './' path, a full 40-hex commit SHA after '@', or "
+        "a full digest for docker:// references; tags and branches do not "
+        "count"),
+    INFRA004: InfraRuleMeta(
+        "high", "security", "medium",
+        "checked: a secret-named key (secret, token, password, api key, "
+        "private key, credential) assigned a non-empty literal value; the "
+        "name alone does not match"),
+    INFRA005: InfraRuleMeta(
+        "medium", "security", "high",
+        "checked: 'scratch', an earlier stage reference, a digest, or a "
+        "specific tag other than 'latest' counts as pinned"),
+}
+
+
+@dataclass(frozen=True)
+class InfraHit:
+    """One rule match in proposed-content line coordinates.
+
+    ``line`` is the offending line itself; the finding built from it may
+    anchor at ``None`` (file level) when that line is outside the diff —
+    the evidence locator keeps the exact position either way.
+    """
+
+    rule_id: str
+    path: str
+    line: int | None
+    title: str
+    explanation: str
+    detail: str
+
+
+_SECRET_KEY_RE = re.compile(
+    r"(?i)(secret|token|password|passwd|api[_-]?key|private[_-]?key|credential)")
+
+
+def _ref_pinned(value: str) -> bool:
+    """Local actions and full-SHA/full-digest pins are accepted; a tag or
+    branch can be moved after this review, so it is not a pin."""
+    if value.startswith("./"):
+        return True
+    if "@" not in value:
+        return False
+    tail = value.rsplit("@", 1)[1].strip()
+    return re.fullmatch(r"[0-9a-fA-F]{40}", tail) is not None \
+        or re.fullmatch(r"sha256:[0-9a-fA-F]{64}", tail) is not None
+
+
+def _image_pinned(image: str, stages: set[str]) -> bool:
+    low = image.lower()
+    if low == "scratch" or low in stages:
+        return True
+    if re.search(r"@[A-Za-z0-9._-]+:[0-9a-fA-F]{32,}", image):
+        return True                          # digest pin
+    cut = image.rfind(":")
+    if cut == -1:
+        return False                         # no tag at all
+    tag = image[cut + 1:]
+    if "/" in tag:
+        return False                         # registry port, not a tag
+    return bool(tag) and tag.lower() != "latest"
+
+
+def _grant_writes(grant: PermissionGrant) -> bool:
+    if grant.scalar and grant.scalar.lower() == "write-all":
+        return True
+    return any(level.lower() == "write" for _, level in grant.scopes)
+
+
+def _check_workflow(doc: WorkflowDoc) -> list[InfraHit]:
+    hits: list[InfraHit] = []
+    prwt_line = next((line for name, line in doc.triggers
+                      if name == "pull_request_target"), None)
+    first_write: PermissionGrant | None = None
+    for grant in doc.permissions:
+        subject = f"Job '{grant.job}'" if grant.job else "Workflow"
+        if grant.scalar and grant.scalar.lower() == "write-all":
+            hits.append(InfraHit(
+                INFRA001, doc.path, grant.line,
+                title=f"{subject} permissions set to write-all",
+                explanation=(f"{subject} sets permissions: write-all at line "
+                             f"{grant.line}, granting the workflow token "
+                             f"every scope GitHub defines."),
+                detail=f"permissions: write-all (line {grant.line})"))
+        if first_write is None and _grant_writes(grant):
+            first_write = grant
+    if prwt_line is not None and first_write is not None:
+        grant = first_write
+        where = f"job '{grant.job}'" if grant.job else "the workflow"
+        grants = (grant.scalar if grant.scalar
+                  and grant.scalar.lower() == "write-all"
+                  else ", ".join(f"{scope}: {level}"
+                                 for scope, level in grant.scopes
+                                 if level.lower() == "write"))
+        # One statement per file: the combination, not one per grant.
+        hits.append(InfraHit(
+            INFRA002, doc.path, grant.line,
+            title="pull_request_target trigger combined with write permissions",
+            explanation=(
+                f"Trigger pull_request_target is declared at line "
+                f"{prwt_line} while {where} holds write permissions "
+                f"({grants}); pull_request_target runs this workflow for "
+                f"pull-request events in the base repository, so the "
+                f"reviewed change is processed by a run holding a "
+                f"write-capable token."),
+            detail=(f"permissions of {where} at line {grant.line}: "
+                    f"{grants}, trigger pull_request_target at line "
+                    f"{prwt_line}")))
+    for ref in doc.uses:
+        if _ref_pinned(ref.value):
+            continue
+        where = f"Job '{ref.job}'" if ref.job else "The workflow"
+        hits.append(InfraHit(
+            INFRA003, doc.path, ref.line,
+            title=f"Unpinned action reference '{ref.value}'",
+            explanation=(f"{where} references {ref.value} at line {ref.line} "
+                         f"without a full 40-hex commit SHA; a tag or branch "
+                         f"can be moved after this review."),
+            detail=f"uses: {ref.value}"))
+    return hits
+
+
+def _check_dockerfile(doc: DockerfileDoc) -> list[InfraHit]:
+    hits: list[InfraHit] = []
+    stages: set[str] = set()
+    for fr in doc.froms:
+        if not _image_pinned(fr.image, stages):
+            hits.append(InfraHit(
+                INFRA005, doc.path, fr.line,
+                title=f"Unpinned base image '{fr.image}'",
+                explanation=(f"FROM {fr.image} at line {fr.line} has neither "
+                             f"a digest nor a specific tag other than "
+                             f"'latest'; the build resolves it when it runs."),
+                detail=f"FROM {fr.image}"))
+        if fr.stage:
+            stages.add(fr.stage.lower())
+    for var in doc.build_vars:
+        if var.has_value and _SECRET_KEY_RE.search(var.key):
+            subject = f"{var.kind} {var.key}"
+            hits.append(InfraHit(
+                INFRA004, doc.path, var.line,
+                title=f"Secret-named {var.kind} '{var.key}' assigned a "
+                      f"literal value",
+                explanation=(f"{subject} is assigned a literal value at line "
+                             f"{var.line}; build files travel with the build "
+                             f"context. The value itself is not reproduced "
+                             f"here."),
+                detail=f"{subject} assigned a value"))
+    return hits
+
+
+# ------------------------------------------------------------ findings
+# V4.6-E05-T02 mirrors architecture.findings: evidence-or-dropped,
+# deterministic provenance stamped here (these findings join the pipeline
+# AFTER the orchestrator's provenance/redaction chokepoints), no
+# remediation, no certification wording, every string redacted,
+# control-free, single-line and bounded.
+
+_PROVENANCE_MODEL = "infra-v1"
+MAX_TITLE_CHARS = 160
+MAX_EVIDENCE_SUMMARY_CHARS = 400   # mirrors models.MAX_EVIDENCE_SUMMARY_CHARS
+MAX_EXPLANATION_CHARS = 900
+MAX_WARNING_CHARS = 300
+_CONTROL = {c: " " for c in (*range(0x20), 0x7F, *range(0x80, 0xA0),
+                              0x2028, 0x2029)}
+
+
+def _clean(text: object, limit: int,
+           scrub: Callable[[str], str] | None = None) -> str:
+    out = redact_secrets(str(text))
+    if scrub is not None:
+        out = scrub(out)
+    out = " ".join(out.translate(_CONTROL).split())
+    return out[:limit].strip()
+
+
+def _evidence(hit: InfraHit, rule: InfraRuleMeta,
+              scrub: Callable[[str], str] | None
+              ) -> tuple[EvidenceRecord, ...] | None:
+    try:
+        excerpt = EvidenceRecord.create(
+            kind="file_excerpt",
+            locator=f"{hit.path}:{hit.line}" if hit.line else hit.path,
+            summary=_clean(hit.detail, MAX_EVIDENCE_SUMMARY_CHARS, scrub),
+            check_type="infra_rule_hit", scrub=scrub)
+        ref = EvidenceRecord.create(
+            kind="rule_ref", locator=f"rule:{hit.rule_id}",
+            summary=_clean(rule.contract, MAX_EVIDENCE_SUMMARY_CHARS, scrub),
+            check_type="infra_rule", scrub=scrub)
+    except ValueError:
+        return None
+    return (excerpt, ref)
+
+
+def finding_from_hit(hit: InfraHit, *, anchor_line: int | None,
+                     scrub: Callable[[str], str] | None = None
+                     ) -> Finding | None:
+    """Turn a hit into an ordinary pipeline finding — or drop it when its
+    evidence cannot be constructed (evidence-or-dropped)."""
+    rule = _INFRA_RULES[hit.rule_id]
+    evidence = _evidence(hit, rule, scrub)
+    if evidence is None:
+        return None
+    finding = Finding(
+        file=hit.path, line=anchor_line, severity=rule.severity,
+        category=rule.category,
+        title=_clean(hit.title, MAX_TITLE_CHARS, scrub),
+        explanation=_clean(hit.explanation, MAX_EXPLANATION_CHARS, scrub),
+        suggestion=None, confidence=rule.confidence, rule_id=hit.rule_id,
+        evidence=evidence,
+    )
+    source = ProvenanceSource(engine=STATIC_ENGINE_ID,
+                              model=_PROVENANCE_MODEL, origin="rule")
+    finding.provenance_engine = source.engine
+    finding.provenance_model = source.model
+    finding.provenance_agent = None
+    finding.provenance_origin = source.origin
+    finding.provenance_sources = (source,)
+    return finding
+
+
+# ---------------------------------------------------------------- runner
+
+MAX_INFRA_FILES = 50
+MAX_INFRA_WARNINGS = 10
+# Disk copies face the same cap the parsers enforce on text (256 KiB):
+# stat first so an oversized file is a label, never a full read.
+MAX_FILE_BYTES = 262_144
+
+log = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class InfraOutcome:
+    findings: tuple[Finding, ...] = ()
+    warnings: tuple[str, ...] = ()
+
+
+NOOP = InfraOutcome()
+
+
+def _workflow_path(path: str) -> bool:
+    low = path.replace("\\", "/").lower()
+    return low.startswith(".github/workflows/") and low.endswith((".yml", ".yaml"))
+
+
+def _is_infra_path(path: str) -> bool:
+    if _workflow_path(path):
+        return True
+    low = path.replace("\\", "/").lower()
+    return low.rsplit("/", 1)[-1].startswith("dockerfile")
+
+
+def _split_disk(text: str) -> list[str]:
+    # Split on \n only (str.splitlines() would also break on form feed,
+    # NUL-adjacent and U+2028 characters and shift every line number);
+    # read_text() already normalized CRLF/CR to \n on the way in.
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    return lines
+
+
+def _disk_copy(fd: FileDiff, repo_root: str
+               ) -> tuple[str | None, str | None]:
+    """The diff's OLD side, from disk — the documented deployment checks
+    out the PR base revision. Added files need no copy. Every read is
+    containment- and size-guarded first: an untrusted path name can never
+    drive a read outside the worktree (threat model §1/§2)."""
+    if fd.is_new or not fd.old_path:
+        return "", None
+    rel = fd.old_path
+    if not is_contained(repo_root, rel):
+        return None, "path escapes the repository"
+    path = Path(repo_root) / rel
+    try:
+        if path.stat().st_size > MAX_FILE_BYTES:
+            return None, "file exceeds size cap"
+        return path.read_text(encoding="utf-8", errors="replace"), None
+    except OSError:
+        return None, "on-disk copy unavailable"
+
+
+def _proposed_text(fd: FileDiff, disk_text: str | None
+                   ) -> tuple[str | None, str | None]:
+    """The content the PR *proposes* (new side), or a degrade label.
+
+    Added files: the diff alone carries the whole file. Modified files:
+    the on-disk copy supplies everything outside the hunks (indexed with
+    old-side numbering — in a unified diff those regions are identical on
+    both sides), the diff supplies the hunks, and every context AND
+    removed line is checked against the disk copy first. A checkout on
+    some other commit, or a diff stale against it, degrades to a label
+    instead of judging content the PR never proposed. ``(None, None)``
+    means there is nothing to judge (deleted/binary) — a silent skip.
+    """
+    if fd.is_deleted or fd.is_binary:
+        return None, None
+    if fd.is_new or not fd.old_path:
+        out: list[str] = []
+        for hunk in fd.hunks:
+            for line in hunk.lines:
+                if line.tag in ("+", " "):
+                    out.append(line.text)
+        return "\n".join(out), None
+    if not fd.hunks:
+        return None, "diff carries no hunks"
+    if disk_text is None:
+        return None, "on-disk copy unavailable"
+    disk = _split_disk(disk_text)
+    out = []
+    cursor = 1                      # next old-side line, 1-based
+    for hunk in fd.hunks:
+        # Region before the hunk, identical on both sides. old_count == 0
+        # means "insert after old_start" (git's EOF-append form, -N,0).
+        keep_end = hunk.old_start - 1 if hunk.old_count else hunk.old_start
+        if keep_end < cursor - 1:
+            return None, "hunks are not in order or overlap"
+        out.extend(disk[cursor - 1:keep_end])
+        for line in hunk.lines:
+            if line.tag == "+":
+                out.append(line.text)
+            elif line.tag in (" ", "-"):
+                # The disk copy must be the diff's OLD side: context and
+                # removed lines live at their old positions there. (Side
+                # invariant for " "; the deletion check additionally pins
+                # a modified checkout to the base revision.)
+                idx = (line.old_no or 0) - 1
+                if idx < 0 or idx >= len(disk) or disk[idx] != line.text:
+                    return None, "on-disk copy does not match the diff"
+                if line.tag == " ":
+                    out.append(line.text)
+        if hunk.old_count:
+            cursor = max(cursor, hunk.old_start + hunk.old_count)
+        else:
+            cursor = max(cursor, hunk.old_start + 1)
+    out.extend(disk[cursor - 1:])
+    return "\n".join(out), None
+
+
+def run_infra_check(*, repo_root: str, files, index=None,
+                    scrub: Callable[[str], str] | None = None
+                    ) -> InfraOutcome:
+    """Single entry point for the review pipeline (V4.6-E05-T02).
+
+    Composes proposed-content reconstruction -> schema-aware parsing ->
+    rules -> findings and **never raises**: any failure becomes one
+    warning and zero findings. No-op guarantee: with no changed
+    infrastructure file the outcome is empty, so output is byte-identical
+    (and with the ``INFRA_INTEL`` flag off — the default — the
+    orchestrator never calls this at all). ``index`` is accepted here and
+    consumed by the deploy-path context of E05-T03.
+    """
+    try:
+        return _run(repo_root, files, index, scrub)
+    except Exception as exc:  # noqa: BLE001 — opt-in feature never fails a review
+        log.warning("infra check failed: %s", type(exc).__name__)
+        return InfraOutcome(warnings=(
+            f"infra check failed ({type(exc).__name__}); skipped",))
+
+
+def _run(repo_root: str, files, index,
+         scrub: Callable[[str], str] | None) -> InfraOutcome:
+    del index  # consumed by E05-T03; part of the seam since T02
+    warnings: list[str] = []
+    findings: list[Finding] = []
+
+    def warn(msg: str) -> None:
+        warnings.append(_clean(msg, MAX_WARNING_CHARS, scrub))
+
+    line_maps = {fd.path: fd.new_line_numbers() for fd in files}
+    reviewed = 0
+    for fd in files:
+        if not _is_infra_path(fd.path) or fd.is_deleted or fd.is_binary:
+            continue
+        if (is_excluded(fd.path, SENSITIVE_EXCLUDE_GLOBS)
+                or (fd.old_path
+                    and is_excluded(fd.old_path, SENSITIVE_EXCLUDE_GLOBS))):
+            continue                      # privacy baseline: never read it
+        if reviewed >= MAX_INFRA_FILES:
+            warn(f"infra file cap ({MAX_INFRA_FILES}) reached; remaining "
+                 f"infra files not reviewed")
+            break
+        disk, err = _disk_copy(fd, repo_root)
+        if err is None:
+            text, err = _proposed_text(fd, disk)
+        else:
+            text = None
+        if text is None:
+            if err is not None:
+                warn(f"infra file not reviewed ({err}): {fd.path}")
+            continue                      # nothing proposed: silent skip
+        reviewed += 1
+        doc = (parse_workflow(text, path=fd.path) if _workflow_path(fd.path)
+               else parse_dockerfile(text, path=fd.path))
+        if not doc.ok:
+            warn(f"infra file degraded ({doc.error}): {fd.path}")
+            continue
+        hits = (_check_workflow(doc) if isinstance(doc, WorkflowDoc)
+                else _check_dockerfile(doc))
+        for hit in hits:
+            anchor = (hit.line
+                      if hit.line in line_maps.get(fd.path, ()) else None)
+            finding = finding_from_hit(hit, anchor_line=anchor, scrub=scrub)
+            if finding is not None:
+                findings.append(finding)
+    return InfraOutcome(findings=tuple(findings),
+                        warnings=tuple(warnings[:MAX_INFRA_WARNINGS]))

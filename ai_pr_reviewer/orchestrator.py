@@ -340,6 +340,18 @@ class ReviewOrchestrator:
             scrub=lambda t: _scrub(t, cfg), extra_excludes=policy.exclude)
         outcome.findings.extend(_pf)
         warnings.extend(_pw)
+        # V4.6-E05-T02: infrastructure misconfiguration checks (opt-in,
+        # default OFF via INFRA_INTEL). Findings arrive fully stamped and
+        # redacted like the architecture ones above, so they join before
+        # dedup; the runner never raises and degrades to warnings.
+        if getattr(cfg, "infra_intel", False):
+            from .infra_intel import run_infra_check
+            _infra = run_infra_check(
+                repo_root=getattr(cfg, "repo_root", None) or ".",
+                files=files, index=getattr(context, "repo_index", None),
+                scrub=lambda t: _scrub(t, cfg))
+            outcome.findings.extend(_infra.findings)
+            warnings.extend(_infra.warnings)
         findings = deduplicate(outcome.findings)
         # D4: ``max_comments`` is a *posting* limit only. ``reported`` is
         # every anchored finding this review found — the report, the health
