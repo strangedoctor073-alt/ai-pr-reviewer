@@ -52,7 +52,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterable
 
 from .index.limits import is_contained
 from .security import redact_secrets
@@ -370,3 +370,58 @@ def ingest_failures(repo_root: str, *,
             records.append(record)
 
     return tuple(records), tuple(warnings)
+
+
+# ------------------------------------------------------ V4.6-E02-T02
+# Pre/post change-window comparison (ADR-020 decision 2): SET ALGEBRA
+# over normalized signatures — relations, never verdicts. Which exact
+# failure signatures are new since the change, which pre-existing ones
+# stopped, which continue. No timestamps, no scores, no causation:
+# confidence labeling (T03) and wording (T04) happen elsewhere.
+
+@dataclass(frozen=True)
+class WindowComparison:
+    """The three set relations between the declared windows.
+
+    ``pre_count``/``post_count`` count UNIQUE signatures — the operands
+    of the algebra (records may repeat a signature; sets do not). The
+    tuples are sorted by ``(test_id, suite, error_class)`` so two runs
+    over the same records produce identical output.
+    """
+
+    new_in_post: tuple[FailureSignature, ...] = ()
+    resolved: tuple[FailureSignature, ...] = ()
+    persistent: tuple[FailureSignature, ...] = ()
+    pre_count: int = 0
+    post_count: int = 0
+
+
+def _sig_key(signature: FailureSignature) -> tuple[str, str, str]:
+    return (signature.test_id, signature.suite, signature.error_class)
+
+
+def compare_windows(records: Iterable[FailureRecord]) -> WindowComparison:
+    """Classify ingested failures into ``pre``/``post`` set relations.
+
+    Signature-level by design: a test failing with a DIFFERENT error
+    class after the change is one *resolved* old signature and one
+    *new* signature — the relations stay exact instead of pretending
+    the failure modes are interchangeable. Records whose window is
+    neither ``pre`` nor ``post`` do not participate: ingestion refuses
+    such runs, so a foreign window here means a hand-built record, and
+    guessing its placement would fabricate the comparison.
+    """
+    pre: set[FailureSignature] = set()
+    post: set[FailureSignature] = set()
+    for record in records:
+        if record.window == "pre":
+            pre.add(record.signature)
+        elif record.window == "post":
+            post.add(record.signature)
+    return WindowComparison(
+        new_in_post=tuple(sorted(post - pre, key=_sig_key)),
+        resolved=tuple(sorted(pre - post, key=_sig_key)),
+        persistent=tuple(sorted(pre & post, key=_sig_key)),
+        pre_count=len(pre),
+        post_count=len(post),
+    )

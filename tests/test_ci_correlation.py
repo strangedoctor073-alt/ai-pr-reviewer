@@ -30,7 +30,9 @@ from ai_pr_reviewer.ci_correlation import (DEFAULT_SOURCES_FILE,  # noqa: E402
                                            MAX_RAW_CHARS,
                                            MAX_RUN_ID_CHARS, MAX_RUNS,
                                            UNKNOWN_ERROR_CLASS,
-                                           FailureSignature,
+                                           FailureRecord, FailureSignature,
+                                           WindowComparison,
+                                           compare_windows,
                                            extract_test_id,
                                            ingest_failures,
                                            normalize_error_class)
@@ -516,3 +518,87 @@ def test_ci_correlation_module_is_read_only():
     # ...and the legal shapes stay legal
     assert _violations('import json\nfrom pathlib import Path\n'
                        'p.read_text(encoding="utf-8")\n') == []
+
+
+# ============================================================ V4.6-E02-T02
+# Pre/post change-window comparison: pure set algebra over signatures —
+# new_in_post / resolved / persistent, deterministic ordering, unique
+# signature counts, signature-level (not test-level) honesty, and no
+# participation from windows ingestion would have refused.
+
+def _sig(test_id: str, suite: str = "unit",
+         error: str = "OSError") -> FailureSignature:
+    return FailureSignature(test_id=test_id, suite=suite,
+                            error_class=error)
+
+
+def _rec(signature: FailureSignature, window: str = "post",
+         run_id: str = "r") -> FailureRecord:
+    return FailureRecord(run_id=run_id, window=window,
+                         signature=signature)
+
+
+def test_three_relations_are_exact_set_algebra():
+    a, b, c = _sig("tests/t.py::test_a"), _sig("tests/t.py::test_b"), \
+        _sig("tests/t.py::test_c")
+    out = compare_windows((
+        _rec(a, "pre"), _rec(b, "pre"),      # pre: a, b
+        _rec(a, "post"), _rec(c, "post"),    # post: a, c
+    ))
+    assert out.new_in_post == (c,)
+    assert out.resolved == (b,)
+    assert out.persistent == (a,)
+    assert (out.pre_count, out.post_count) == (2, 2)
+
+
+def test_same_test_new_error_class_is_resolved_plus_new():
+    """Signature-level relations: a changed failure MODE is not
+    'persistent' — the old mode stopped, the new one appeared."""
+    old = _sig("tests/t.py::test_x", error="OSError")
+    new = _sig("tests/t.py::test_x", error="ValueError")
+    out = compare_windows([_rec(old, "pre"), _rec(new, "post")])
+    assert out.new_in_post == (new,)
+    assert out.resolved == (old,)
+    assert out.persistent == ()
+
+
+def test_order_is_sorted_and_duplicates_collapse():
+    z, a, m = _sig("tests/t.py::test_z"), _sig("tests/t.py::test_a"), \
+        _sig("tests/t.py::test_m")
+    records = [_rec(z), _rec(a), _rec(m), _rec(a), _rec(z)]
+    out = compare_windows(records)
+    assert out.new_in_post == (a, m, z)      # (test_id, suite, class)
+    assert out.post_count == 3               # unique, not record count
+
+
+def test_counts_are_unique_signatures_records_repeat():
+    same = _sig("tests/t.py::test_a")
+    out = compare_windows([_rec(same, "pre"), _rec(same, "pre"),
+                           _rec(same, "post")])
+    assert (out.pre_count, out.post_count) == (1, 1)
+    assert out.persistent == (same,)
+
+
+def test_empty_input_and_foreign_windows_do_not_participate():
+    assert compare_windows(()) == WindowComparison()
+    # ingest refuses non-pre/post runs; a hand-built record with a
+    # foreign window changes nothing rather than being guessed into a
+    # relation
+    foreign = _rec(_sig("tests/t.py::test_f"), window="changelog")
+    assert compare_windows([foreign]) == WindowComparison()
+    # mixed: only declared windows land in the algebra
+    out = compare_windows([foreign, _rec(_sig("t"), "pre"),
+                           _rec(_sig("t"), "post")])
+    assert out.persistent == (_sig("t"),)
+    assert (out.pre_count, out.post_count) == (1, 1)
+
+
+def test_comparison_is_deterministic_and_frozen():
+    records = [_rec(_sig("tests/t.py::test_b"), "pre"),
+               _rec(_sig("tests/t.py::test_a"), "post"),
+               _rec(_sig("tests/t.py::test_c"), "post")]
+    forward = compare_windows(records)
+    reverse = compare_windows(list(reversed(records)))
+    assert forward == reverse
+    with pytest.raises(FrozenInstanceError):
+        forward.new_in_post = ()             # type: ignore[misc]
