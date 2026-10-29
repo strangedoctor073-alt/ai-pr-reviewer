@@ -13,7 +13,7 @@ from __future__ import annotations
 import ast
 import json
 import sys
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, fields
 from pathlib import Path
 
 import pytest
@@ -24,18 +24,30 @@ if str(ROOT) not in sys.path:
 
 from ai_pr_reviewer import ci_correlation as cc            # noqa: E402
 from ai_pr_reviewer.ci_correlation import (DEFAULT_SOURCES_FILE,  # noqa: E402
+                                           CONFIDENCE_HIGH,
+                                           CONFIDENCE_LOW,
+                                           CONFIDENCE_MEDIUM,
+                                           CONFIDENCE_UNKNOWN,
+                                           GROUND_INDEX_EDGE,
+                                           GROUND_NOT_ASSESSABLE,
+                                           GROUND_PATH_CONVENTION,
+                                           GROUND_WINDOW_ONLY,
                                            MAX_FAILURES,
                                            MAX_FAILURES_PER_RUN,
                                            MAX_IDENTITY_CHARS,
                                            MAX_RAW_CHARS,
                                            MAX_RUN_ID_CHARS, MAX_RUNS,
+                                           RELATION_NEW, RELATION_PERSISTENT,
+                                           RELATION_RESOLVED,
                                            UNKNOWN_ERROR_CLASS,
+                                           CorrelatedFailure,
                                            FailureRecord, FailureSignature,
                                            WindowComparison,
                                            compare_windows,
-                                           extract_test_id,
+                                           correlate, extract_test_id,
                                            ingest_failures,
                                            normalize_error_class)
+from ai_pr_reviewer.test_intel import TestLink, TestTaxonomy   # noqa: E402
 
 MODULE_PATH = ROOT / "ai_pr_reviewer" / "ci_correlation.py"
 
@@ -602,3 +614,183 @@ def test_comparison_is_deterministic_and_frozen():
     assert forward == reverse
     with pytest.raises(FrozenInstanceError):
         forward.new_in_post = ()             # type: ignore[misc]
+
+
+# ============================================================ V4.6-E02-T03
+# Confidence model: a closed ladder over named grounds. Code-citing
+# grounds (index_edge, path_convention) fire ONLY on real intersections
+# with the changed set; window-only/unrelated failures never gain a
+# code-citing ground; unknown error class costs exactly one step and
+# never upgrades anything. The output schema itself cannot attribute a
+# failure to a changed file — the structural half of "no unrelated
+# claims" (wording half lands with rendering in T04).
+
+def _tax(*pairs, available=True) -> TestTaxonomy:
+    return TestTaxonomy(
+        available=available,
+        links=tuple(TestLink(test=test, module=module, basis="import",
+                             confidence="medium")
+                    for test, module in pairs))
+
+
+def _new(sig: FailureSignature) -> WindowComparison:
+    return WindowComparison(new_in_post=(sig,))
+
+
+def test_index_edge_to_changed_module_is_high():
+    sig = _sig("tests/test_payments.py::test_refund")
+    out = correlate(
+        _new(sig),
+        taxonomy=_tax(("tests/test_payments.py", "src/payments.py")),
+        changed_paths=["src/payments.py"])
+    assert out == (CorrelatedFailure(relation=RELATION_NEW, signature=sig,
+                                     confidence=CONFIDENCE_HIGH,
+                                     ground=GROUND_INDEX_EDGE),)
+
+
+def test_edge_to_an_unchanged_module_contributes_nothing():
+    """An index edge that misses the changed set must not be dressed up
+    as relation: the failure falls to window-only."""
+    sig = _sig("tests/test_orders.py::test_total")
+    out = correlate(
+        _new(sig),
+        taxonomy=_tax(("tests/test_orders.py", "src/billing.py")),
+        changed_paths=["src/inventory.py"])
+    assert out[0].confidence == CONFIDENCE_LOW
+    assert out[0].ground == GROUND_WINDOW_ONLY
+
+
+def test_path_convention_match_is_medium():
+    sig = _sig("tests/test_payments.py::test_refund")
+    # convention works with NO index at all...
+    out = correlate(_new(sig), changed_paths=["src/payments.py"])
+    assert (out[0].confidence, out[0].ground) == (
+        CONFIDENCE_MEDIUM, GROUND_PATH_CONVENTION)
+    # ...and the test file itself being changed is the same ground
+    out = correlate(_new(sig),
+                    changed_paths=["tests/test_payments.py"])
+    assert (out[0].confidence, out[0].ground) == (
+        CONFIDENCE_MEDIUM, GROUND_PATH_CONVENTION)
+
+
+def test_unavailable_taxonomy_caps_at_medium():
+    sig = _sig("tests/test_payments.py::test_refund")
+    out = correlate(
+        _new(sig),
+        taxonomy=_tax(("tests/test_payments.py", "src/payments.py"),
+                      available=False),
+        changed_paths=["src/payments.py"])
+    # the edge exists in the tuple but the index reports unavailable:
+    # no edge claims — convention still holds
+    assert (out[0].confidence, out[0].ground) == (
+        CONFIDENCE_MEDIUM, GROUND_PATH_CONVENTION)
+
+
+def test_unrelated_failure_is_window_only_and_names_no_file():
+    sig = _sig("tests/test_orders.py::test_total")
+    out = correlate(_new(sig), changed_paths=["src/inventory.py"])
+    assert (out[0].confidence, out[0].ground) == (
+        CONFIDENCE_LOW, GROUND_WINDOW_ONLY)
+    # structural half of "no unrelated claims": the record vocabulary
+    # has no field that could name a changed file
+    assert {f.name for f in fields(CorrelatedFailure)} == {
+        "relation", "signature", "confidence", "ground"}
+
+
+@pytest.mark.parametrize(("case", "expected_confidence", "expected_ground"), [
+    pytest.param("edge", CONFIDENCE_MEDIUM, GROUND_INDEX_EDGE,
+                 id="high-to-medium"),
+    pytest.param("stem", CONFIDENCE_LOW, GROUND_PATH_CONVENTION,
+                 id="medium-to-low"),
+    pytest.param("window", CONFIDENCE_UNKNOWN, GROUND_WINDOW_ONLY,
+                 id="low-to-unknown"),
+    pytest.param("nopath", CONFIDENCE_UNKNOWN, GROUND_NOT_ASSESSABLE,
+                 id="floor"),
+])
+def test_unknown_error_class_downgrades_exactly_one_step(
+        case, expected_confidence, expected_ground):
+    if case == "edge":
+        sig = _sig("tests/test_payments.py::test_a",
+                   error=UNKNOWN_ERROR_CLASS)
+        kwargs = {"taxonomy": _tax(("tests/test_payments.py",
+                                     "src/payments.py"))}
+        changed = ["src/payments.py"]
+    elif case == "stem":
+        sig = _sig("tests/test_payments.py::test_a",
+                   error=UNKNOWN_ERROR_CLASS)
+        kwargs = {}
+        changed = ["src/payments.py"]
+    elif case == "window":
+        sig = _sig("tests/test_orders.py::test_a",
+                   error=UNKNOWN_ERROR_CLASS)
+        kwargs = {}
+        changed = ["src/inventory.py"]
+    else:
+        sig = _sig("tests.test_auth.AuthTests.test_login",
+                   error=UNKNOWN_ERROR_CLASS)
+        kwargs = {}
+        changed = ["src/auth.py"]
+    out = correlate(_new(sig), changed_paths=changed, **kwargs)
+    assert (out[0].confidence, out[0].ground) == (
+        expected_confidence, expected_ground)
+
+
+def test_known_error_class_is_not_downgraded():
+    sig = _sig("tests/test_payments.py::test_a", error="OSError")
+    out = correlate(_new(sig), changed_paths=["src/payments.py"])
+    assert out[0].confidence == CONFIDENCE_MEDIUM   # no penalty
+
+
+def test_not_assessable_without_a_path_or_without_a_diff():
+    dotted = _sig("tests.test_auth.AuthTests.test_login")
+    py = _sig("tests/test_auth.py::test_login")
+    out = correlate(_new(dotted),
+                    taxonomy=_tax(("tests/test_auth.py", "src/auth.py")),
+                    changed_paths=["src/auth.py"])
+    # the index maps FILES; a dotted unittest id names none — honest
+    # refusal, never a guessed mapping
+    assert (out[0].confidence, out[0].ground) == (
+        CONFIDENCE_UNKNOWN, GROUND_NOT_ASSESSABLE)
+
+    out = correlate(_new(py), changed_paths=[])
+    assert (out[0].confidence, out[0].ground) == (
+        CONFIDENCE_UNKNOWN, GROUND_NOT_ASSESSABLE)
+
+
+def test_correlate_labels_all_relations_in_deterministic_order():
+    a, b, c, d = (_sig("tests/t.py::test_a"), _sig("tests/t.py::test_b"),
+                  _sig("tests/t.py::test_c"), _sig("tests/t.py::test_d"))
+    comparison = compare_windows([
+        _rec(a, "pre"), _rec(c, "pre"),          # pre: a, c
+        _rec(a, "post"), _rec(b, "post"),        # post: a, b, d
+        _rec(d, "post"),
+    ])
+    out = correlate(comparison, changed_paths=["src/nothing_match.py"])
+    assert [f.relation for f in out] == [
+        RELATION_NEW, RELATION_NEW,          # new: b, d (sorted)
+        RELATION_RESOLVED,                   # c
+        RELATION_PERSISTENT,                 # a
+    ]
+    assert [f.signature for f in out] == [b, d, c, a]
+    # determinism: same inputs, same output — including argument order
+    assert correlate(comparison, changed_paths=["src/nothing_match.py"]) \
+        == out
+    # no diff: nothing to relate to, everything not-assessable
+    assert correlate(comparison) == correlate(
+        comparison, changed_paths=[])
+    assert all(f.confidence == CONFIDENCE_UNKNOWN for f in
+               correlate(comparison, changed_paths=[]))
+
+
+def test_correlate_tolerates_hostile_changed_path_shapes():
+    sig = _sig("tests/test_payments.py::test_a")
+    out = correlate(_new(sig), changed_paths=["./src/payments.py", 42,
+                                              None, "src\\payments.py"])
+    assert out[0].confidence == CONFIDENCE_MEDIUM   # normalized + filtered
+
+
+def test_correlated_failure_is_frozen():
+    out = correlate(_new(_sig("tests/t.py::test_a")),
+                    changed_paths=["src/x.py"])
+    with pytest.raises(FrozenInstanceError):
+        out[0].confidence = "high"            # type: ignore[misc]

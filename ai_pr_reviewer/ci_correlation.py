@@ -52,10 +52,13 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import TYPE_CHECKING, Callable, Iterable
 
 from .index.limits import is_contained
 from .security import redact_secrets
+
+if TYPE_CHECKING:
+    from .test_intel import TestTaxonomy
 
 DEFAULT_SOURCES_FILE = ".ai-pr-reviewer-ci.json"
 
@@ -425,3 +428,162 @@ def compare_windows(records: Iterable[FailureRecord]) -> WindowComparison:
         pre_count=len(pre),
         post_count=len(post),
     )
+
+
+# ------------------------------------------------------ V4.6-E02-T03
+# Confidence model (ADR-020 decision 3): a CLOSED ladder over named
+# grounds. Grounds that cite changed code may fire only on a real
+# intersection — an index edge from the failing test file to a changed
+# module, or a path/stem convention match against the changed set.
+# Everything else is window-only or not-assessable.
+#
+# "No unrelated claims" is structural here: CorrelatedFailure carries
+# no field that attributes a failure to a changed file, so the only
+# outputs that can support such wording in T04 are the two code-citing
+# grounds — and those require the intersections tests pin below.
+# Confidence can only move DOWN (unknown error class costs one step),
+# never up: missing data never upgrades a claim.
+
+CONFIDENCE_HIGH = "high"
+CONFIDENCE_MEDIUM = "medium"
+CONFIDENCE_LOW = "low"
+CONFIDENCE_UNKNOWN = "unknown"
+CONFIDENCE_LADDER = (CONFIDENCE_HIGH, CONFIDENCE_MEDIUM, CONFIDENCE_LOW,
+                     CONFIDENCE_UNKNOWN)
+
+RELATION_NEW = "new_in_post"
+RELATION_RESOLVED = "resolved"
+RELATION_PERSISTENT = "persistent"
+
+GROUND_INDEX_EDGE = "index_edge"
+GROUND_PATH_CONVENTION = "path_convention"
+GROUND_WINDOW_ONLY = "window_only"
+GROUND_NOT_ASSESSABLE = "not_assessable"
+
+
+@dataclass(frozen=True)
+class CorrelatedFailure:
+    """One signature, its window relation, and its confidence LABEL.
+
+    The fields are deliberately the entire vocabulary: relation,
+    signature, confidence, ground. There is no "culprit file" field —
+    code attribution is only ever wording over an ``index_edge`` or
+    ``path_convention`` ground (tests enforce both directions: the
+    grounds fire on real intersections, and the schema cannot express
+    a claim on its own).
+    """
+
+    relation: str
+    signature: FailureSignature
+    confidence: str
+    ground: str
+
+
+def _test_file_of(test_id: str) -> str | None:
+    """The file path a test_id names, or ``None`` (not assessable).
+
+    Accepts ``path::selector`` ids and path-like ids without a
+    selector; rejects dotted unittest ids, bare ``test_*`` names and
+    anything whitespace- or path-ambiguous — mapping those to a file
+    would be a guess, and guesses cannot ground a confidence label.
+    """
+    if "::" in test_id:
+        candidate = test_id.split("::", 1)[0]
+    elif "/" in test_id:
+        candidate = test_id
+    else:
+        return None
+    candidate = candidate.replace("\\", "/").removeprefix("./")
+    if not candidate or " " in candidate:
+        return None
+    if "/" not in candidate and "." not in candidate:
+        return None
+    return candidate
+
+
+def _path_stem(path: str) -> str:
+    """Basename without extension, minus test-file decoration.
+
+    ``tests/test_payments.py`` and ``src/payments.py`` both stem to
+    ``payments`` — the same naming convention ``test_intel`` uses for
+    its ``naming``-basis links, applied here as an independent
+    convention ground (it works even when the index is absent).
+    """
+    base = path.rsplit("/", 1)[-1]
+    stem = base.rsplit(".", 1)[0] if "." in base else base
+    if stem.startswith("test_"):
+        stem = stem[5:]
+    elif stem.endswith("_test"):
+        stem = stem[:-5]
+    elif stem.startswith("Test") and len(stem) > 4:
+        stem = stem[4:]
+    if stem.endswith(".test") or stem.endswith(".spec"):
+        stem = stem.rsplit(".", 1)[0]
+    return stem
+
+
+def _downgrade(level: str) -> str:
+    """Exactly one step down the ladder; ``unknown`` is the floor."""
+    index = CONFIDENCE_LADDER.index(level)
+    return CONFIDENCE_LADDER[min(index + 1, len(CONFIDENCE_LADDER) - 1)]
+
+
+def _assess(signature: FailureSignature, *, edges: dict[str, set[str]],
+            changed: frozenset[str], changed_stems: frozenset[str]
+            ) -> tuple[str, str]:
+    test_file = _test_file_of(signature.test_id)
+    if not changed or test_file is None:
+        # nothing to relate to, or no path to relate from: the ladder
+        # refuses to guess in both directions
+        confidence, ground = CONFIDENCE_UNKNOWN, GROUND_NOT_ASSESSABLE
+    elif edges.get(test_file, set()) & changed:
+        confidence, ground = CONFIDENCE_HIGH, GROUND_INDEX_EDGE
+    elif test_file in changed \
+            or (len(_path_stem(test_file)) >= 2
+                and _path_stem(test_file) in changed_stems):
+        confidence, ground = CONFIDENCE_MEDIUM, GROUND_PATH_CONVENTION
+    else:
+        # the diff is real and the test file is known, but nothing ties
+        # them together: relation is timing (window) ONLY
+        confidence, ground = CONFIDENCE_LOW, GROUND_WINDOW_ONLY
+    if signature.error_class == UNKNOWN_ERROR_CLASS:
+        confidence = _downgrade(confidence)
+    return confidence, ground
+
+
+def correlate(comparison: WindowComparison, *,
+              taxonomy: "TestTaxonomy | None" = None,
+              changed_paths: Iterable[str] = ()
+              ) -> tuple[CorrelatedFailure, ...]:
+    """Label every compared signature with confidence + ground.
+
+    Deterministic: relation order is new_in_post, resolved, persistent
+    (each already sorted by signature), so two runs over the same
+    inputs are identical. The taxonomy contributes edges only while it
+    reports ``available`` — an absent index caps confidence at medium
+    (convention still holds, edge claims do not).
+    """
+    edges: dict[str, set[str]] = {}
+    if taxonomy is not None and taxonomy.available:
+        for link in taxonomy.links:
+            edges.setdefault(link.test, set()).add(link.module)
+    changed = frozenset(
+        p.replace("\\", "/").removeprefix("./")
+        for p in changed_paths if isinstance(p, str))
+    changed_stems = frozenset(
+        stem for stem in (_path_stem(p) for p in changed) if len(stem) >= 2)
+
+    out: list[CorrelatedFailure] = []
+    for relation, signatures in ((RELATION_NEW, comparison.new_in_post),
+                                 (RELATION_RESOLVED, comparison.resolved),
+                                 (RELATION_PERSISTENT,
+                                  comparison.persistent)):
+        for signature in signatures:
+            confidence, ground = _assess(signature, edges=edges,
+                                         changed=changed,
+                                         changed_stems=changed_stems)
+            out.append(CorrelatedFailure(relation=relation,
+                                         signature=signature,
+                                         confidence=confidence,
+                                         ground=ground))
+    return tuple(out)
