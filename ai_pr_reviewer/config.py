@@ -204,6 +204,14 @@ class Config:
     # sign-off (plan §F). Absent config is a true NOOP even when ON.
     incident_intel: bool = False
 
+    # V4.6-E07-T05: internal event bus (in-process dispatch). Default OFF;
+    # plain env var (EVENT_BUS), deliberately not an INPUT_* action input
+    # -- enabling it activates a new delivery seam, which needs human
+    # sign-off (plan §F). Flag OFF is the synchronous fallback: emit()
+    # still validates and redacts, but no bus exists and nothing is
+    # dispatched (bus-disabled equivalence).
+    event_bus: bool = False
+
 
 def load_config(args) -> Config:
     _warn_unknown_inputs()
@@ -270,6 +278,8 @@ def load_config(args) -> Config:
     cfg.infra_intel = _bool_field(None, "INFRA_INTEL", default=False)
     # V4.6-E06-T03: no CLI flag and no INPUT_* on purpose (see the field).
     cfg.incident_intel = _bool_field(None, "INCIDENT_INTEL", default=False)
+    # V4.6-E07-T05: no CLI flag and no INPUT_* on purpose (see the field).
+    cfg.event_bus = _bool_field(None, "EVENT_BUS", default=False)
     return cfg
 
 

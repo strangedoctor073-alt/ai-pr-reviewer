@@ -1006,3 +1006,186 @@ def test_events_package_never_imports_public_contract_modules():
         hit = any(any(p in forbidden for p in n.split("."))
                   for n in names)
         assert hit is expected
+
+
+# ============================================================ V4.6-E07-T05
+# Module-level emit() with the EVENT_BUS flag (plain env, default OFF),
+# synchronous delivery, bus-disabled equivalence, and the negative
+# architecture pin: this generation adds ZERO queue/worker symbols.
+
+from ai_pr_reviewer.cli import parse_args                    # noqa: E402
+from ai_pr_reviewer.config import Config, load_config        # noqa: E402
+from ai_pr_reviewer.events import emit as emit_module        # noqa: E402
+from ai_pr_reviewer.events.emit import bus_for, emit, get_bus  # noqa: E402
+
+# Pre-existing threading/worker use, pinned as the exact baseline: the
+# plan's zero-queue/worker criterion is a NEW-occurrence rule (removing
+# someone else's sanctioned thread is out of scope for this epic, too —
+# flag it, don't fix it). Any entry outside this set fails the test;
+# queue/asyncio/multiprocessing currently have ZERO occurrences, so the
+# first one anywhere is a new occurrence by construction.
+_WORKER_BASELINE = frozenset({
+    ("ai_pr_reviewer/circuit.py", "import threading"),
+    ("ai_pr_reviewer/history/git_read.py", "call Thread"),
+    ("ai_pr_reviewer/history/git_read.py", "import threading"),
+    ("ai_pr_reviewer/orchestration/executor.py", "call ThreadPoolExecutor"),
+    ("ai_pr_reviewer/orchestration/executor.py", "import concurrent"),
+    ("ai_pr_reviewer/provider_registry.py", "import threading"),
+    ("dashboard/app.py", "import threading"),
+    ("dashboard/feedback_store.py", "import threading"),
+    ("dashboard/storage.py", "import threading"),
+})
+
+_WORKER_SYMBOLS = {"Thread", "ThreadPoolExecutor", "ProcessPoolExecutor",
+                   "Queue", "SimpleQueue", "create_task", "ensure_future",
+                   "Process"}
+_WORKER_MODULES = {"threading", "queue", "asyncio", "multiprocessing",
+                   "concurrent"}
+
+
+def _worker_scan(rel: str, source: str) -> set[tuple[str, str]]:
+    import ast
+    hits: set[tuple[str, str]] = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            names = [a.name for a in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            names = [node.module or ""]
+        else:
+            names = []
+        for name in names:
+            top = name.split(".")[0]
+            if top in _WORKER_MODULES:
+                hits.add((rel, f"import {top}"))
+        if isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Name) and func.id in _WORKER_SYMBOLS:
+                hits.add((rel, f"call {func.id}"))
+            elif isinstance(func, ast.Attribute) \
+                    and func.attr in _WORKER_SYMBOLS:
+                hits.add((rel, f"call {func.attr}"))
+    return hits
+
+
+def test_generation_adds_zero_queue_or_worker_symbols():
+    hits: set[tuple[str, str]] = set()
+    for pkg in ("ai_pr_reviewer", "dashboard"):
+        for path in sorted((ROOT / pkg).rglob("*.py")):
+            rel = path.relative_to(ROOT).as_posix()
+            hits |= _worker_scan(rel, path.read_text(encoding="utf-8"))
+    new = hits - _WORKER_BASELINE
+    assert new == set(), f"new queue/worker symbols: {sorted(new)}"
+
+    # self-check: the scanner sees what it exists to see
+    assert _worker_scan("x.py", "import json\n") == set()
+    assert _worker_scan("x.py", "import threading\n") == {
+        ("x.py", "import threading")}
+    assert _worker_scan("x.py", "import asyncio\n") == {
+        ("x.py", "import asyncio")}
+    assert _worker_scan("x.py", "ThreadPoolExecutor(max_workers=2)\n") == {
+        ("x.py", "call ThreadPoolExecutor")}
+    # a package NAME that mentions concurrency is not an import of it
+    assert _worker_scan(
+        "x.py", "import ai_pr_reviewer.orchestration\n") == set()
+
+
+def test_emit_module_itself_is_free_of_queue_worker_io_symbols():
+    source = (ROOT / "ai_pr_reviewer" / "events" / "emit.py").read_text(
+        encoding="utf-8")
+    assert _violations(source) == []
+
+
+def _cfg(enabled: bool) -> Config:
+    return Config(repo="acme/api", pr_number=1, severity_threshold="low",
+                  max_comments=20, event_bus=enabled)
+
+
+def test_event_bus_flag_is_plain_env_default_off(monkeypatch):
+    monkeypatch.delenv("EVENT_BUS", raising=False)
+    assert load_config(parse_args([])).event_bus is False
+
+    monkeypatch.setenv("EVENT_BUS", "true")
+    assert load_config(parse_args([])).event_bus is True
+
+    # deliberately NOT an action input: INPUT_* must not enable it
+    monkeypatch.delenv("EVENT_BUS", raising=False)
+    monkeypatch.setenv("INPUT_EVENT_BUS", "1")
+    assert load_config(parse_args([])).event_bus is False
+
+    # and no CLI flag exists
+    with pytest.raises(SystemExit):
+        parse_args(["--event-bus"])
+
+
+def test_disabled_emit_is_zero_surface_even_with_garbage_input(
+        monkeypatch):
+    monkeypatch.setattr(emit_module, "_BUS", None)
+    cfg = _cfg(False)
+    assert bus_for(cfg) is None              # nothing to subscribe to
+    # a benign event changes no state at all
+    assert emit(_event(payload={"ok": 1}), cfg=cfg) == []
+    assert get_bus() is None                 # no singleton was created
+    # safety still runs when disabled: labels come back, dispatch never
+    warnings = emit({"schema_version": "v9"}, cfg=cfg)
+    assert warnings and warnings[0].startswith("event dropped (")
+    assert get_bus() is None
+
+
+def test_enabled_emit_is_synchronous_and_reports_backpressure(
+        monkeypatch):
+    monkeypatch.setattr(emit_module, "_BUS", None)
+    cfg = _cfg(True)
+    bus = bus_for(cfg)
+    assert isinstance(bus, EventBus)
+    assert bus_for(cfg) is bus               # cached singleton
+    assert get_bus() is bus
+
+    seen: list[str] = []
+
+    def hungry(ev):
+        seen.append(ev.event_id)
+        if ev.event_id == "seed":
+            for i in range(MAX_PENDING_EVENTS + 6):
+                emit(_event(event_id=f"f{i}"), cfg=cfg)  # re-entrant entry
+
+    bus.subscribe(hungry)
+    warnings = emit(_event(event_id="seed"), cfg=cfg)
+    # synchronous: delivery already happened when emit() returned
+    assert seen[0] == "seed"
+    assert len(seen) == 1 + MAX_PENDING_EVENTS
+    assert bus.stats.dropped == 6
+    assert warnings == ["event bus dropped 6 pending event(s) "
+                        "(backpressure)"]
+
+
+def test_bus_disabled_equivalence_matches_empty_bus(monkeypatch):
+    """Flag OFF ≡ flag ON with zero subscribers: identical warnings,
+    zero deliveries either way — disabling the bus changes nothing
+    observable."""
+    monkeypatch.setattr(emit_module, "_BUS", None)
+    off_cfg, on_cfg = _cfg(False), _cfg(True)
+
+    events = [_event(event_id=f"e{i}", payload={"i": i}) for i in range(3)]
+    off_warnings = [emit(ev, cfg=off_cfg) for ev in events]
+    bus = bus_for(on_cfg)                    # enabled, NO subscriber yet
+    assert bus is not None and bus.subscriber_count == 0
+    on_warnings = [emit(ev, cfg=on_cfg) for ev in events]
+    assert off_warnings == on_warnings == [[], [], []]
+    # equivalence is about what anyone SUBSCRIBED can observe: envelopes
+    # were processed (stats.events counts them) but nothing was DELIVERED
+    stats = bus.stats.to_dict()
+    assert stats["deliveries"] == 0
+    assert stats["dropped"] == 0 and stats["quarantined"] == 0
+
+    # hostile input: byte-identical labels with the bus off or on
+    hostile = {"schema_version": "v9"}
+    assert emit(hostile, cfg=off_cfg) == emit(hostile, cfg=on_cfg)
+
+    # and once a subscriber EXISTS, flag OFF still delivers nothing:
+    # the flag gates the entry, not just bus construction
+    seen: list[str] = []
+    bus.subscribe(lambda ev: seen.append(ev.event_id))
+    assert emit(_event(event_id="late"), cfg=off_cfg) == []
+    assert seen == []
+    assert emit(_event(event_id="late"), cfg=on_cfg) == []
+    assert seen == ["late"]                 # flag ON does deliver
