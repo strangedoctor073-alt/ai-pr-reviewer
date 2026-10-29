@@ -335,3 +335,170 @@ def test_schema_module_stays_pure_no_io_no_threads():
     assert _violations("import queue\nqueue.Queue()\n")
     assert _violations("open('f')\n")
     assert not _violations("import json\njson.dumps({})\n")
+
+
+# ============================================================ V4.6-E07-T02
+# In-process dispatcher: bounded pending buffer, backpressure (drop-newest,
+# counted), FIFO non-recursive delivery, handler quarantine. Zero threads,
+# zero queue-module use — plain lists only.
+
+from ai_pr_reviewer.events.bus import (MAX_DRAIN_STEPS,      # noqa: E402
+                                       MAX_PENDING_EVENTS,
+                                       MAX_SUBSCRIBERS,
+                                       EventBus)
+
+BUS_MODULE_PATH = ROOT / "ai_pr_reviewer" / "events" / "bus.py"
+
+
+def test_fan_out_is_fifo_in_subscription_order():
+    bus = EventBus()
+    order: list[tuple[str, str]] = []
+    bus.subscribe(lambda ev: order.append(("a", ev.event_id)))
+    bus.subscribe(lambda ev: order.append(("b", ev.event_id)))
+    bus.emit(_event(event_id="e1"))
+    bus.emit(_event(event_id="e2"))
+    assert order == [("a", "e1"), ("b", "e1"), ("a", "e2"), ("b", "e2")]
+    assert bus.pending_count == 0
+    assert bus.stats.to_dict() == {"events": 2, "deliveries": 4,
+                                   "dropped": 0, "quarantined": 0}
+
+
+def test_duplicate_subscription_is_idempotent_and_unsubscribe_is_safe():
+    bus = EventBus()
+    seen: list[str] = []
+
+    def handler(ev):
+        seen.append(ev.event_id)
+
+    bus.subscribe(handler)
+    bus.subscribe(handler)
+    assert bus.subscriber_count == 1
+
+    bus.emit(_event(event_id="e1"))
+    assert seen == ["e1"]
+
+    bus.unsubscribe(handler)
+    bus.unsubscribe(handler)                 # unknown handler: no-op
+    assert bus.subscriber_count == 0
+    bus.emit(_event(event_id="e2"))
+    assert seen == ["e1"]
+
+
+def test_subscriber_cap_is_a_refusal():
+    bus = EventBus()
+    handlers = []
+
+    def make(i):
+        def handler(ev):
+            pass
+        handlers.append(handler)
+        return handler
+
+    for _ in range(MAX_SUBSCRIBERS):
+        bus.subscribe(make(0))
+    assert bus.subscriber_count == MAX_SUBSCRIBERS
+    with pytest.raises(ValueError, match="subscriber cap"):
+        bus.subscribe(make(0))
+
+    with pytest.raises(TypeError, match="callable"):
+        bus.subscribe("not callable")
+
+
+def test_bus_only_accepts_validated_envelopes():
+    bus = EventBus()
+    with pytest.raises(ValueError, match="EventEnvelope"):
+        bus.emit("review.started")
+    with pytest.raises(ValueError, match="EventEnvelope"):
+        bus.emit({"event_type": "review.started"})
+
+
+def test_reentrant_emit_is_fifo_and_never_recurses():
+    bus = EventBus()
+    seen: list[str] = []
+    depth = [0]
+    max_depth = [0]
+
+    def handler(ev):
+        depth[0] += 1
+        max_depth[0] = max(max_depth[0], depth[0])
+        seen.append(ev.event_id)
+        if ev.event_id == "first":
+            bus.emit(_event(event_id="second"))
+        depth[0] -= 1
+
+    bus.subscribe(handler)
+    bus.emit(_event(event_id="first"))
+    # the re-entrant event is buffered and delivered after the current
+    # dispatch completes — delivery depth is always 1
+    assert seen == ["first", "second"]
+    assert max_depth[0] == 1
+    assert bus.pending_count == 0
+
+
+def test_backpressure_drops_newest_and_counts_exactly():
+    bus = EventBus()
+    seen: list[str] = []
+    flooded = [False]
+
+    def handler(ev):
+        if not flooded[0]:
+            flooded[0] = True
+            for i in range(MAX_PENDING_EVENTS + 6):
+                bus.emit(_event(event_id=f"flood-{i}"))
+        else:
+            seen.append(ev.event_id)
+
+    bus.subscribe(handler)
+    bus.emit(_event(event_id="seed"))
+    # buffer held MAX_PENDING_EVENTS; the 6 newest were dropped+counted
+    assert bus.stats.dropped == 6
+    assert bus.pending_count == 0
+    assert len(seen) == MAX_PENDING_EVENTS
+    assert seen[0] == "flood-0"
+
+
+def test_raising_handler_is_quarantined_and_delivery_continues():
+    bus = EventBus()
+    good: list[str] = []
+    bad_calls: list[str] = []
+
+    def bad(ev):
+        bad_calls.append(ev.event_id)
+        raise RuntimeError("boom")
+
+    def ok(ev):
+        good.append(ev.event_id)
+
+    bus.subscribe(bad)
+    bus.subscribe(ok)
+    bus.emit(_event(event_id="e1"))
+    # the failure never reached the emitter, and `ok` still got the event
+    assert good == ["e1"]
+    assert bus.stats.quarantined == 1
+    assert bus.subscriber_count == 1
+
+    bus.emit(_event(event_id="e2"))
+    assert bad_calls == ["e1"]               # quarantined: never again
+    assert good == ["e1", "e2"]
+    assert bus.stats.quarantined == 1
+    assert bus.stats.deliveries == 2         # only successful invocations
+
+
+def test_emit_work_is_bounded_with_a_self_feeding_handler():
+    bus = EventBus()
+
+    def chatty(ev):
+        bus.emit(_event(event_id=(ev.event_id + "x")[:60]))
+
+    bus.subscribe(chatty)
+    bus.emit(_event(event_id="s"))
+    # one emit() ran a bounded slice of work, then returned with the
+    # re-fed event still buffered — no livelock, no unbounded growth
+    assert bus.stats.events == MAX_DRAIN_STEPS
+    assert bus.pending_count == 1
+    assert bus.stats.dropped == 0            # one in, one out: never full
+
+
+def test_bus_module_stays_free_of_queue_worker_thread_symbols():
+    assert _violations(BUS_MODULE_PATH.read_text(encoding="utf-8")) == []
+    assert _violations("import queue\n")     # self-check (shared scanner)

@@ -9,13 +9,20 @@ exit criterion).
 The event log is internal test/diagnostic data; it is never part of the
 public report contract (report JSON stays additive-only).
 """
+from .bus import (MAX_DRAIN_STEPS, MAX_PENDING_EVENTS, MAX_SUBSCRIBERS,
+                   BusStats, EventBus)
 from .schema import (MAX_PAYLOAD_JSON_CHARS, SCHEMA_VERSION,
                      SUPPORTED_SCHEMA_VERSIONS, EventEnvelope, make_event,
                      validate_event)
 
 __all__ = [
+    "BusStats",
+    "EventBus",
     "EventEnvelope",
+    "MAX_DRAIN_STEPS",
     "MAX_PAYLOAD_JSON_CHARS",
+    "MAX_PENDING_EVENTS",
+    "MAX_SUBSCRIBERS",
     "SCHEMA_VERSION",
     "SUPPORTED_SCHEMA_VERSIONS",
     "make_event",
