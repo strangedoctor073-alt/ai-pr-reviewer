@@ -502,3 +502,159 @@ def test_emit_work_is_bounded_with_a_self_feeding_handler():
 def test_bus_module_stays_free_of_queue_worker_thread_symbols():
     assert _violations(BUS_MODULE_PATH.read_text(encoding="utf-8")) == []
     assert _violations("import queue\n")     # self-check (shared scanner)
+
+
+# ============================================================ V4.6-E07-T03
+# Redaction-on-emit + schema validation at one chokepoint: every string
+# leaving through an event is scrubbed, invalid/unredactable events are
+# DROPPED with content-free labels, and deliver() never raises.
+
+from ai_pr_reviewer.events.redact import deliver, redact_event  # noqa: E402
+
+REDACT_MODULE_PATH = ROOT / "ai_pr_reviewer" / "events" / "redact.py"
+
+# One credential per redact_secrets pattern family (same corpus discipline
+# as the incident/infra tickets): none may reach a subscriber.
+LEAK_CORPUS = {
+    "aws": "AKIA" + "ABCDEFGHIJKLMNOP",
+    "gh": "ghp_" + "Abcdefghijklmnopqrstuvwxyz012345",
+    "sk": "sk-" + "abcdefghijkmnopqrstuvwxyz012345",
+    "slack": "xoxb-abcdefghij-1234567890",
+    "google": "AIza" + "SyA" * 10 + "abc",
+    "bearer": "bearer " + "A" * 30,
+    "kv": "password: hunter2hunter2",
+    "db": "postgres://user:secretpass99@db:5432/x",
+}
+
+
+def test_free_text_fields_are_redacted_before_dispatch():
+    bus = EventBus()
+    received: list[EventEnvelope] = []
+    bus.subscribe(received.append)
+
+    payload = {f"field_{i}": tok for i, tok in enumerate(LEAK_CORPUS.values())}
+    payload["ghp_Abcdefghijklmnopqrstuvwxyz012345"] = "key token"  # token key
+    event = _event(subject=f"leak {' '.join(LEAK_CORPUS.values())}",
+                   payload=payload)
+
+    assert deliver(bus, event) is None
+    assert len(received) == 1
+    got = received[0]
+    blob = got.subject + str(got.payload)
+    for tok in LEAK_CORPUS.values():
+        assert tok not in blob
+    assert "[REDACTED]" in got.subject
+    assert "[REDACTED]" in got.payload          # the token key collapsed too
+    # the delivered envelope still satisfies the schema (replay contract)
+    assert validate_event(got.to_dict()) == got
+    # ...and the caller's original event was never mutated
+    assert LEAK_CORPUS["aws"] in event.subject
+
+
+def test_configured_scrub_layers_after_pattern_redaction():
+    token = "hunter2hunter2hunter2"     # matches no redact_secrets pattern
+    event = _event(payload={"secret": token},
+                   provenance=ProvenanceSource(engine="static",
+                                               model=token))
+    # pattern redaction alone leaves the configured credential alone...
+    assert redact_event(event).payload["secret"] == token
+    # ...the scrub layer removes it from payload AND provenance
+    got = redact_event(event,
+                       scrub=lambda t: t.replace(token, "[REDACTED]"))
+    assert got.payload["secret"] == "[REDACTED]"
+    assert got.provenance.model == "[REDACTED]"
+
+
+def test_credential_shaped_closed_vocab_field_is_dropped_not_emitted():
+    """A token that VALIDLY builds (source format allows alnum) must be
+    refused after redaction, because '[REDACTED]' is not a valid source:
+    drop-with-label beats emitting it unredacted."""
+    bus = EventBus()
+    received: list[EventEnvelope] = []
+    bus.subscribe(received.append)
+
+    event = make_event("review.started", source=LEAK_CORPUS["aws"],
+                       event_id="e1",
+                       timestamp="2026-01-15T10:00:00+00:00")
+    label = deliver(bus, event)
+    assert isinstance(label, str)
+    assert label.startswith("event dropped (")
+    assert LEAK_CORPUS["aws"] not in label       # content-free label
+    assert received == []                        # nothing left unredacted
+
+
+def test_deliver_accepts_raw_dicts_through_schema_validation():
+    bus = EventBus()
+    received: list[EventEnvelope] = []
+    bus.subscribe(received.append)
+    raw = _event(payload={"path": "src/app.py"}).to_dict()
+    assert deliver(bus, raw) is None
+    assert len(received) == 1
+    assert received[0].payload == {"path": "src/app.py"}
+
+
+def test_deliver_never_raises_and_labels_do_not_echo_content():
+    bus = EventBus()
+    received: list[EventEnvelope] = []
+    bus.subscribe(received.append)
+
+    good = _event().to_dict()
+    unknown_version = dict(good, schema_version="v9",
+                           payload={"marker": "hunter2"})
+    missing = {"schema_version": "v1"}
+    hostile_payload = dict(good, payload={"v": b"bytes-MARKER-01"})
+    deep: dict = {"leaf": 1}
+    for _ in range(8):
+        deep = {"n": deep}
+
+    for bad in ([], "event", 7, None, {}, unknown_version, missing,
+                hostile_payload, dict(good, payload=[1, 2]),
+                dict(good, payload={"v": deep}),
+                dict(good, event_type="Bad Type"),
+                dict(good, timestamp="not-a-date")):
+        label = deliver(bus, bad)
+        assert isinstance(label, str) and label.startswith("event dropped (")
+        # no untrusted content may travel in the warning
+        assert "hunter2" not in label and "MARKER" not in label
+    assert received == []                        # every refusal dropped
+
+
+def test_hex_runs_in_payload_are_redacted_like_report_output():
+    """Deliberate: subscribers see post-redaction content only, so a
+    40-hex SHA in a payload is treated exactly like report output."""
+    bus = EventBus()
+    received: list[EventEnvelope] = []
+    bus.subscribe(received.append)
+    sha = "a" * 40
+    assert deliver(bus, _event(payload={"head_sha": sha,
+                                        "msg": f"change {sha} done"})) is None
+    assert received[0].payload["head_sha"] == "[REDACTED]"
+    assert sha not in received[0].payload["msg"]
+
+
+def test_redaction_is_identity_for_clean_events_and_idempotent():
+    event = _event(payload={"path": "src/app.py", "count": 2})
+    once = redact_event(event)
+    assert once == event                         # clean content unchanged
+    assert redact_event(once) == once            # idempotent
+
+
+def test_payload_key_collision_after_redaction_is_a_refusal():
+    tok_a = "ghp_" + "Abcdefghijklmnopqrstuvwxyz012345"
+    tok_b = "ghp_ZYXWVUTSRQPONMLKJIHGFEDCBA9876543210"
+    event = _event(payload={tok_a: 1, tok_b: 2})
+    with pytest.raises(ValueError, match="collision after redaction"):
+        redact_event(event)
+    bus = EventBus()
+    assert deliver(bus, event) == \
+        "event dropped (event payload key collision after redaction)"
+
+
+def test_bus_disabled_path_still_validates_and_labels():
+    # bus=None: no dispatch attempted, the safety half still runs
+    assert deliver(None, _event(payload={"ok": 1})) is None
+    assert isinstance(deliver(None, {"schema_version": "v9"}), str)
+
+
+def test_redact_module_stays_free_of_queue_worker_io_symbols():
+    assert _violations(REDACT_MODULE_PATH.read_text(encoding="utf-8")) == []
