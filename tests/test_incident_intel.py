@@ -632,3 +632,148 @@ def test_hook_end_to_end_with_real_config(tmp_path, monkeypatch):
     assert len(incident) == 1
     assert incident[0].file == "a.py"                # a changed file (FULL_DIFF)
     assert not [x for x in result.warnings if "incident check failed" in x]
+
+
+# ============================================================ V4.6-E06-T04
+# Read-only boundary + absent-config no-surface. The T01 scan covers the
+# module's read-only shape; this ticket pins the FINAL module (post-T03)
+# against writes as well, and proves flag-ON-without-config changes
+# nothing at all.
+
+# Write-shaped attribute calls the module must never make. ``dump`` (the
+# streaming form) is banned while ``dumps`` stays legal; ``replace`` is
+# NOT banned (str.replace is pure, Path.replace would be a rename -- the
+# bare-name call scan plus this list keeps the line where ambiguity starts).
+_WRITE_ATTR_CALLS = {"write_text", "write_bytes", "mkdir", "rmdir",
+                     "unlink", "rename", "remove", "touch", "truncate",
+                     "dump", "urlopen"}
+
+
+def _t04_violations(source: str) -> list[str]:
+    """Final-module contract: the T01 read-only scan PLUS every outbound
+    write shape (pathlib writes, directory creation, deletes, renames,
+    streaming json.dump, url opening)."""
+    hits = _violations(source)
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+                and node.func.attr in _WRITE_ATTR_CALLS:
+            hits.append(f"call {node.func.attr}()")
+    return hits
+
+
+def test_final_module_is_read_only_boundary():
+    source = MODULE_PATH.read_text(encoding="utf-8")
+    assert _t04_violations(source) == []
+    # the sanctioned read paths ARE present
+    assert "path.read_text(" in source
+    assert "json.loads(" in source
+
+    # self-check: the scan flags every write/network shape it exists to catch
+    assert _t04_violations("path.write_text('x')\n")
+    assert _t04_violations("json.dump(obj, fh)\n")
+    assert _t04_violations("os.remove('f')\n")
+    assert _t04_violations("Path('d').mkdir()\n")
+    assert _t04_violations("urllib.request.urlopen('http://x')\n")
+    assert _violations("import urllib.request\n")
+    # ...and legal shapes stay legal
+    assert not _t04_violations("json.dumps(obj)\n")
+    assert not _t04_violations("path.read_text(encoding='utf-8')\n")
+    assert not _t04_violations("text.replace('a', 'b')\n")
+    assert not _t04_violations("import re\nre.compile('x')\n")
+
+
+def test_no_builtin_open_at_runtime(tmp_path, monkeypatch):
+    """Runtime complement to the AST scan: while a configured ingest runs,
+    any direct ``open()`` call is a hard failure (reads go through
+    Path.read_text -> io.open, which is a DIFFERENT binding -- this bomb
+    pins that the module never reaches for the builtin)."""
+    import builtins
+
+    import json
+    (tmp_path / "incidents").mkdir()
+    (tmp_path / "incidents" / "export.json").write_text(
+        json.dumps({"incidents": [{"id": "INC-1",
+                                   "paths": ["src/payments.py"]}]}),
+        encoding="utf-8")
+    (tmp_path / ".ai-pr-reviewer-incidents.json").write_text(
+        json.dumps({"sources": ["incidents/export.json"]}),
+        encoding="utf-8")
+
+    real_open = builtins.open
+
+    def forbidden(*a, **k):
+        raise AssertionError("incident_intel must not call builtin open()")
+
+    monkeypatch.setattr(builtins, "open", forbidden)
+    try:
+        out = run_incident_context(repo_root=str(tmp_path),
+                                   files=ORG_FILES)
+    finally:
+        monkeypatch.setattr(builtins, "open", real_open)
+    assert [f.rule_id for f in out.findings] == [LINK_RULE_ID]
+
+
+def _result_shape(result):
+    """Everything a review exposes for comparison between two runs."""
+    def keyed(findings):
+        return [(f.file, f.line, f.title, f.severity, f.rule_id)
+                for f in findings]
+    return (keyed(result.findings), keyed(result.below_threshold),
+            list(result.warnings), result.health_score, result.posted_inline)
+
+
+def test_absent_config_with_flag_on_is_zero_surface(tmp_path, monkeypatch):
+    """Flag ON but no sources config: the hook RINS (spied), produces
+    byte-identical output to the flag-OFF run — zero surface is the
+    contract, not merely 'no crash'."""
+    from test_orchestrator import Wired
+    import ai_pr_reviewer.incident_intel as incident_intel
+
+    # reference run: flag OFF, same repo_root (a directory with no config)
+    w_off = Wired(monkeypatch)
+    w_off.cfg.repo_root = str(tmp_path)
+    reference = w_off.run()
+
+    calls = []
+    real = incident_intel.run_incident_context
+
+    def spy(**kwargs):
+        calls.append(kwargs)
+        return real(**kwargs)
+
+    monkeypatch.setattr(incident_intel, "run_incident_context", spy)
+    w_on = Wired(monkeypatch)
+    w_on.cfg.incident_intel = True
+    w_on.cfg.repo_root = str(tmp_path)
+    result = w_on.run()
+
+    assert len(calls) == 1                 # the hook ran...
+    assert not [f for f in result.findings + result.below_threshold
+                if f.rule_id == LINK_RULE_ID]   # ...and surfaced nothing
+    assert _result_shape(result) == _result_shape(reference)
+
+
+def test_sources_file_env_override_reaches_the_entry_point(
+        tmp_path, monkeypatch):
+    """INCIDENT_SOURCES_FILE is honored end-to-end: the default config
+    name is absent, the overridden one is present, findings flow."""
+    import json
+    (tmp_path / "incidents").mkdir()
+    (tmp_path / "incidents" / "export.json").write_text(
+        json.dumps({"incidents": [{"id": "INC-42",
+                                   "paths": ["src/payments.py"]}]}),
+        encoding="utf-8")
+    (tmp_path / "team-incidents.json").write_text(
+        json.dumps({"retention_days": 0, "max_incidents": 5,
+                    "sources": ["incidents/export.json"]}),
+        encoding="utf-8")
+
+    monkeypatch.setenv("INCIDENT_SOURCES_FILE", "team-incidents.json")
+    out = run_incident_context(repo_root=str(tmp_path), files=ORG_FILES)
+    assert [f.rule_id for f in out.findings] == [LINK_RULE_ID]
+    assert out.warnings == ()
+
+    # without the override the same tree is a NOOP
+    monkeypatch.delenv("INCIDENT_SOURCES_FILE")
+    out = run_incident_context(repo_root=str(tmp_path), files=ORG_FILES)
+    assert out == IncidentOutcome()
