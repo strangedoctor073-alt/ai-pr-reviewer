@@ -658,3 +658,351 @@ def test_bus_disabled_path_still_validates_and_labels():
 
 def test_redact_module_stays_free_of_queue_worker_io_symbols():
     assert _violations(REDACT_MODULE_PATH.read_text(encoding="utf-8")) == []
+
+
+# ============================================================ V4.6-E07-T04
+# Subscriber contracts (self-contained telemetry/analytics/dashboard-sync
+# reference sinks — no edits to the real modules) + append-only JSONL log:
+# append-mode-only AST enforcement, refusal-based retention that never
+# rewrites bytes, replay-equality, and zero coupling to reporter/telemetry/
+# dashboard modules (the event log is internal, never public report data).
+
+from ai_pr_reviewer.events import log as log_module        # noqa: E402
+from ai_pr_reviewer.events.log import (MAX_EVENT_LOG_LINE_CHARS,  # noqa: E402
+                                       MAX_LOG_BYTES, MAX_LOG_EVENTS,
+                                       EventLog)
+from ai_pr_reviewer.events.subscribers import (MAX_SINK_KEYS,  # noqa: E402
+                                               MAX_SYNC_BUFFER,
+                                               SUBSCRIBER_CONTRACT,
+                                               AnalyticsSink,
+                                               DashboardSyncSink,
+                                               LogSubscriber,
+                                               TelemetrySink)
+
+DESTRUCTIVE_CALLS = {"write_text", "write_bytes", "unlink", "rename",
+                     "replace", "truncate", "mkdir", "rmdir", "touch",
+                     "remove"}
+_IO_BANNED_MODULES = {"queue", "threading", "multiprocessing", "concurrent",
+                      "asyncio", "socket", "subprocess", "ssl", "urllib",
+                      "httpx", "requests", "os", "io"}
+
+
+def _log_violations(source: str) -> list[str]:
+    """Append-only contract: the ONLY handle mode is ``"a"`` (visible at
+    the call site as a constant), no destructive path call, no
+    queue/worker/network import."""
+    import ast
+    tree = ast.parse(source)
+    hits: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names = [a.name for a in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            names = [node.module or ""]
+        else:
+            names = []
+        for name in names:
+            if name.split(".")[0] in _IO_BANNED_MODULES:
+                hits.append(f"import {name}")
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Name) and func.id == "open":
+            hits.append("builtin open() (mode must be visible at call site)")
+        elif isinstance(func, ast.Attribute):
+            if func.attr == "open":
+                mode_ok = False
+                if node.args:
+                    first = node.args[0]
+                    if isinstance(first, ast.Constant) \
+                            and isinstance(first.value, str):
+                        mode = first.value
+                        mode_ok = mode.startswith("a") and not any(
+                            c in mode for c in "wrx+")
+                if not mode_ok:
+                    hits.append("open() without a plain append mode")
+            elif func.attr in DESTRUCTIVE_CALLS:
+                hits.append(f"destructive call {func.attr}()")
+    return hits
+
+
+def test_log_module_is_append_only_no_rewrite_no_delete():
+    source = (ROOT / "ai_pr_reviewer" / "events" / "log.py").read_text(
+        encoding="utf-8")
+    assert _log_violations(source) == []
+
+    # self-check: every shape the contract exists to catch is caught
+    assert _log_violations('p.open("w")\n')
+    assert _log_violations('p.open("a+")\n')
+    assert _log_violations('p.open("r")\n')
+    assert _log_violations('p.write_text("x")\n')
+    assert _log_violations('p.unlink()\n')
+    assert _log_violations('open("a")\n')
+    assert _log_violations('import threading\n')
+    # ...and the legal shapes stay legal
+    assert not _log_violations('p.open("a", encoding="utf-8")\n')
+    assert not _log_violations('p.read_text(encoding="utf-8")\n')
+    assert not _log_violations('import json\nfrom pathlib import Path\n')
+
+
+def test_log_append_never_rewrites_existing_bytes(tmp_path):
+    path = tmp_path / "events.jsonl"
+    log = EventLog(path)
+    assert log.append(_event(event_id="a")) is None
+    first_bytes = path.read_bytes()
+    assert log.append(_event(event_id="b")) is None
+    second_bytes = path.read_bytes()
+    # the first line is byte-for-byte untouched; the new line only appends
+    assert second_bytes[:len(first_bytes)] == first_bytes
+    assert second_bytes.count(b"\n") == 2
+    assert log.line_count() == 2
+
+
+def test_replay_equality_for_both_append_paths(tmp_path):
+    originals = [_event(event_id=f"e{i}",
+                        payload={"i": i, "path": f"src/f{i}.py"})
+                 for i in range(3)]
+
+    # path 1: deliver -> bus -> LogSubscriber
+    log = EventLog(tmp_path / "bus.jsonl")
+    bus = EventBus()
+    bus.subscribe(LogSubscriber(log))
+    for event in originals:
+        assert deliver(bus, event) is None
+    result = log.replay()
+    assert result.refused == ()
+    assert result.events == tuple(originals)
+
+    # path 2: direct append (redaction runs again — idempotent here)
+    direct = EventLog(tmp_path / "direct.jsonl")
+    for event in originals:
+        assert direct.append(event) is None
+    assert direct.replay().events == tuple(originals)
+
+
+def test_log_redacts_even_when_wired_without_deliver(tmp_path):
+    """Defense in depth: append scrubs on its own, so the log is safe no
+    matter how it got wired (deliver already scrubbed before dispatch)."""
+    path = tmp_path / "events.jsonl"
+    log = EventLog(path)
+    token = LEAK_CORPUS["gh"]
+    assert log.append(_event(subject=f"leak {token}",
+                             payload={"v": token})) is None
+    replayed = log.replay().events[0]
+    assert token not in replayed.subject
+    assert token not in str(replayed.payload)
+    assert "[REDACTED]" in replayed.subject
+
+
+def test_replay_skips_corrupt_lines_with_content_free_labels(tmp_path):
+    path = tmp_path / "events.jsonl"
+    log = EventLog(path)
+    log.append(_event(event_id="a"))
+    log.append(_event(event_id="b"))
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    lines.insert(1, "\n")                          # blank: skipped silently
+    lines.insert(2, "NOT-JSON-MARKER{\n")          # corrupt: labeled
+    lines.insert(3, '{"schema_version": "v9"}\n')  # wrong version: labeled
+    path.write_text("".join(lines), encoding="utf-8")
+
+    result = log.replay()
+    assert [e.event_id for e in result.events] == ["a", "b"]
+    assert len(result.refused) == 2
+    assert result.refused[0].startswith(
+        "log line 3 skipped (invalid JSON")
+    assert result.refused[1].startswith(
+        "log line 4 skipped (unsupported event schema version")
+    joined = "".join(result.refused)
+    assert "MARKER" not in joined and "v9" not in joined
+
+    # replay is read-only: the corrupt line is still there afterwards
+    assert "NOT-JSON-MARKER" in path.read_text(encoding="utf-8")
+
+
+def test_retention_caps_refuse_without_touching_existing_bytes(
+        tmp_path, monkeypatch):
+    path = tmp_path / "events.jsonl"
+    log = EventLog(path)
+    assert log.append(_event(event_id="e1")) is None
+
+    monkeypatch.setattr(log_module, "MAX_LOG_EVENTS", 1)
+    before = path.read_bytes()
+    label = log.append(_event(event_id="e2"))
+    assert label == "event log append refused (log event cap reached)"
+    assert path.read_bytes() == before            # byte-for-byte untouched
+
+    monkeypatch.setattr(log_module, "MAX_LOG_EVENTS", 1_000)
+    monkeypatch.setattr(log_module, "MAX_LOG_BYTES", 1)
+    label = log.append(_event(event_id="e3"))
+    assert label == "event log append refused (log byte cap reached)"
+    assert path.read_bytes() == before
+
+    # caps are refusal thresholds, not tunables hiding in env/config
+    assert MAX_LOG_BYTES == 1_048_576 and MAX_LOG_EVENTS == 1_000
+
+
+def test_line_size_cap_refuses_but_a_max_payload_event_fits(tmp_path,
+                                                             monkeypatch):
+    path = tmp_path / "events.jsonl"
+    log = EventLog(path)
+    # a payload at the schema cap still fits the log's headroom (per-string
+    # cap is 2_000, so the bulk rides on multiple keys)
+    big = {f"k{i}": "y" * 1_950 for i in range(8)}
+    assert log.append(_event(payload=big)) is None
+    line = path.read_text(encoding="utf-8").splitlines()[0]
+    assert len(line) > 15_000
+    assert len(line) < MAX_EVENT_LOG_LINE_CHARS
+
+    # mechanism: any line over the cap is refused, never truncated
+    monkeypatch.setattr(log_module, "MAX_EVENT_LOG_LINE_CHARS", 50)
+    before = path.read_bytes()
+    label = log.append(_event(event_id="tiny"))
+    assert label == "event log append refused (line size cap exceeded)"
+    assert path.read_bytes() == before
+
+
+def test_append_and_replay_never_raise_on_hostile_or_unwritable_input(
+        tmp_path):
+    log = EventLog(tmp_path / "ok.jsonl")
+    for bad in ("garbage", [], None, 7, {"schema_version": "v9"},
+                {"event_type": "x"}):
+        assert isinstance(log.append(bad), str)
+    assert log.line_count() == 0                  # nothing written
+
+    # unwritable: parent directory does not exist -> label, no file
+    missing = EventLog(tmp_path / "nope" / "events.jsonl")
+    assert isinstance(missing.append(_event()), str)
+    assert not (tmp_path / "nope").exists()
+
+    # a path that IS a directory -> label (OSError), never a traceback
+    as_dir = EventLog(tmp_path)
+    assert isinstance(as_dir.append(_event()), str)
+
+    # replay counterparts: absent file = empty result, unreadable = label
+    assert missing.replay().events == ()
+    assert as_dir.replay().refused == ("log unreadable",)
+
+
+def test_subscriber_contract_is_data_and_sinks_are_bounded():
+    assert isinstance(SUBSCRIBER_CONTRACT, tuple) and SUBSCRIBER_CONTRACT
+    assert all(isinstance(rule, str) and rule for rule in SUBSCRIBER_CONTRACT)
+    for sink in (TelemetrySink(), AnalyticsSink(), DashboardSyncSink()):
+        assert callable(sink)
+
+    # bounded key caps with counted overflow (contract rule 4)
+    telemetry = TelemetrySink()
+    analytics = AnalyticsSink()
+    for i in range(MAX_SINK_KEYS + 10):
+        event = _event(event_type=f"t{i}.x", event_id=f"e{i}")
+        telemetry(event)
+        analytics(event)
+    assert len(telemetry.rows()) == MAX_SINK_KEYS
+    assert telemetry.overflow == 10
+    assert telemetry.total == MAX_SINK_KEYS
+    assert len(analytics.rows()) == MAX_SINK_KEYS
+    assert analytics.overflow == 10
+
+
+def test_reference_sink_rows_are_deterministic_across_runs():
+    events = [_event(event_id=f"e{i}", event_type=("review.started" if i % 2
+                                                   else "review.finished"),
+                     subject=f"acme/api#{i % 3}",
+                     timestamp=f"2026-01-15T10:00:{i:02d}+00:00")
+              for i in range(6)]
+
+    def run():
+        t, a = TelemetrySink(), AnalyticsSink()
+        for event in events:
+            t(event)
+            a(event)
+        return t.rows(), a.rows()
+
+    first, second = run(), run()
+    assert first == second                          # sorted, hash-seed safe
+    t = TelemetrySink()
+    for event in events:
+        t(event)
+    assert t.rows() == [{"event_type": "review.finished", "count": 3},
+                        {"event_type": "review.started", "count": 3}]
+
+
+def test_dashboard_sync_buffer_drops_newest_and_snapshots_scalars_only():
+    sink = DashboardSyncSink()
+    for i in range(MAX_SYNC_BUFFER + 3):
+        sink(_event(event_id=f"e{i}"))
+    assert sink.pending == MAX_SYNC_BUFFER
+    assert sink.dropped == 3                       # drop-newest, counted
+
+    snapshot = sink.snapshot()
+    assert len(snapshot) == MAX_SYNC_BUFFER
+    assert [row["event_id"] for row in snapshot] == \
+        [f"e{i}" for i in range(MAX_SYNC_BUFFER)]  # chronological order
+    for row in snapshot:
+        # payload never rides along in a dashboard row (untrusted content
+        # stays behind the subscriber; a consumer needing it reads the log)
+        assert set(row) == {"event_id", "event_type", "source", "subject",
+                            "timestamp"}
+        assert "payload" not in row
+    # snapshot is a copy: mutating it cannot touch the sink
+    snapshot[0]["event_type"] = "tampered"
+    assert sink.snapshot()[0]["event_type"] == "review.started"
+
+
+def test_all_reference_subscribers_survive_delivered_leak_events(tmp_path):
+    bus = EventBus()
+    telemetry, analytics, dashboard = TelemetrySink(), AnalyticsSink(), \
+        DashboardSyncSink()
+    log = EventLog(tmp_path / "events.jsonl")
+    log_sink = LogSubscriber(log)
+    for sink in (telemetry, analytics, dashboard, log_sink):
+        bus.subscribe(sink)
+
+    payload = {f"field_{i}": tok for i, tok in enumerate(LEAK_CORPUS.values())}
+    assert deliver(bus, _event(subject=" ".join(LEAK_CORPUS.values()),
+                               payload=payload)) is None
+    assert telemetry.total == 1
+    assert analytics.rows()[0]["count"] == 1
+    assert dashboard.pending == 1
+    assert log_sink.labels == []                  # log accepted
+    replayed = log.replay().events[0]
+    blob = replayed.subject + str(replayed.payload)
+    for token in LEAK_CORPUS.values():
+        assert token not in blob                  # subscribers saw redacted
+
+
+def test_events_package_never_imports_public_contract_modules():
+    """The event log/sinks are internal: reporter (H4), telemetry and the
+    dashboard (H2) stay untouched by this epic — the plan's exit criterion
+    that the event log is never part of the public report contract."""
+    import ast
+    forbidden = {"reporter", "dashboard", "telemetry"}
+    hits: list[str] = []
+    for path in sorted((ROOT / "ai_pr_reviewer" / "events").glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                names = [a.name for a in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                # module + alias names: `from ai_pr_reviewer import
+                # telemetry` hides the target in the ALIAS, not the module
+                names = [node.module or ""] + [a.name for a in node.names]
+            else:
+                names = []
+            for name in names:
+                if any(part in forbidden for part in name.split(".")):
+                    hits.append(f"{path.name}: {name}")
+    assert hits == []
+
+    # self-check: relative and absolute forms are both caught
+    for snippet, expected in (("from .. import reporter", True),
+                              ("import dashboard.app", True),
+                              ("from ai_pr_reviewer import telemetry", True),
+                              ("from ..schema import EventEnvelope", False)):
+        node = ast.parse(snippet).body[0]
+        if isinstance(node, ast.Import):
+            names = [a.name for a in node.names]
+        else:
+            names = [node.module or ""] + [a.name for a in node.names]
+        hit = any(any(p in forbidden for p in n.split("."))
+                  for n in names)
+        assert hit is expected
