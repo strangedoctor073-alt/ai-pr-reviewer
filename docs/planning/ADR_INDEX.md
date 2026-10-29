@@ -32,6 +32,7 @@ a re-decision. Epics referenced (`V3-E02`, `V4.0-E07`, …) live in
 | ADR-015 | Policy evaluation placement (engine, base revision) | Accepted (de facto) / org layer Proposed |
 | ADR-016 | Testing gate strategy (deterministic blocks, AI trends) | Approved — human ratification 2026-10-06 |
 | ADR-017 | Context retrieval & ranking strategy | Approved — human ratification 2026-10-07 (V4-C0) |
+| ADR-020 | CI correlation methodology | Approved — human ratification 2026-10-29 (V4.6-E02) |
 | ADR-022 | Schema migration strategy: hand-rolled additive DDL until the V4 trigger | Approved — V4 trigger review recorded 2026-10-07 (hand-rolled continues) |
 
 ---
@@ -980,6 +981,90 @@ ADR-004 (evidence), ADR-012 (verification).
 
 ---
 
+## ADR-020 — CI correlation methodology
+
+**Status:** Approved — human ratification 2026-10-29 (V4.6-E02, drafted by
+the owning epic per the ADR gate)
+
+**Context:** The engine has no CI failure input today: `test_intel.py`
+indexes test files and their source edges, but no run or failure records
+exist anywhere in the package, and no module correlates failures to a
+change. Verification (`verification.py`) accepts only deterministic,
+observed evidence (ADR-012), and every record must carry provenance
+(ADR-004). CI run ingestion is a separate epic not yet present, so no
+run↔commit ordering can be derived locally — anything that needs window
+order must either be declared by configuration or be refused.
+
+**Decision:** Failure correlation is computed **deterministically by code**
+from a frozen, normalized failure signature —
+`(test_id, suite, error_class)` — over explicitly labeled `pre`/`post`
+change windows, and surfaces only as confidence-labeled evidence:
+
+1. **Ingestion is allow-listed and fail-closed.** Failure records come
+   from one configured JSON file of runs; a run missing a `run_id` or a
+   valid `window` label (`pre` | `post`) is skipped with a warning —
+   window order is configuration-declared, never guessed (derivation
+   arrives with run↔commit ingestion). Identity fields are
+   refuse-to-truncate (over-long values drop the record, never get
+   mangled); free text is redacted (`redact_secrets` plus the caller's
+   configured scrub), single-lined and bounded — CI text is untrusted
+   input, on ingest and at every surface.
+2. **Comparison yields set relations, not verdicts:** `new_in_post`,
+   `resolved`, `persistent` — computed by set algebra over signatures.
+3. **Confidence is a closed ladder** (`high` / `medium` / `low` /
+   `unknown`) grounded in evidence: a test↔source index edge raises it,
+   a path-convention match is medium, and a missing/unknown error class
+   can only *lower* confidence, never raise it.
+4. **Output is evidence, never causation.** Correlations render as
+   info-severity findings carrying `test_result` evidence records with
+   the confidence label and the matching window counts; wording states
+   observed co-occurrence only — a "caused by" claim requires history
+   evidence this epic does not have. Tests pin the wording: a
+   correlation with no relation to the diff must not produce any claim
+   about the changed code ("no unrelated claims").
+5. **Surfacing is gated** behind a plain-environment flag
+   (`CI_CORRELATION`, default OFF). Enabling by default is a later,
+   human-signed-off step. No network access: correlation runs over
+   configured/fixture records only.
+
+**Alternatives considered:**
+1. *Model-interpreted CI logs (LLM reads failures and asserts causes)* —
+   rejected: violates the deterministic-evidence trust model (ADR-012);
+   a model cannot observe run history and its claims are unfalsifiable.
+2. *Statistical scoring with a single relevance number* — rejected: a
+   scalar hides which evidence moved it; the closed confidence ladder
+   with named grounds stays checkable per finding.
+3. *Live GitHub API fetch of runs at review time* — rejected for this
+   generation: no new egress (network belongs to the ingestion epic);
+   configured records keep the module deterministic and offline-testable.
+
+**Reasoning:** A closed signature vocabulary makes the window comparison
+exact set algebra (testable to the entry); refusing to derive window
+order prevents the module inventing facts only ingestion can know; and
+confidence that can only be lowered by missing data matches how the
+rest of the engine treats absent evidence — degrade honestly, never
+upgrade on guesswork.
+
+**Consequences:** + CI failure patterns become review-visible evidence
+behind an off-by-default flag; + honesty is test-enforced (leak corpus,
+no-unrelated-claims, fail-closed windows); − window labels are
+configuration-declared until run↔commit ingestion lands; − `unknown`
+error classes exist in the wild and cap confidence; − flipping the flag
+on by default requires documenting the new output surface (README) and
+human sign-off.
+
+**Revisit conditions:** run↔commit ingestion exists (windows become
+derived, not declared — revisit label validation); any surfaced
+correlation demonstrated unrelated in review feedback (tighten the
+ladder or the grounds); flag proposed for default-ON (README contract
+update + human approval).
+
+**Links:** `EPIC_BACKLOG.md` (V4.6-E02 scope record) ·
+`V4_STAGES_ROADMAP.md` §V4.6 · ADR-004 (evidence), ADR-012 (verification
+trust), ADR-016 (testing gates).
+
+---
+
 ## ADR-022 — Schema migrations: hand-rolled additive DDL now, real tool at the V4 trigger
 
 **Status:** Approved — human ratification 2026-10-07. The scheduled V4
@@ -1116,14 +1201,6 @@ The following decisions have been identified as requiring ADRs but have not yet 
 - **Depends on:** V4-E05 (identity v2), V4.4-E01 (history for regression detection)
 - **Consumed by:** V4.4-E03 (relations), V4.4-E06 (historical evidence)
 - **Related:** ADR-005 (finding identity), ADR-004 (evidence model)
-
-### ADR-020 (planned) — CI correlation methodology
-
-- **Status:** Planned ADR — not yet written
-- **Decision needed:** What constitutes correlation vs causation between CI failures and PR changes. How test-failure correlation is computed and presented (evidence, not assertion).
-- **Depends on:** V4.6-E01 (CI ingestion), V4.2-E03 (test intelligence)
-- **Consumed by:** V4.6-E02 (test-failure correlation), V4.6-E06 (incident intelligence)
-- **Related:** ADR-012 (verification trust), ADR-013 (webhook security)
 
 ### ADR-021 (planned) — API versioning strategy
 
