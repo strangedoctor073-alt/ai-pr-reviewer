@@ -385,3 +385,192 @@ def test_release_record_is_the_normalized_shape():
     assert rec.name == "" and rec.published_at == "" and rec.commit_sha == ""
     assert rec.prerelease is False and rec.draft is False
     assert rec.body == "" and rec.source == ""
+
+
+# ============================================================ V4.6-E03-T02
+# Diff-since-last-release: closed selection rules for "last shipped"
+# (drafts/prereleases/unorderable never eligible, ties keep file order)
+# and a fail-closed anchor ladder over the history index (sha position,
+# then published timestamp, then a labeled refusal) with bounded,
+# honest listings.
+
+from ai_pr_reviewer.history.builder import (CommitRecord,  # noqa: E402
+                                            HistoryIndex)
+from ai_pr_reviewer.release_intel import (BASIS_COMMIT_SHA,  # noqa: E402
+                                          BASIS_NOT_ASSESSABLE,
+                                          BASIS_PUBLISHED_AT, ReleaseDiff,
+                                          select_last_release,
+                                          shipped_changes)
+
+from datetime import datetime, timezone                  # noqa: E402
+
+# computed, never guessed: the epoch of the ISO strings used below
+EPOCH_0 = int(datetime(2026, 10, 9, 8, 53, 20,
+                       tzinfo=timezone.utc).timestamp())
+
+
+def _commit(sha: str, epoch: int, *paths, subject: str = "do thing",
+            **extra) -> CommitRecord:
+    return CommitRecord(sha=sha, committed_at=epoch, subject=subject,
+                        parent_count=1, paths=tuple(paths), **extra)
+
+
+def _index(commits=(), window_start: int = 0, state: str = "ok",
+           **extra) -> HistoryIndex:
+    return HistoryIndex(state=state, window_start=window_start,
+                        commits=tuple(commits), **extra)
+
+
+def _release(tag="v1.0.0", ts="2026-10-20T09:00:00+00:00", sha="", **kw):
+    return ReleaseRecord(tag=tag, published_at=ts, commit_sha=sha, **kw)
+
+
+# ------------------------------------------------------------- selection
+
+def test_select_last_release_is_the_newest_shipped_one():
+    old = _release("v1", ts="2026-10-01T00:00:00+00:00")
+    new = _release("v2", ts="2026-10-20T00:00:00+00:00")
+    draft = _release("wip", ts="2026-10-25T00:00:00+00:00", draft=True)
+    pre = _release("v3-rc1", ts="2026-10-24T00:00:00+00:00", prerelease=True)
+    assert select_last_release((old, new, draft, pre)) is new
+
+
+def test_selection_tie_keeps_file_order_and_unorderable_never_wins():
+    first = _release("a", ts="2026-10-20T00:00:00+00:00")
+    second = _release("b", ts="2026-10-20T00:00:00+00:00")
+    no_ts = _release("c", ts="")
+    garbage_ts = _release("d", ts="garbage")
+    assert select_last_release((first, second, no_ts, garbage_ts)) is first
+    # only unorderable shipped releases -> nothing selectable, no guess
+    assert select_last_release((no_ts, garbage_ts)) is None
+    assert select_last_release(()) is None
+
+
+def test_selection_ignores_malformed_entries_without_raising():
+    assert select_last_release(None) is None     # type: ignore[arg-type]
+
+
+# ----------------------------------------------------------- the anchor
+
+def test_sha_basis_is_positional_over_the_newest_first_index():
+    r_old = _commit("a" * 40, EPOCH_0, "src/x.py")
+    r_mid = _commit("b" * 40, EPOCH_0 + 10, "src/y.py", "docs/z.md")
+    r_new = _commit("c" * 40, EPOCH_0 + 20, "src/x.py")
+    index = _index((r_new, r_mid, r_old), window_start=EPOCH_0 - 100)
+    diff = shipped_changes(_release(sha="b" * 40), index)
+    assert diff.basis == BASIS_COMMIT_SHA
+    assert diff.commits_total == 1    # only r_new is NEWER than the sha
+    assert diff.commits == (("c" * 40, "do thing"),)
+    assert diff.paths == ("src/x.py",)
+    assert diff.partial is False       # sha anchor: the window sees it all
+    assert diff.reasons == ()
+
+
+def test_release_at_the_head_means_nothing_shipped_since():
+    head = _commit("c" * 40, EPOCH_0)
+    diff = shipped_changes(_release(sha="c" * 40), _index((head,)))
+    assert diff.basis == BASIS_COMMIT_SHA
+    assert diff.commits == () and diff.commits_total == 0
+    assert diff.paths == () and diff.paths_total == 0
+
+
+def test_unmatched_sha_falls_back_to_the_timestamp_with_a_reason():
+    commits = (_commit("c" * 40, EPOCH_0 + 100),
+               _commit("d" * 40, EPOCH_0 - 100))
+    diff = shipped_changes(_release(ts="2026-10-09T08:53:30+00:00",
+                                    sha="e" * 40), _index(commits))
+    assert diff.basis == BASIS_PUBLISHED_AT
+    assert [sha for sha, _ in diff.commits] == ["c" * 40]
+    assert any("outside the history window" in r for r in diff.reasons)
+
+
+def test_timestamp_basis_is_strictly_after_the_release():
+    before = _commit("a" * 40, EPOCH_0)
+    same = _commit("b" * 40, EPOCH_0 + 1)          # == release second
+    after = _commit("c" * 40, EPOCH_0 + 2)
+    index = _index((after, same, before),
+                   window_start=EPOCH_0 - 50)
+    diff = shipped_changes(_release(ts="2026-10-09T08:53:21+00:00"), index)
+    assert diff.basis == BASIS_PUBLISHED_AT
+    # strictly AFTER: the commit in the same second as the release is
+    # not "shipped after" it
+    assert [sha for sha, _ in diff.commits] == ["c" * 40]
+
+
+def test_neither_anchor_is_a_labeled_refusal_not_a_guess():
+    diff = shipped_changes(_release(ts="", sha=""), _index(
+        (_commit("c" * 40, EPOCH_0),)))
+    assert diff.basis == BASIS_NOT_ASSESSABLE
+    assert diff.commits == () and diff.paths == ()
+    assert any("neither a sha" in r for r in diff.reasons)
+
+
+@pytest.mark.parametrize("index", [
+    pytest.param(None, id="none"),
+    pytest.param(_index((), state="unavailable"), id="unavailable"),
+])
+def test_absent_history_is_a_labeled_refusal(index):
+    diff = shipped_changes(_release(), index)
+    assert diff.basis == BASIS_NOT_ASSESSABLE
+    assert diff.reasons == ("history index unavailable",)
+
+
+def test_no_release_at_all_is_an_empty_diff():
+    assert shipped_changes(None, _index((_commit("c" * 40, EPOCH_0),))) \
+        == ReleaseDiff()
+
+
+def test_partial_marks_a_window_that_starts_after_the_release():
+    index = _index((_commit("c" * 40, EPOCH_0 + 500),),
+                   window_start=EPOCH_0 + 100)
+    diff = shipped_changes(_release(ts="2026-10-09T08:53:20+00:00"), index)
+    assert diff.partial is True
+    assert any("provably incomplete" in r for r in diff.reasons)
+    # a sha anchor inside the window is never "partial"
+    head = _commit("c" * 40, EPOCH_0 + 500)
+    diff = shipped_changes(_release(ts="", sha="c" * 40),
+                           _index((head,), window_start=EPOCH_0 + 100))
+    assert diff.partial is False and diff.basis == BASIS_COMMIT_SHA
+
+
+def test_listings_are_capped_while_totals_stay_full():
+    commits = tuple(_commit(f"{i:040x}", EPOCH_0 + 1 + i, f"p/{i}.py",
+                            f"q/{i}.py") for i in range(10))
+    index = _index(tuple(reversed(commits)), window_start=EPOCH_0 - 10)
+    diff = shipped_changes(_release(ts="2026-10-09T08:53:20+00:00"), index,
+                           max_commits=3, max_paths=4)
+    assert len(diff.commits) == 3
+    assert len(diff.paths) == 4
+    assert diff.commits_total == 10
+    assert diff.paths_total == 20
+    assert diff.truncated is True
+
+
+def test_scan_cap_bounds_a_hostile_index():
+    commits = tuple(_commit(f"{i:040x}", EPOCH_0 + i) for i in range(5_001))
+    index = _index(tuple(reversed(commits)), window_start=EPOCH_0 - 10)
+    diff = shipped_changes(_release(ts="2026-10-09T08:53:20+00:00"), index)
+    assert any("scan cap" in r for r in diff.reasons)
+    assert diff.commits_total <= 5_000
+
+
+def test_diff_is_deterministic_and_frozen():
+    index = _index((_commit("c" * 40, EPOCH_0 + 5, "b.py", "a.py"),),
+                   window_start=EPOCH_0 - 5)
+    release = _release(ts="2026-10-09T08:53:20+00:00")
+    first = shipped_changes(release, index)
+    assert first == shipped_changes(release, index)
+    assert first.paths == ("a.py", "b.py")      # sorted union
+    with pytest.raises(FrozenInstanceError):
+        first.basis = "x"                      # type: ignore[misc]
+
+
+def test_merge_and_bulk_commits_count_but_ship_no_paths():
+    # the history builder empties paths for merge/bulk/boundary commits;
+    # the diff must count the commit without inventing paths for it
+    merge = _commit("m" * 40, EPOCH_0 + 5, subject="Merge pull request")
+    bulk = _commit("k" * 40, EPOCH_0 + 6, is_bulk=True)
+    index = _index((bulk, merge), window_start=EPOCH_0 - 5)
+    diff = shipped_changes(_release(ts="2026-10-09T08:53:20+00:00"), index)
+    assert diff.commits_total == 2
+    assert diff.paths == () and diff.paths_total == 0

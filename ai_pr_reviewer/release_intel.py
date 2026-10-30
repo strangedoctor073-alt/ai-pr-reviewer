@@ -51,10 +51,13 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
+from typing import TYPE_CHECKING, Callable, Iterable
 
 from .index.limits import is_contained
 from .security import redact_secrets
+
+if TYPE_CHECKING:
+    from .history.builder import HistoryIndex
 
 DEFAULT_SOURCES_FILE = ".ai-pr-reviewer-releases.json"
 
@@ -270,3 +273,156 @@ def ingest_releases(repo_root: str, *,
         warn(f"{skipped_flags} release(s) skipped (draft/prerelease flag "
              f"is not a boolean)")
     return tuple(records), tuple(warnings)
+
+
+# ------------------------------------------------------ V4.6-E03-T02
+# Diff-since-last-release (bounded, deterministic): WHICH release is
+# "last shipped" is decided here by closed rules, and WHAT shipped since
+# it is computed over the V4.4-E01 history index — never fetched, never
+# guessed. Every degradation is a labeled reason; an absent or
+# undegraded-invisible history window can only make the answer smaller
+# and say so (``partial``), never larger.
+
+BASIS_COMMIT_SHA = "commit_sha"
+BASIS_PUBLISHED_AT = "published_at"
+BASIS_NOT_ASSESSABLE = "not_assessable"
+
+MAX_DIFF_COMMITS = 100                # commits listed per release diff
+MAX_DIFF_PATHS = 500                  # distinct shipped paths listed
+MAX_SCAN_COMMITS = 5_000              # matches the history layer's hard cap
+
+
+def _epoch(iso: str) -> int | None:
+    """Normalized UTC ISO -> epoch seconds, or ``None`` (never guessed)."""
+    if not iso:
+        return None
+    try:
+        return int(datetime.fromisoformat(iso).timestamp())
+    except ValueError:
+        return None
+
+
+def select_last_release(
+        releases: Iterable[ReleaseRecord]) -> ReleaseRecord | None:
+    """The newest SHIPPED release, or ``None``.
+
+    Closed rules: drafts and prereleases are never eligible; a release
+    with no comparable ``published_at`` cannot be ordered and is never
+    selected; ties on the timestamp keep the FIRST in file order (the
+    ingest order is the deterministic tie-breaker).
+    """
+    if releases is None:
+        return None
+    best: ReleaseRecord | None = None
+    best_ts: int | None = None
+    for record in releases:
+        if record.draft or record.prerelease:
+            continue
+        ts = _epoch(record.published_at)
+        if ts is None:
+            continue                    # unorderable: never selected
+        if best_ts is None or ts > best_ts:
+            best, best_ts = record, ts
+    return best
+
+
+@dataclass(frozen=True)
+class ReleaseDiff:
+    """What the history index can prove shipped since one release.
+
+    ``basis`` names the rule that anchored the comparison (closed set);
+    ``commits`` is (sha, subject) newest-first; ``paths`` is the sorted
+    union of changed paths, capped. ``commits_total``/``paths_total``
+    always state the full counts — the caps only bound what is listed.
+    ``partial`` means the history window starts AFTER the release, so
+    the listing is provably incomplete (never silently presented as
+    everything).
+    """
+
+    release_tag: str = ""
+    basis: str = BASIS_NOT_ASSESSABLE
+    commits: tuple[tuple[str, str], ...] = ()
+    paths: tuple[str, ...] = ()
+    commits_total: int = 0
+    paths_total: int = 0
+    truncated: bool = False
+    partial: bool = False
+    reasons: tuple[str, ...] = ()
+
+
+def shipped_changes(release: ReleaseRecord | None, index,
+                    *, max_commits: int = MAX_DIFF_COMMITS,
+                    max_paths: int = MAX_DIFF_PATHS) -> ReleaseDiff:
+    """Commits/paths shipped since ``release`` per the history index.
+
+    Anchor ladder (fail-closed, each step labeled):
+    1. ``commit_sha`` — the release's validated sha found in the index;
+       everything NEWER (the index is newest-first) shipped after it;
+    2. ``published_at`` — commits committed strictly after the release
+       timestamp (also the fallback when the sha is outside the window,
+       with a reason);
+    3. ``not_assessable`` — neither anchor exists: no comparison, no
+       numbers, a labeled reason instead.
+
+    ``index`` is duck-typed over the V4.4-E01 ``HistoryIndex`` (state,
+    window_start, commits) so tests can pin behavior without the git
+    layer.
+    """
+    if release is None:
+        return ReleaseDiff()
+    tag = release.tag
+    if index is None or not getattr(index, "is_available", False):
+        return ReleaseDiff(release_tag=tag, basis=BASIS_NOT_ASSESSABLE,
+                           reasons=("history index unavailable",))
+    commits = tuple(getattr(index, "commits", ()) or ())
+    reasons: list[str] = []
+    if len(commits) > MAX_SCAN_COMMITS:
+        commits = commits[:MAX_SCAN_COMMITS]
+        reasons.append("history commit list exceeds the scan cap; "
+                       "older commits were not compared")
+    window_start = getattr(index, "window_start", 0) or 0
+
+    basis = BASIS_NOT_ASSESSABLE
+    newer: tuple = ()
+    partial = False
+    if release.commit_sha:
+        for position, commit in enumerate(commits):
+            if commit.sha == release.commit_sha:
+                basis = BASIS_COMMIT_SHA
+                newer = commits[:position]
+                break
+        else:
+            reasons.append("release sha is outside the history window; "
+                           "using the published timestamp instead")
+    if basis != BASIS_COMMIT_SHA:
+        epoch = _epoch(release.published_at)
+        if epoch is None:
+            return ReleaseDiff(release_tag=tag,
+                               basis=BASIS_NOT_ASSESSABLE,
+                               reasons=tuple(reasons) or (
+                                   "release has neither a sha in the "
+                                   "history window nor a parseable "
+                                   "published timestamp",))
+        basis = BASIS_PUBLISHED_AT
+        newer = tuple(c for c in commits if c.committed_at > epoch)
+        if window_start > epoch:
+            # the window cannot see the release itself, so anything
+            # between the release and the window edge is missing
+            partial = True
+            reasons.append("history window starts after the release; "
+                           "the listing is provably incomplete")
+
+    path_set = {p for c in newer for p in (getattr(c, "paths", ()) or ())}
+    capped_commits = tuple((c.sha, c.subject) for c in newer[:max_commits])
+    capped_paths = tuple(sorted(path_set)[:max_paths])
+    return ReleaseDiff(
+        release_tag=tag,
+        basis=basis,
+        commits=capped_commits,
+        paths=capped_paths,
+        commits_total=len(newer),
+        paths_total=len(path_set),
+        truncated=len(newer) > max_commits or len(path_set) > max_paths,
+        partial=partial,
+        reasons=tuple(reasons),
+    )
