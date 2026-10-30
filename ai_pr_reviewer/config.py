@@ -228,6 +228,14 @@ class Config:
     # release records is a true NOOP even when ON.
     release_intel: bool = False
 
+    # V4.4-E04-T02: issue/requirement linkage surfacing (the report's
+    # `linked_issues` section + linkage findings). Default OFF; plain
+    # env var (ISSUE_LINKAGE), deliberately not an INPUT_* action input
+    # -- enabling it makes configured issue context surface in review
+    # output, which needs human sign-off (plan §F). Absent configured
+    # issue records is a true NOOP even when ON.
+    issue_linkage: bool = False
+
 
 def load_config(args) -> Config:
     _warn_unknown_inputs()
@@ -300,6 +308,8 @@ def load_config(args) -> Config:
     cfg.ci_correlation = _bool_field(None, "CI_CORRELATION", default=False)
     # V4.6-E03-T03: no CLI flag and no INPUT_* on purpose (see the field).
     cfg.release_intel = _bool_field(None, "RELEASE_INTEL", default=False)
+    # V4.4-E04-T02: no CLI flag and no INPUT_* on purpose (see the field).
+    cfg.issue_linkage = _bool_field(None, "ISSUE_LINKAGE", default=False)
     return cfg
 
 

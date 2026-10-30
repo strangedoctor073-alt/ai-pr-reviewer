@@ -435,3 +435,463 @@ def test_no_builtin_open_at_runtime(tmp_path, monkeypatch):
         monkeypatch.setattr(builtins, "open", real_open)
     assert [r.key for r in records] == ["PAY-1"]
     assert warnings == ()
+
+
+# ============================================================ V4.4-E04-T02
+# Linkage scoring + surfacing: closed match ladder over the review's own
+# files (issue text is only a signal — it never names or anchors a
+# path), evidence findings that never quote issue free text, the
+# additive linked_issues report section (full totals, capped rows,
+# re-scrub), and the opt-in wiring (plain-env flag default OFF,
+# orchestrator hook, reporter key absent when the feature did not run).
+
+from ai_pr_reviewer import reporter                          # noqa: E402
+from ai_pr_reviewer.cli import parse_args                    # noqa: E402
+from ai_pr_reviewer.config import load_config                # noqa: E402
+from ai_pr_reviewer.diff_parser import FileDiff              # noqa: E402
+from ai_pr_reviewer.linkage import (CONFIDENCE_BY_MATCH,     # noqa: E402
+                                    LINK_RULE_ID, LinkageOutcome,
+                                    MATCH_DIRECTORY, MATCH_EXACT,
+                                    MAX_LINK_FINDINGS, MAX_SECTION_ROWS,
+                                    NOOP, link_findings,
+                                    linkage_section, match_issue,
+                                    run_linkage_context,
+                                    score_linkages)
+from ai_pr_reviewer.models import PRContext, ReviewResult     # noqa: E402
+from ai_pr_reviewer.rules import SENSITIVE_EXCLUDE_GLOBS      # noqa: E402
+
+
+def _fd(path: str) -> FileDiff:
+    return FileDiff(old_path=path, new_path=path)
+
+
+# ----------------------------------------------------------- match ladder
+
+def test_closed_ladder_is_exact_then_directory_then_nothing():
+    exact = IssueRecord(key="PAY-1", body="refund logic lives in src/a.py")
+    assert match_issue(exact, ("src/a.py", "src/b.py")) \
+        == (MATCH_EXACT, "src/a.py")
+    assert CONFIDENCE_BY_MATCH[MATCH_EXACT] == "high"
+
+    directory = IssueRecord(key="PAY-2",
+                            body="everything under src/payments is affected")
+    assert match_issue(directory, ("src/payments/refund.py", "other.py")) \
+        == (MATCH_DIRECTORY, "src/payments/refund.py")
+    assert CONFIDENCE_BY_MATCH[MATCH_DIRECTORY] == "medium"
+
+    # no sha rung: issues are not commit-tied, a sha mention scores nothing
+    sha_tied = IssueRecord(key="PAY-3", body="fixed by " + "a" * 40)
+    assert match_issue(sha_tied, ("src/a.py",)) is None
+
+
+def test_exact_run_beats_an_earlier_directory_match():
+    rec = IssueRecord(key="PAY-1", body="the whole src dir, plus b.py")
+    # src/a.py would match the directory rung first in diff order, but
+    # the exact run is global: b.py is the better signal
+    assert match_issue(rec, ("src/a.py", "b.py")) == (MATCH_EXACT, "b.py")
+
+
+def test_no_mention_is_unlinked():
+    rec = IssueRecord(key="PAY-1", title="Refunds", body="no paths here")
+    assert match_issue(rec, ("src/a.py",)) is None
+
+
+def test_empty_text_never_matches_everything():
+    # guard: a top-level file has no parent directory, and an empty
+    # needle must never match — otherwise every issue would link
+    empty = IssueRecord(key="PAY-1")
+    assert match_issue(empty, ("a.py",)) is None
+    assert match_issue(empty, ("src/a.py",)) is None
+
+
+def test_windows_style_mentions_normalize():
+    rec = IssueRecord(key="PAY-1", body="see src\\a.py for details")
+    assert match_issue(rec, ("src/a.py",)) == (MATCH_EXACT, "src/a.py")
+
+
+def test_substring_without_boundary_is_not_a_mention():
+    # ba.py must not link a.py; src/payments-old must not link
+    # src/payments (boundary chars . and - count as inside a token)
+    assert match_issue(IssueRecord(key="a", body="ba.py"),
+                       ("a.py",)) is None
+    assert match_issue(IssueRecord(key="b", body="in src/payments-old"),
+                       ("src/payments/refund.py",)) is None
+
+
+def test_score_split_preserves_record_order():
+    records = (
+        IssueRecord(key="PAY-1", body="about src/a.py"),
+        IssueRecord(key="REQ-1", body="nothing relevant"),
+        IssueRecord(key="PAY-2", body="under src/payments here"),
+    )
+    linked, unlinked = score_linkages(
+        records, ("src/payments/refund.py", "src/a.py"))
+    assert [(l.record.key, l.match) for l in linked] == [
+        ("PAY-1", MATCH_EXACT), ("PAY-2", MATCH_DIRECTORY)]
+    assert [u.key for u in unlinked] == ["REQ-1"]
+
+
+def _scored():
+    """Two linked records (exact + directory) and one unlinked."""
+    records = (
+        IssueRecord(key="PAY-1", title="Refund expiry", state="open",
+                    body="refund logic lives in src/a.py"),
+        IssueRecord(key="REQ-9", kind="requirement", title="Payments",
+                    body="all of src/payments is affected"),
+        IssueRecord(key="PAY-2", title="Docs typo", body="no path at all"),
+    )
+    return score_linkages(
+        records, ("src/payments/refund.py", "src/a.py"))
+
+
+# ----------------------------------------------------------- findings
+
+def test_findings_anchor_on_changed_files_with_closed_confidence():
+    linked, _ = _scored()
+    out = link_findings(linked)
+    assert [(f.file, f.confidence) for f in out] == [
+        ("src/a.py", "high"),
+        ("src/payments/refund.py", "medium"),
+    ]
+    (f,) = out[:1]
+    assert f.title == "Issue PAY-1 linked to src/a.py"
+    assert f.severity == "info" and f.line is None
+    assert f.suggestion is None and f.category == "maintainability"
+    assert f.rule_id == LINK_RULE_ID
+    assert f.provenance_engine == "static"
+    assert f.provenance_model == "issue-linkage-v1"
+    assert f.provenance_origin == "rule"
+    assert "signal about the issue, not a verdict" in f.explanation
+    contract = f.evidence[2].summary    # the contract travels with it
+    assert "never a claim of requirement compliance" in contract
+
+
+def test_evidence_is_file_issue_and_rule_records():
+    linked, _ = _scored()
+    (f,) = link_findings(linked[:1])
+    assert [ev.kind for ev in f.evidence] == \
+        ["file_excerpt", "history_event", "rule_ref"]
+    assert f.evidence[0].locator == "src/a.py"
+    assert f.evidence[1].locator == "issue:PAY-1"
+    assert f.evidence[2].locator == f"rule:{LINK_RULE_ID}"
+    assert all(ev.check_type == "issue_linkage" for ev in f.evidence)
+    assert "PAY-1" in f.evidence[1].summary
+
+
+def test_findings_never_quote_issue_free_text():
+    """The privacy core: issue title/body/labels never reach finding
+    prose — only closed-set/bounded fields and the changed path do."""
+    rec = IssueRecord(key="PAY-1", title="zebraquark title",
+                      body="zebraquark body mentions src/a.py",
+                      labels=("zebraquark-label",))
+    linked, _ = score_linkages((rec,), ("src/a.py",))
+    (f,) = link_findings(linked)
+    blob = f.title + f.explanation + "".join(ev.summary for ev in f.evidence)
+    assert "zebraquark" not in blob
+    assert "PAY-1" in blob and "src/a.py" in blob
+
+
+def test_evidence_or_dropped_never_half_stamped(monkeypatch):
+    linked, _ = _scored()
+
+    def raiser(**kwargs):
+        raise ValueError("no evidence today")
+
+    monkeypatch.setattr(li.EvidenceRecord, "create", raiser)
+    assert link_findings(linked) == ()
+
+
+def test_findings_are_capped_in_record_order():
+    paths = tuple(f"f{i:02d}.py" for i in range(8))
+    records = tuple(IssueRecord(key=f"PAY-{i}", body=f"about {p}")
+                    for i, p in enumerate(paths))
+    linked, _ = score_linkages(records, paths)
+    assert len(linked) == 8
+    out = link_findings(linked)
+    assert len(out) == MAX_LINK_FINDINGS
+    assert [f.file for f in out] == list(paths[:5])
+
+
+def test_one_finding_per_issue_even_with_many_mentions():
+    rec = IssueRecord(key="PAY-1", body="both src/a.py and src/b.py change")
+    linked, _ = score_linkages((rec,), ("src/b.py", "src/a.py"))
+    assert len(linked) == 1 and linked[0].path == "src/b.py"  # diff order
+    assert len(link_findings(linked)) == 1
+
+
+# -------------------------------------------------------- report section
+
+def _section_fixture():
+    linked_recs = tuple(
+        IssueRecord(key=f"PAY-{i}", title=f"t{i}", state="open",
+                    body=f"about f{i:02d}.py") for i in range(15))
+    free_recs = tuple(
+        IssueRecord(key=f"REQ-{i}", kind="requirement", title=f"r{i}")
+        for i in range(3))
+    records = linked_recs + free_recs
+    paths = tuple(f"f{i:02d}.py" for i in range(15))
+    linked, unlinked = score_linkages(records, paths)
+    return records, linked, unlinked
+
+
+def test_section_shape_totals_caps_and_json_roundtrip():
+    records, linked, unlinked = _section_fixture()
+    section = linkage_section(records, linked, unlinked, files_total=15)
+    assert section["issues_total"] == 18
+    assert section["linked_total"] == 15
+    assert section["unlinked_total"] == 3
+    assert section["files_total"] == 15
+    assert len(section["matched"]) == MAX_SECTION_ROWS   # rows capped
+    assert len(section["unmatched"]) == 3
+    row = section["matched"][0]
+    assert row == {"key": "PAY-0", "kind": "issue", "state": "open",
+                   "title": "t0", "path": "f00.py",
+                   "match": MATCH_EXACT, "confidence": "high",
+                   "updated_at": ""}
+    assert section["unmatched"][0]["key"] == "REQ-0"
+    assert json.loads(json.dumps(section)) == section
+    assert linkage_section(records, linked, unlinked,
+                           files_total=15) == section
+
+
+def test_section_rows_are_re_scrubbed():
+    secret = "hunter2hunter2"        # matches no redact_secrets pattern
+    rec = IssueRecord(key="PAY-1", title=f"{secret} refund",
+                      body="src/a.py")
+    linked, unlinked = score_linkages((rec,), ("src/a.py",))
+    scrub = lambda t: t.replace(secret, "[REDACTED]")  # noqa: E731
+    section = linkage_section((rec,), linked, unlinked,
+                              files_total=1, scrub=scrub)
+    assert section["matched"][0]["title"] == "[REDACTED] refund"
+    assert secret not in json.dumps(section)
+
+
+# ------------------------------------------------------------- runner
+
+def test_runner_noop_and_warning_only_paths(tmp_path):
+    assert run_linkage_context(repo_root=str(tmp_path),
+                               files=[_fd("a.py")]) == NOOP
+    # garbage config: warnings alone, no findings, no section
+    _write(tmp_path, "{oops")
+    out = run_linkage_context(repo_root=str(tmp_path), files=[_fd("a.py")])
+    assert out.findings == () and out.linked_issues is None
+    assert len(out.warnings) == 1 and "not valid JSON" in out.warnings[0]
+    # configured, but no changed files: nothing to match against
+    _write(tmp_path, {"issues": [_iss("PAY-1", body="about a.py")]})
+    assert run_linkage_context(repo_root=str(tmp_path), files=[]) == NOOP
+
+
+def test_runner_end_to_end_is_deterministic(tmp_path):
+    _write(tmp_path, {"issues": [
+        _iss("PAY-1", body="expiry logic in a.py"),
+        _iss("REQ-1", kind="requirement", body="nothing here")]})
+    files = [_fd("a.py"), _fd("b.py")]
+    first = run_linkage_context(repo_root=str(tmp_path), files=files)
+    assert [f.rule_id for f in first.findings] == [LINK_RULE_ID]
+    assert first.linked_issues["issues_total"] == 2
+    assert first.linked_issues["linked_total"] == 1
+    assert first == run_linkage_context(repo_root=str(tmp_path),
+                                        files=files)
+
+
+def test_runner_filters_exclusions_defense_in_depth(tmp_path):
+    _write(tmp_path, {"issues": [
+        _iss("PAY-1", body="rotate secrets/key.py now"),
+        _iss("PAY-2", body="also src/a.py")]})
+    files = [_fd("secrets/key.py"), _fd("src/a.py")]
+    out = run_linkage_context(repo_root=str(tmp_path), files=files,
+                              exclusions=["secrets/**"])
+    section = out.linked_issues
+    # the excluded path never becomes a candidate, so it can never be
+    # an anchor — the issue mentioning it is simply unlinked
+    assert section["files_total"] == 1
+    assert [row["key"] for row in section["matched"]] == ["PAY-2"]
+    assert [row["key"] for row in section["unmatched"]] == ["PAY-1"]
+    assert all(f.file != "secrets/key.py" for f in out.findings)
+
+    # every path excluded -> no candidates -> no section at all
+    only_secret = run_linkage_context(
+        repo_root=str(tmp_path), files=[_fd("secrets/key.py")],
+        exclusions=list(SENSITIVE_EXCLUDE_GLOBS))
+    assert only_secret == NOOP
+
+
+def test_runner_never_raises(tmp_path, monkeypatch):
+    _write(tmp_path, {"issues": [_iss("PAY-1", body="about a.py")]})
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(li, "ingest_issues", boom)
+    out = run_linkage_context(repo_root=str(tmp_path), files=[_fd("a.py")])
+    assert out.findings == () and out.linked_issues is None
+    assert out.warnings == ("issue linkage failed (RuntimeError); skipped",)
+
+
+# ------------------------------------------------------------- config flag
+
+def test_issue_linkage_flag_is_plain_env_default_off(monkeypatch):
+    monkeypatch.delenv("ISSUE_LINKAGE", raising=False)
+    assert load_config(parse_args([])).issue_linkage is False
+
+    monkeypatch.setenv("ISSUE_LINKAGE", "true")
+    assert load_config(parse_args([])).issue_linkage is True
+
+    # Deliberately NOT an action input: INPUT_* must not enable it.
+    monkeypatch.delenv("ISSUE_LINKAGE", raising=False)
+    monkeypatch.setenv("INPUT_ISSUE_LINKAGE", "1")
+    assert load_config(parse_args([])).issue_linkage is False
+
+    # And no CLI flag exists.
+    with pytest.raises(SystemExit):
+        parse_args(["--issue-linkage"])
+
+
+# ------------------------------------------------------- orchestrator hook
+
+def _shape(result):
+    def keyed(findings):
+        return [(f.file, f.line, f.title, f.severity, f.rule_id)
+                for f in findings]
+    return (keyed(result.findings), keyed(result.below_threshold),
+            list(result.warnings), result.health_score, result.posted_inline)
+
+
+def test_hook_is_off_by_default_and_never_runs_the_check(monkeypatch):
+    from test_orchestrator import Wired
+
+    def bomb(**kwargs):
+        raise AssertionError(
+            "issue linkage must not run when the flag is off")
+
+    monkeypatch.setattr(li, "run_linkage_context", bomb)
+    w = Wired(monkeypatch)
+    result = w.run()
+    assert not [f for f in result.findings + result.below_threshold
+                if f.rule_id == LINK_RULE_ID]
+    assert not hasattr(result, "linked_issues")
+
+
+def test_hook_joins_canned_findings_warnings_and_section(monkeypatch):
+    from test_orchestrator import Wired, _finding
+
+    canned_finding = _finding(file="a.py", line=2, title="Linkage canned",
+                              severity="low")
+    canned = LinkageOutcome(
+        findings=(canned_finding,), warnings=("canned linkage warning",),
+        linked_issues={"issues_total": 1, "linked_total": 1,
+                       "unlinked_total": 0, "files_total": 2,
+                       "matched": [], "unmatched": []})
+    monkeypatch.setattr(li, "run_linkage_context", lambda **kw: canned)
+    w = Wired(monkeypatch)
+    w.cfg.issue_linkage = True
+    result = w.run()
+    assert "Linkage canned" in [f.title for f in
+                                result.findings + result.below_threshold]
+    assert "canned linkage warning" in result.warnings
+    assert result.linked_issues == canned.linked_issues
+    assert reporter.finalize_report(result)["linked_issues"] \
+        == canned.linked_issues
+
+
+def test_hook_passes_policy_exclusions_for_defense_in_depth(monkeypatch):
+    from test_orchestrator import Wired
+
+    captured = {}
+    monkeypatch.setattr(li, "run_linkage_context",
+                        lambda **kw: (captured.update(kw),
+                                      LinkageOutcome())[1])
+    w = Wired(monkeypatch)
+    w.cfg.issue_linkage = True
+    w.run()
+    assert captured                                    # the hook ran
+    # the privacy baseline is always among the passed exclusions
+    assert set(SENSITIVE_EXCLUDE_GLOBS) <= set(captured["exclusions"])
+
+
+def test_absent_config_with_flag_on_is_zero_surface(tmp_path, monkeypatch):
+    """Flag ON but no configured issues file: the hook RINS (spied) and
+    the review output is identical to the flag-OFF run -- including the
+    report, where the linked_issues key stays ABSENT."""
+    from test_orchestrator import Wired
+
+    w_off = Wired(monkeypatch)
+    w_off.cfg.repo_root = str(tmp_path)
+    reference = w_off.run()
+
+    calls = []
+    real = li.run_linkage_context
+
+    def spy(**kwargs):
+        calls.append(kwargs)
+        return real(**kwargs)
+
+    monkeypatch.setattr(li, "run_linkage_context", spy)
+    w_on = Wired(monkeypatch)
+    w_on.cfg.issue_linkage = True
+    w_on.cfg.repo_root = str(tmp_path)
+    result = w_on.run()
+
+    assert len(calls) == 1                       # the hook ran...
+    assert not [f for f in result.findings + result.below_threshold
+                if f.rule_id == LINK_RULE_ID]    # ...and surfaced nothing
+    assert _shape(result) == _shape(reference)
+    assert "linked_issues" not in reporter.finalize_report(result)
+
+
+def test_hook_end_to_end_surfaces_findings_and_the_report_key(
+        tmp_path, monkeypatch):
+    from test_orchestrator import Wired
+
+    _write(tmp_path, {"issues": [
+        _iss("PAY-1", title="Refunds", state="open",
+             body="expiry logic in a.py")]})
+    w = Wired(monkeypatch)                       # FULL_DIFF: a.py, b.py
+    w.cfg.issue_linkage = True
+    w.cfg.repo_root = str(tmp_path)
+    result = w.run()
+    surfaced = [f for f in result.findings + result.below_threshold
+                if f.rule_id == LINK_RULE_ID]
+    assert [f.file for f in surfaced] == ["a.py"]
+    assert all(f.severity == "info" for f in surfaced)  # below "low"
+    assert all(f.confidence == "high" for f in surfaced)
+    report = reporter.finalize_report(result)
+    assert report["linked_issues"]["issues_total"] == 1
+    assert report["linked_issues"]["files_total"] == 2
+    (row,) = report["linked_issues"]["matched"]
+    assert row["key"] == "PAY-1" and row["path"] == "a.py"
+    assert json.loads(json.dumps(report)) == report
+
+    # flag OFF, same repo: the key disappears entirely (additive contract)
+    w2 = Wired(monkeypatch)
+    w2.cfg.repo_root = str(tmp_path)
+    result2 = w2.run()
+    assert "linked_issues" not in reporter.finalize_report(result2)
+    assert not [f for f in result2.findings + result2.below_threshold
+                if f.rule_id == LINK_RULE_ID]
+
+
+# --------------------------------------------------------- reporter seam
+
+def _bare_result() -> ReviewResult:
+    pr = PRContext(repo="acme/api", pr_number=7, head_sha="h" * 40)
+    return ReviewResult(pr=pr, mode="static", model="static-rules-v1",
+                        findings=[])
+
+
+def test_report_key_is_conditional_and_additive():
+    result = _bare_result()
+    assert "linked_issues" not in reporter.finalize_report(result)
+
+    section = {"issues_total": 0, "linked_total": 0, "unlinked_total": 0,
+               "files_total": 0, "matched": [], "unmatched": []}
+    result.linked_issues = section
+    report = reporter.finalize_report(result)
+    assert report["linked_issues"] == section
+    assert json.loads(json.dumps(report)) == report
+
+    # None / empty dict are treated as absent -- no empty-noise block
+    result.linked_issues = None
+    assert "linked_issues" not in reporter.finalize_report(result)
+    result.linked_issues = {}
+    assert "linked_issues" not in reporter.finalize_report(result)

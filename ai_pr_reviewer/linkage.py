@@ -53,10 +53,12 @@ import os
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from fnmatch import fnmatch
 from pathlib import Path
 from typing import Callable
 
 from .index.limits import is_contained
+from .models import STATIC_ENGINE_ID, EvidenceRecord, Finding, ProvenanceSource
 from .security import redact_secrets, scan_prompt_injection
 
 DEFAULT_ISSUES_FILE = ".ai-pr-reviewer-issues.json"
@@ -307,3 +309,308 @@ def ingest_issues(repo_root: str, *,
                  f"in issue text ({cited}); text is treated as data only")
         records.append(record)
     return tuple(records), tuple(warnings)
+
+
+# ------------------------------------------------------ V4.4-E04-T02
+# Linkage scoring and surfacing: a closed match ladder over the files
+# IN THIS REVIEW (exact path mention -> parent-directory mention ->
+# nothing), evidence findings, and the additive ``linked_issues`` report
+# section, behind the ISSUE_LINKAGE flag (default OFF, config.py;
+# orchestrator hook joins findings before dedup).
+#
+# The privacy core: issue text is only ever a MATCH SIGNAL against the
+# changed files — an issue can never introduce a path of its own. The
+# anchor is always a path from ``files`` (already exclusion-filtered by
+# the orchestrator and re-checked here), and finding prose carries only
+# bounded/closed-set fields (key, kind, state, match level, path), never
+# issue free text. Score links, render evidence-or-dropped, cap
+# deterministically (file order), full totals with capped rows.
+
+LINK_RULE_ID = "ISSUE_LINKAGE"
+LINK_CONTRACT = (
+    "deterministic match of configured issue records against the files "
+    "in this review: exact path mention (high) or parent-directory "
+    "mention (medium); issue text never names or anchors a path — only "
+    "changed files do; linkage is a signal, never a claim of "
+    "requirement compliance")
+
+MATCH_EXACT = "exact_path"
+MATCH_DIRECTORY = "directory"
+#: Match level -> confidence (the frozen low|medium|high set).
+CONFIDENCE_BY_MATCH = {MATCH_EXACT: "high", MATCH_DIRECTORY: "medium"}
+
+MAX_LINK_FINDINGS = 5
+MAX_SECTION_ROWS = 10               # rows per section list (totals stay full)
+MAX_FINDING_TITLE_CHARS = 200
+MAX_EXPLANATION_CHARS = 900
+MAX_EVIDENCE_SUMMARY_CHARS = 400        # mirrors models.MAX_EVIDENCE_SUMMARY_CHARS
+MAX_PATH_CHARS = 300
+EVIDENCE_CHECK_TYPE = "issue_linkage"
+
+
+def _norm(path: str) -> str:
+    """Shared diff-path normalization (windows separators, ``./``)."""
+    return path.replace("\\", "/").removeprefix("./")
+
+
+def _issue_text(record: IssueRecord) -> str:
+    """The record's untrusted text, already bounded and single-lined.
+
+    Used for match screening only — rendering paths take the bounded
+    title alone (see T04).
+    """
+    return " ".join((record.key, record.title, record.body,
+                     *record.labels))
+
+
+def _mentions(text: str, needle: str) -> bool:
+    """Boundary-aware mention test: ``src/a.py`` matches inside
+    ``prefix/src/a.py`` but ``ba.py`` never matches ``a.py`` and
+    ``src/payments-old`` never matches ``src/payments``.
+    """
+    if not needle:
+        return False
+    return re.search(r"(?<![\w.-])" + re.escape(needle) + r"(?![\w.-])",
+                     text) is not None
+
+
+def match_issue(record: IssueRecord, paths: tuple[str, ...]
+                ) -> tuple[str, str] | None:
+    """The closed ladder: ``(match level, changed path)`` or ``None``.
+
+    Pass 1 — the issue text mentions a changed file's exact path (any
+    file, diff order); pass 2 — it mentions the parent directory of a
+    changed file (diff order); otherwise no match. There is deliberately
+    NO sha rung: issues are not commit-tied, so a sha mention can never
+    score. Both passes run over ``paths`` — the files of this review —
+    so a path that is not in the review cannot be produced here at all.
+    """
+    text = _issue_text(record).replace("\\", "/")
+    for raw in paths:
+        if _mentions(text, _norm(raw)):
+            return MATCH_EXACT, raw
+    for raw in paths:
+        parent = _norm(raw).rpartition("/")[0]
+        if parent and _mentions(text, parent):
+            return MATCH_DIRECTORY, raw
+    return None
+
+
+@dataclass(frozen=True)
+class Linkage:
+    """One scored issue-to-file match (``path`` is a changed file)."""
+
+    record: IssueRecord
+    match: str                  # MATCH_EXACT | MATCH_DIRECTORY
+    path: str                   # anchor = the changed file (raw spelling)
+
+
+def score_linkages(records: tuple[IssueRecord, ...],
+                   paths: tuple[str, ...]
+                   ) -> tuple[tuple[Linkage, ...], tuple[IssueRecord, ...]]:
+    """Split records into (linked, unlinked), both in file order."""
+    linked: list[Linkage] = []
+    unlinked: list[IssueRecord] = []
+    for record in records:
+        hit = match_issue(record, paths)
+        if hit is None:
+            unlinked.append(record)
+        else:
+            linked.append(Linkage(record=record, match=hit[0], path=hit[1]))
+    return tuple(linked), tuple(unlinked)
+
+
+def _excluded(path: str, patterns: list[str]) -> bool:
+    """fnmatch mirror of orchestrator._is_excluded — defense-in-depth
+    for direct callers (``files`` arrives pre-filtered from the hook)."""
+    return any(fnmatch(path, p.strip()) for p in patterns if p.strip())
+
+
+def _candidate_paths(files, exclusions) -> tuple[str, ...]:
+    """Distinct changed paths in review order, minus exclusion globs.
+
+    This list is BOTH sides of every match: the ladder searches only
+    these paths and anchors only on them, so an excluded path can never
+    surface as a linkage anchor even when handed to this module
+    directly.
+    """
+    patterns = [str(p) for p in (exclusions or ())]
+    out: list[str] = []
+    seen: set[str] = set()
+    for fd in files or ():
+        raw = str(getattr(fd, "path", "") or "")
+        if not raw:
+            continue
+        key = _norm(raw)
+        if key in seen:
+            continue
+        if _excluded(raw, patterns) or _excluded(key, patterns):
+            continue
+        seen.add(key)
+        out.append(raw)
+    return tuple(out)
+
+
+def link_findings(linkages: tuple[Linkage, ...], *,
+                  scrub: Callable[[str], str] | None = None
+                  ) -> tuple[Finding, ...]:
+    """Scored linkages as ordinary pipeline findings — evidence-or-
+    dropped, deterministic file order, capped.
+
+    The finding's ``file`` is always the matched changed file, so
+    anchoring in ``validate_findings`` succeeds; the issue itself
+    surfaces as a ``history_event`` evidence record, never as a path or
+    a verdict. Prose carries only closed-set/bounded fields — issue
+    title/body/labels are never quoted here.
+    """
+    out: list[Finding] = []
+    for item in linkages[:MAX_LINK_FINDINGS]:
+        record, anchor = item.record, item.path
+        confidence = CONFIDENCE_BY_MATCH[item.match]
+        if item.match == MATCH_EXACT:
+            where = f"its text mentions the path {anchor}"
+        else:
+            where = (f"its text mentions the directory "
+                     f"{_norm(anchor).rpartition('/')[0]} of {anchor}")
+        try:
+            file_ev = EvidenceRecord.create(
+                kind="file_excerpt", locator=anchor,
+                summary=_clean(
+                    f"issue {record.key} matches {anchor} "
+                    f"({item.match}; confidence {confidence})",
+                    MAX_EVIDENCE_SUMMARY_CHARS, scrub),
+                check_type=EVIDENCE_CHECK_TYPE, scrub=scrub)
+            issue_ev = EvidenceRecord.create(
+                kind="history_event", locator=f"issue:{record.key}",
+                summary=_clean(
+                    f"configured issue {record.key} ({record.kind}, state "
+                    f"{record.state}) matched {anchor} at {item.match} "
+                    f"level", MAX_EVIDENCE_SUMMARY_CHARS, scrub),
+                check_type=EVIDENCE_CHECK_TYPE, scrub=scrub)
+            ref_ev = EvidenceRecord.create(
+                kind="rule_ref", locator=f"rule:{LINK_RULE_ID}",
+                summary=_clean(LINK_CONTRACT,
+                               MAX_EVIDENCE_SUMMARY_CHARS, scrub),
+                check_type=EVIDENCE_CHECK_TYPE, scrub=scrub)
+        except ValueError:
+            continue                        # evidence-or-dropped
+        finding = Finding(
+            file=anchor, line=None, severity="info",
+            category="maintainability",
+            title=_clean(f"Issue {record.key} linked to {anchor}",
+                         MAX_FINDING_TITLE_CHARS, scrub),
+            explanation=_clean(
+                f"Configured issue {record.key} ({record.kind}, state "
+                f"{record.state}) links to this change: {where} "
+                f"(match: {item.match}; confidence: {confidence}). "
+                f"Linkage comes from the configured issue export — a "
+                f"signal about the issue, not a verdict about this "
+                f"change.",
+                MAX_EXPLANATION_CHARS, scrub),
+            suggestion=None, confidence=confidence,
+            rule_id=LINK_RULE_ID, evidence=(file_ev, issue_ev, ref_ev),
+        )
+        source = ProvenanceSource(engine=STATIC_ENGINE_ID,
+                                  model="issue-linkage-v1", origin="rule")
+        finding.provenance_engine = source.engine
+        finding.provenance_model = source.model
+        finding.provenance_agent = None
+        finding.provenance_origin = source.origin
+        finding.provenance_sources = (source,)
+        out.append(finding)
+    return tuple(out)
+
+
+def linkage_section(records: tuple[IssueRecord, ...],
+                    linked: tuple[Linkage, ...],
+                    unlinked: tuple[IssueRecord, ...], *,
+                    files_total: int,
+                    scrub: Callable[[str], str] | None = None) -> dict:
+    """The additive report block (``linked_issues``): full totals plus
+    capped linked/unlinked rows.
+
+    Rows and titles are re-scrubbed here (redact-at-store chokepoint:
+    everything a finding or report can surface is scrubbed as well);
+    ``kind``/``state``/``match`` are closed-set values by construction.
+    """
+    matched_rows: list[dict] = []
+    for item in linked[:MAX_SECTION_ROWS]:
+        record = item.record
+        matched_rows.append({
+            "key": _clean(record.key, MAX_KEY_CHARS, scrub),
+            "kind": record.kind,
+            "state": record.state,
+            "title": _clean(record.title, MAX_TITLE_CHARS, scrub),
+            "path": _clean(item.path, MAX_PATH_CHARS, scrub),
+            "match": item.match,
+            "confidence": CONFIDENCE_BY_MATCH[item.match],
+            "updated_at": record.updated_at,
+        })
+    unmatched_rows: list[dict] = []
+    for record in unlinked[:MAX_SECTION_ROWS]:
+        unmatched_rows.append({
+            "key": _clean(record.key, MAX_KEY_CHARS, scrub),
+            "kind": record.kind,
+            "state": record.state,
+            "title": _clean(record.title, MAX_TITLE_CHARS, scrub),
+            "updated_at": record.updated_at,
+        })
+    return {
+        "issues_total": len(records),
+        "linked_total": len(linked),
+        "unlinked_total": len(unlinked),
+        "files_total": files_total,
+        "matched": matched_rows,
+        "unmatched": unmatched_rows,
+    }
+
+
+@dataclass(frozen=True)
+class LinkageOutcome:
+    """Runner result: findings + warnings + the report section.
+
+    ``linked_issues is None`` means "no linkage happened" (no configured
+    records, or no changed files to match against): the orchestrator
+    then leaves the report key off entirely — features absent =>
+    unchanged behavior.
+    """
+
+    findings: tuple[Finding, ...] = ()
+    warnings: tuple[str, ...] = ()
+    linked_issues: dict | None = None
+
+
+NOOP = LinkageOutcome()
+
+
+def run_linkage_context(*, repo_root: str, files, exclusions=(),
+                        scrub: Callable[[str], str] | None = None
+                        ) -> LinkageOutcome:
+    """V4.4-E04 entry point (orchestrator hook; ISSUE_LINKAGE default OFF).
+
+    * no configured records and no warnings -> ``NOOP``;
+    * garbage config -> warnings alone, no section;
+    * no changed files (after exclusions) -> nothing to match against:
+      no section;
+    * any crash -> one labeled warning -- the feature never fails a
+      review (mirrors the correlation, release and incident runners).
+    """
+    try:
+        records, warnings = ingest_issues(repo_root, scrub=scrub)
+        if not records:
+            return NOOP if not warnings else LinkageOutcome(
+                warnings=warnings)
+        paths = _candidate_paths(files, exclusions)
+        if not paths:
+            return LinkageOutcome(warnings=warnings)
+        linked, unlinked = score_linkages(records, paths)
+        return LinkageOutcome(
+            findings=link_findings(linked, scrub=scrub),
+            warnings=warnings,
+            linked_issues=linkage_section(
+                records, linked, unlinked, files_total=len(paths),
+                scrub=scrub))
+    except Exception as exc:  # noqa: BLE001 -- opt-in feature never fails a review
+        log.warning("issue linkage failed: %s", type(exc).__name__)
+        return LinkageOutcome(warnings=(
+            f"issue linkage failed ({type(exc).__name__}); skipped",))

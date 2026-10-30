@@ -179,6 +179,14 @@ def finalize_report(result: ReviewResult, report_id: str | None = None) -> dict:
     _releases = getattr(result, "releases", None)
     if isinstance(_releases, dict) and _releases:
         data["releases"] = _releases
+    # V4.4-E04-T02: issue linkage section. Attached by the orchestrator
+    # only when the feature ran and an issues export was matched over
+    # changed files -- the key is ABSENT otherwise (additive-only:
+    # consumers must not require it; plan migration rule: features
+    # absent => unchanged behavior).
+    _linked = getattr(result, "linked_issues", None)
+    if isinstance(_linked, dict) and _linked:
+        data["linked_issues"] = _linked
 
     _carry_finding_fields(result, data)
     return data

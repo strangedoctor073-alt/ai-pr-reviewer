@@ -400,6 +400,22 @@ class ReviewOrchestrator:
                 scrub=lambda t: _scrub(t, cfg))
             outcome.findings.extend(rel_outcome.findings)
             warnings.extend(rel_outcome.warnings)
+        # V4.4-E04-T02: issue/requirement linkage (opt-in, default OFF
+        # via ISSUE_LINKAGE): findings arrive fully stamped and redacted
+        # like the hooks above, so they join before dedup; the runner
+        # never raises and degrades to warnings. Issue text is only a
+        # match signal — anchors are changed files, and the policy
+        # exclusions are passed for defense-in-depth. The report section
+        # attaches further down (feature absent => key absent).
+        link_outcome = None
+        if getattr(cfg, "issue_linkage", False):
+            from .linkage import run_linkage_context
+            link_outcome = run_linkage_context(
+                repo_root=getattr(cfg, "repo_root", None) or ".",
+                files=files, exclusions=policy.exclude,
+                scrub=lambda t: _scrub(t, cfg))
+            outcome.findings.extend(link_outcome.findings)
+            warnings.extend(link_outcome.warnings)
         findings = deduplicate(outcome.findings)
         # D4: ``max_comments`` is a *posting* limit only. ``reported`` is
         # every anchored finding this review found — the report, the health
@@ -515,6 +531,12 @@ class ReviewOrchestrator:
         # the key off the report entirely.
         if rel_outcome is not None and rel_outcome.releases is not None:
             result.releases = rel_outcome.releases
+        # V4.4-E04-T02: the linkage report section, only when the feature
+        # ran AND an issues export was matched over changed files (the
+        # runner returns ``linked_issues=None`` on NOOP) -- absent data
+        # leaves the key off the report entirely.
+        if link_outcome is not None and link_outcome.linked_issues is not None:
+            result.linked_issues = link_outcome.linked_issues
         # V3-E02-T02: run telemetry, serialized exactly once through the
         # allowlist+redaction chokepoint. Backends without a telemetry
         # block (test doubles) report null — additive, never invented.
