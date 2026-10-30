@@ -59,7 +59,9 @@ from typing import Callable
 
 from .index.limits import is_contained
 from .models import STATIC_ENGINE_ID, EvidenceRecord, Finding, ProvenanceSource
-from .security import redact_secrets, scan_prompt_injection
+from .rules import SENSITIVE_EXCLUDE_GLOBS
+from .security import (markdown_safe_inline, redact_secrets,
+                       scan_prompt_injection)
 
 DEFAULT_ISSUES_FILE = ".ai-pr-reviewer-issues.json"
 
@@ -432,9 +434,14 @@ def _candidate_paths(files, exclusions) -> tuple[str, ...]:
     This list is BOTH sides of every match: the ladder searches only
     these paths and anchors only on them, so an excluded path can never
     surface as a linkage anchor even when handed to this module
-    directly.
+    directly. V4.4-E04-T04: the privacy baseline
+    (``SENSITIVE_EXCLUDE_GLOBS``) is applied UNCONDITIONALLY — the
+    rules.py contract is that repository config can only ADD
+    exclusions, so even a direct caller passing no exclusions cannot
+    anchor on a sensitive path.
     """
-    patterns = [str(p) for p in (exclusions or ())]
+    patterns = [*SENSITIVE_EXCLUDE_GLOBS,
+                *(str(p) for p in (exclusions or ()))]
     out: list[str] = []
     seen: set[str] = set()
     for fd in files or ():
@@ -497,9 +504,9 @@ def link_findings(linkages: tuple[Linkage, ...], *,
         finding = Finding(
             file=anchor, line=None, severity="info",
             category="maintainability",
-            title=_clean(f"Issue {record.key} linked to {anchor}",
+            title=_prose(f"Issue {record.key} linked to {anchor}",
                          MAX_FINDING_TITLE_CHARS, scrub),
-            explanation=_clean(
+            explanation=_prose(
                 f"Configured issue {record.key} ({record.kind}, state "
                 f"{record.state}) links to this change: {where} "
                 f"(match: {item.match}; confidence: {confidence}). "
@@ -685,9 +692,10 @@ def gap_findings(records: tuple[IssueRecord, ...], paths: tuple[str, ...], *,
         finding = Finding(
             file=anchor, line=None, severity="info",
             category="maintainability",
-            title=_clean(f"No linkage signal for requirement {record.key}",
-                         MAX_FINDING_TITLE_CHARS, scrub),
-            explanation=_clean(
+            title=_prose(
+                f"No linkage signal for requirement {record.key}",
+                MAX_FINDING_TITLE_CHARS, scrub),
+            explanation=_prose(
                 f"Requirement {record.key} (state {record.state}) "
                 f"matched none of the {len(paths)} file(s) in this "
                 f"review under the linkage ladder (exact path mention "
@@ -711,3 +719,33 @@ def gap_findings(records: tuple[IssueRecord, ...], paths: tuple[str, ...], *,
         finding.provenance_sources = (source,)
         out.append(finding)
     return tuple(out)
+
+
+# ------------------------------------------------------ V4.4-E04-T04
+# Output-side hardening (the privacy and rendering half of the epic;
+# T01 shipped the input half). Behavior changes:
+#
+# (1) Comment-bound finding prose (title/explanation) passes through
+#     markdown_safe_inline AFTER the redaction chokepoint: the PR
+#     comment builder interpolates these fields RAW
+#     (reporter._finding_line_md), so an issue key carrying link,
+#     mention or HTML syntax must be made inert HERE, once, at build
+#     time (markdown_safe_inline is deliberately not idempotent — no
+#     sink re-applies it to findings). Evidence summaries stay
+#     redacted-but-raw: renderers cite evidence via
+#     describe_provenance, which quotes locator-only, backtick-neutral
+#     text, and report JSON consumers escape at their own layer.
+#     Section rows are a JSON surface too — comments never render them
+#     (test-enforced), so escaping them would double-encode in the
+#     dashboard.
+# (2) _candidate_paths (above) applies the privacy baseline
+#     unconditionally.
+# Structural: linkage imports no prompt/model surface at all (AST
+# allowlist test), every finding is origin="rule" with no agent, and
+# issue body/labels never reach any output field (tests below).
+
+def _prose(text: str, limit: int,
+           scrub: Callable[[str], str] | None = None) -> str:
+    """Redact-and-bound, then markdown-inert — for fields the comment
+    sink renders raw."""
+    return markdown_safe_inline(_clean(text, limit, scrub))

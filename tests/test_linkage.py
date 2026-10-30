@@ -1018,3 +1018,171 @@ def test_runner_emits_link_and_gap_signals_without_colliding(
     report = reporter.finalize_report(result)
     assert report["linked_issues"]["matched"][0]["key"] == "PAY-1"
     assert report["linked_issues"]["unmatched"][0]["key"] == "REQ-1"
+
+
+# ============================================================ V4.4-E04-T04
+# Output-side hardening: the full leak corpus across every output
+# surface, the structural no-prompt pin (AST import allowlist — issue
+# text can never become model input through this module), the privacy
+# baseline (excluded paths never surface even when handed directly;
+# body/labels yield zero paths anywhere), and markdown safety of the
+# issue-derived fields the comment builder renders RAW.
+
+AWS_KEY = "AKIA" + "ABCDEFGHIJKLMNOP"          # matches the aws-access-key rule
+SK_KEY = "sk-" + "x" * 30                      # matches the api-sk-key rule
+
+HOSTILE_KEY = ("`[pwn](http://evil.example)` @everyone "
+               "& <script>alert(1)</script>")
+
+
+# ------------------------------------------------------ render redaction
+
+def test_full_leak_corpus_surfaces_nowhere(tmp_path):
+    _write(tmp_path, {"issues": [_iss(
+        f"PAY-{FAKE_TOKEN}",
+        title=f"rotate {FAKE_TOKEN} and hunter2hunter2",
+        body=f"fix a.py, rotate {AWS_KEY} and {SK_KEY} end",
+        labels=["label " + FAKE_TOKEN])]})
+    out = run_linkage_context(
+        repo_root=str(tmp_path), files=[_fd("a.py")],
+        scrub=lambda t: t.replace("hunter2hunter2", "[REDACTED]"))
+    assert len(out.findings) == 1              # the link still surfaced
+    blob = json.dumps({
+        "findings": [{"title": f.title, "explanation": f.explanation,
+                      "evidence": [{"locator": e.locator,
+                                    "summary": e.summary}
+                                   for e in f.evidence]}
+                     for f in out.findings],
+        "section": out.linked_issues,
+        "warnings": list(out.warnings),
+    })
+    for needle in (FAKE_TOKEN, "ghp_", AWS_KEY, "AKIA", SK_KEY, "sk-",
+                   "hunter2hunter2"):
+        assert needle not in blob
+    assert "[REDACTED]" in blob          # both layers actually fired
+
+
+# ------------------------------------- structural: no prompt/model surface
+
+def test_linkage_module_never_touches_the_model_surface():
+    """Issue text can never become model input through this module: the
+    import allowlist closes the door on prompting/provider/analyzer
+    surfaces entirely, not just today's usage."""
+    tree = ast.parse(MODULE_PATH.read_text(encoding="utf-8"))
+    roots: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            roots.update(a.name.split(".")[0] for a in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            roots.add((node.module or "").split(".")[0])
+    allowed = {"__future__",
+               # stdlib: parsing, bounds, deterministic matching
+               "json", "logging", "os", "re", "dataclasses", "datetime",
+               "fnmatch", "pathlib", "typing",
+               # package-internal: evidence models, path containment,
+               # redaction/screening, privacy baseline — no prompt path
+               "index", "models", "rules", "security"}
+    assert roots <= allowed, sorted(roots - allowed)
+    assert not roots & {"ai", "analyzer", "model_router", "prompting",
+                        "provider", "httpx", "requests"}
+    # self-check: the allowlist rejects the prompt surface when present
+    probe = ast.parse("from .ai.prompting import build_prompt\n")
+    proot = {(n.module or "").split(".")[0]
+             for n in ast.walk(probe) if isinstance(n, ast.ImportFrom)}
+    assert proot - allowed == {"ai"}
+
+
+def test_findings_are_rule_origin_never_model_output():
+    linked, _ = score_linkages(
+        (IssueRecord(key="PAY-1", body="about a.py"),), ("a.py",))
+    (f,) = link_findings(linked)
+    assert f.provenance_origin == "rule" and f.provenance_agent is None
+    (g,) = gap_findings(
+        (IssueRecord(key="REQ-1", kind="requirement"),), ("a.py",))
+    assert g.provenance_origin == "rule" and g.provenance_agent is None
+
+
+# ------------------------------------------------------- privacy baseline
+
+def test_excluded_paths_never_surface_even_when_handed_directly(tmp_path):
+    _write(tmp_path, {"issues": [_iss(
+        "PAY-1",
+        body="rotate .env and id_rsa and secrets/api.py; fix a.py")]})
+    files = [_fd(".env"), _fd("id_rsa"), _fd("secrets/api.py"), _fd("a.py")]
+    # NO exclusions passed: the T04 baseline union must still hold —
+    # repository config can only add exclusions, never remove them
+    out = run_linkage_context(repo_root=str(tmp_path), files=files)
+    section = out.linked_issues
+    assert section["files_total"] == 1            # only a.py is a candidate
+    (f,) = out.findings                           # and the link lands there
+    assert f.file == "a.py"
+    blob = (json.dumps(section)
+            + "".join(x.file for x in out.findings)
+            + "".join(e.locator for x in out.findings for e in x.evidence)
+            + "".join(x.title for x in out.findings))
+    for hostile in (".env", "id_rsa", "secrets/"):
+        assert hostile not in blob
+
+
+def test_issue_body_and_labels_yield_zero_paths_in_any_surface(tmp_path):
+    hostile = "see .env, id_rsa, secrets/prod.py and ../etc/passwd"
+    _write(tmp_path, {"issues": [_iss(
+        "PAY-1", title="Config cleanup",
+        body=hostile + "; fix a.py", labels=[".env label"])]})
+    out = run_linkage_context(repo_root=str(tmp_path),
+                              files=[_fd("a.py"), _fd("b.py")])
+    (f,) = out.findings
+    assert f.file == "a.py"
+    surfaces = (json.dumps(out.linked_issues) + f.title + f.explanation
+                + "".join(e.summary + e.locator for e in f.evidence))
+    # body and labels are match signals only: they never render — not
+    # in findings, not in evidence, not in the report section
+    for hostile_str in (".env", "id_rsa", "secrets/", "etc/passwd"):
+        assert hostile_str not in surfaces
+
+
+# --------------------------------------------------------- markdown safety
+
+def _hostile_linked():
+    rec = IssueRecord(key=HOSTILE_KEY, body="about a.py")
+    linked, _ = score_linkages((rec,), ("a.py",))
+    return link_findings(linked)
+
+
+def test_issue_keys_are_markdown_inert_in_finding_prose():
+    (f,) = _hostile_linked()
+    for field in (f.title, f.explanation):
+        assert "`" not in field                # code-span breakout gone
+        assert "](" not in field               # link syntax neutralised
+        assert "<script>" not in field         # HTML escaped
+        assert "@everyone" not in field        # mention spam neutralised
+        assert "&amp;" in field and "&lt;" in field   # escaping fired
+
+    (g,) = gap_findings(
+        (IssueRecord(key=HOSTILE_KEY, kind="requirement"),), ("a.py",))
+    for field in (g.title, g.explanation):
+        assert "`" not in field
+        assert "](" not in field
+        assert "@everyone" not in field
+        assert "&amp;" in field                # the same key, the same path
+
+
+def test_comment_markdown_renders_the_escaped_title():
+    (f,) = _hostile_linked()
+    result = _bare_result()
+    line = reporter._finding_line_md(result, f)
+    # the comment interpolates finding fields RAW — what it renders must
+    # be the escaped field, and the raw backticked title never appears
+    assert f"**{f.title}**" in line
+    assert "**Issue `" not in line
+
+
+def test_section_rows_never_reach_comment_markdown():
+    rec = IssueRecord(key="PAY-1", title="zebraquark row", body="about a.py")
+    linked, unlinked = score_linkages((rec,), ("a.py",))
+    result = _bare_result()
+    result.linked_issues = linkage_section((rec,), linked, unlinked,
+                                           files_total=1)
+    assert "zebraquark" in json.dumps(result.linked_issues)  # sanity: rows carry it
+    md = reporter.build_summary_markdown(result)
+    assert "zebraquark" not in md              # rows are a JSON surface only
