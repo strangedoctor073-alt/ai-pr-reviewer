@@ -383,6 +383,23 @@ class ReviewOrchestrator:
                 scrub=lambda t: _scrub(t, cfg))
             outcome.findings.extend(ci_outcome.findings)
             warnings.extend(ci_outcome.warnings)
+        # V4.6-E03-T03: release intelligence (opt-in, default OFF via
+        # RELEASE_INTEL): shipped-change context from the configured
+        # release file + the history index. Smallest possible hook:
+        # findings arrive fully stamped and redacted like the hooks
+        # above, so they join before dedup; the runner never raises and
+        # degrades to warnings. The report section is attached further
+        # down (feature absent => key absent).
+        rel_outcome = None
+        if getattr(cfg, "release_intel", False):
+            from .release_intel import run_release_context
+            rel_outcome = run_release_context(
+                repo_root=getattr(cfg, "repo_root", None) or ".",
+                files=files,
+                history=getattr(context, "history", None),
+                scrub=lambda t: _scrub(t, cfg))
+            outcome.findings.extend(rel_outcome.findings)
+            warnings.extend(rel_outcome.warnings)
         findings = deduplicate(outcome.findings)
         # D4: ``max_comments`` is a *posting* limit only. ``reported`` is
         # every anchored finding this review found — the report, the health
@@ -492,6 +509,12 @@ class ReviewOrchestrator:
         # leaves the key off the report entirely.
         if ci_outcome is not None and ci_outcome.correlations is not None:
             result.correlations = ci_outcome.correlations
+        # V4.6-E03-T03: the release report section, only when the feature
+        # ran AND a last release was selected over changed files (the
+        # runner returns ``releases=None`` on NOOP) -- absent data leaves
+        # the key off the report entirely.
+        if rel_outcome is not None and rel_outcome.releases is not None:
+            result.releases = rel_outcome.releases
         # V3-E02-T02: run telemetry, serialized exactly once through the
         # allowlist+redaction chokepoint. Backends without a telemetry
         # block (test doubles) report null — additive, never invented.

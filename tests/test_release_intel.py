@@ -574,3 +574,460 @@ def test_merge_and_bulk_commits_count_but_ship_no_paths():
     diff = shipped_changes(_release(ts="2026-10-09T08:53:20+00:00"), index)
     assert diff.commits_total == 2
     assert diff.paths == () and diff.paths_total == 0
+
+
+# ============================================================ V4.6-E03-T03
+# Release risk aggregation: shipped-change findings (prophecy-free
+# wording, sha-cited history evidence, evidence-or-dropped), the additive
+# report section (full totals, capped rows, re-scrub), and the opt-in
+# wiring (plain-env flag default OFF, orchestrator hook, reporter key
+# absent when the feature did not run).
+
+from ai_pr_reviewer import reporter                          # noqa: E402
+from ai_pr_reviewer.cli import parse_args                    # noqa: E402
+from ai_pr_reviewer.config import load_config                # noqa: E402
+from ai_pr_reviewer.diff_parser import FileDiff              # noqa: E402
+from ai_pr_reviewer.models import PRContext, ReviewResult     # noqa: E402
+from ai_pr_reviewer.release_intel import (CITED_SHA_CHARS,     # noqa: E402
+                                          MAX_CITED_COMMITS,
+                                          MAX_RELEASE_FINDINGS,
+                                          MAX_REPORT_FILES,
+                                          NOOP, RELEASE_RULE_ID,
+                                          ReleaseOutcome,
+                                          release_findings,
+                                          releases_section,
+                                          run_release_context)
+
+# the epoch of the ISO strings used below (computed, never guessed --
+# the T01/T02 suites pin the same pairing)
+ISO_0 = "2026-10-09T08:53:20+00:00"
+
+
+def _fd(path: str) -> FileDiff:
+    return FileDiff(old_path=path, new_path=path)
+
+
+def _history_after_release():
+    """Newest-first index where a.py and b.py shipped after the release
+    (sha anchor ``a*40`` sits at the bottom); c.py never shipped."""
+    anchor = _commit("a" * 40, EPOCH_0 - 100, "old.py")
+    touch_a = _commit("b" * 40, EPOCH_0, "a.py")
+    touch_ab = _commit("c" * 40, EPOCH_0 + 1, "a.py", "b.py")
+    return _index((touch_ab, touch_a, anchor), window_start=EPOCH_0 - 500)
+
+
+# ------------------------------------------- findings: intersection + claims
+
+def test_intersection_names_only_changed_files_that_shipped():
+    diff = shipped_changes(_release(sha="a" * 40), _history_after_release())
+    out = release_findings(diff, [_fd("a.py"), _fd("c.py"), _fd("b.py")])
+    assert [f.file for f in out] == ["a.py", "b.py"]   # diff order; c.py not shipped
+    assert all(f.rule_id == RELEASE_RULE_ID for f in out)
+    assert all(f.severity == "info" and f.line is None and f.suggestion is None
+               for f in out)
+
+
+def test_wording_is_shipped_history_never_a_prediction():
+    diff = shipped_changes(_release(sha="a" * 40), _history_after_release())
+    (f,) = release_findings(diff, [_fd("a.py")])
+    text = (f.title + " " + f.explanation).lower()
+    assert "since release" in text
+    # cites the shipped shas -- short form: the redaction chokepoint
+    # erases full 40-hex tokens, and it is never weakened (see
+    # CITED_SHA_CHARS); the full shas live in path_shas for computation
+    assert "c" * 7 in f.explanation
+    assert "c" * 40 not in f.explanation
+    assert "not a claim about this change" in f.explanation
+    for forbidden in ("caused by", "because of", "will ", "would ",
+                      "introduces", "risk of", "fixes", "prevents",
+                      "regression"):
+        assert forbidden not in text
+
+
+def test_confidence_follows_the_anchor_basis():
+    history = _history_after_release()
+    (high,) = release_findings(
+        shipped_changes(_release(sha="a" * 40), history), [_fd("a.py")])
+    assert high.confidence == "high"          # sha position is exact
+    (medium,) = release_findings(
+        shipped_changes(_release(sha="", ts=ISO_0), history), [_fd("a.py")])
+    assert medium.confidence == "medium"      # timestamp is weaker
+    assert "anchor: published_at" in medium.explanation
+
+
+def test_unassessable_diff_never_claims_anything():
+    diff = shipped_changes(_release(ts="", sha=""),
+                           _index((_commit("c" * 40, EPOCH_0, "a.py"),)))
+    assert diff.basis == BASIS_NOT_ASSESSABLE
+    assert release_findings(diff, [_fd("a.py")]) == ()
+
+
+def test_partial_diff_says_so_in_the_finding():
+    history = _index((_commit("c" * 40, EPOCH_0 + 500, "a.py"),),
+                     window_start=EPOCH_0 + 100)
+    (f,) = release_findings(shipped_changes(_release(ts=ISO_0), history),
+                            [_fd("a.py")])
+    assert "incomplete" in f.explanation
+
+
+# ------------------------------------- findings: evidence + caps + dropped
+
+def test_evidence_is_history_event_citing_shipped_shas():
+    diff = shipped_changes(_release(tag="v9.9.9", sha="a" * 40),
+                           _history_after_release())
+    (f,) = release_findings(diff, [_fd("a.py")])
+    assert [ev.kind for ev in f.evidence] == \
+        ["file_excerpt", "history_event", "rule_ref"]
+    hist = f.evidence[1]
+    assert hist.locator == "release:v9.9.9"
+    assert "c" * 7 in hist.summary and "b" * 7 in hist.summary
+    assert "c" * 40 not in hist.summary       # full hex is redacted at the chokepoint
+    assert all(ev.check_type == "release_intel" for ev in f.evidence)
+    assert f.evidence[2].locator == f"rule:{RELEASE_RULE_ID}"
+    assert f.provenance_engine == "static"
+    assert f.provenance_model == "release-intel-v1"
+    assert f.provenance_origin == "rule"
+    assert f.confidence in ("low", "medium", "high")
+
+
+def test_evidence_or_dropped_never_half_stamped(monkeypatch):
+    diff = shipped_changes(_release(sha="a" * 40), _history_after_release())
+
+    def raiser(**kwargs):
+        raise ValueError("no evidence today")
+
+    monkeypatch.setattr(ri.EvidenceRecord, "create", raiser)
+    assert release_findings(diff, [_fd("a.py")]) == ()
+
+
+def test_findings_are_capped_in_diff_order():
+    history = _index(tuple(
+        _commit(f"{i:040x}", EPOCH_0 + 10 + i, f"f{i:02d}.py")
+        for i in reversed(range(8))), window_start=EPOCH_0 - 10)
+    diff = shipped_changes(_release(ts=ISO_0), history)
+    out = release_findings(diff, [_fd(f"f{i:02d}.py") for i in range(8)])
+    assert len(out) == MAX_RELEASE_FINDINGS
+    assert [f.file for f in out] == [f"f{i:02d}.py" for i in range(5)]
+
+
+def test_path_shas_are_newest_first_and_stay_full():
+    history = _index(tuple(
+        _commit(f"{i:040x}", EPOCH_0 + 1 + i, "hot.py")
+        for i in reversed(range(7))), window_start=EPOCH_0 - 10)
+    diff = shipped_changes(_release(ts=ISO_0), history)
+    shas = diff.path_shas["hot.py"]
+    assert shas[0] == f"{6:040x}"             # newest first
+    assert len(shas) == 7                     # full count, uncapped
+    # render caps never trim the evidence store
+    small = shipped_changes(_release(ts=ISO_0), history,
+                            max_paths=1, max_commits=3)
+    assert small.path_shas == diff.path_shas
+    assert small.truncated is True and small.commits_total == 7
+
+
+# -------------------------------------------------------- report section
+
+def _big_history():
+    """7 commits on hot.py + 30 single-file commits, all shipped."""
+    singles = [_commit(f"{i:040x}", EPOCH_0 + 8 + i, f"{i:02d}.py")
+               for i in range(30)]
+    hots = [_commit(f"{100 + i:040x}", EPOCH_0 + 1 + i, "hot.py")
+            for i in range(7)]
+    ordered = sorted(singles + hots, key=lambda c: -c.committed_at)
+    return _index(tuple(ordered), window_start=EPOCH_0 - 10)
+
+
+def test_section_shape_totals_caps_and_json_roundtrip():
+    release = _release(ts=ISO_0)
+    diff = shipped_changes(release, _big_history())
+    files = [_fd("hot.py")] + [_fd(f"{i:02d}.py") for i in range(30)]
+    section = releases_section(release, diff, files)
+    assert section["last_release"] == "v1.0.0"
+    assert section["basis"] == "published_at"
+    assert section["shipped_commits"] == 37      # full totals
+    assert section["shipped_paths"] == 31
+    assert section["files_total"] == 31          # full intersection
+    assert len(section["files"]) == MAX_REPORT_FILES
+    hot_row = section["files"][0]
+    assert hot_row["path"] == "hot.py"
+    assert hot_row["commits"] == 7               # full per-file count
+    assert len(hot_row["shas"]) == MAX_CITED_COMMITS   # capped listing
+    # short-form citations survive the redaction chokepoint
+    assert all(len(sha) == CITED_SHA_CHARS for sha in hot_row["shas"])
+    assert section["partial"] is False and section["truncated"] is False
+    assert section["reasons"] == []
+    assert json.loads(json.dumps(section)) == section
+    assert releases_section(release, diff, files) == section
+
+
+def test_section_rows_and_findings_are_re_scrubbed():
+    secret = "hunter2hunter2"        # matches no redact_secrets pattern
+    path = f"src/{secret}.py"
+    history = _index((_commit("b" * 40, EPOCH_0 + 1, path),),
+                     window_start=EPOCH_0 - 10)
+    release = _release(ts=ISO_0)
+    diff = shipped_changes(release, history)
+    scrub = lambda t: t.replace(secret, "[REDACTED]")  # noqa: E731
+    section = releases_section(release, diff, [_fd(path)], scrub=scrub)
+    row = section["files"][0]
+    assert row["path"] == "src/[REDACTED].py"
+    assert all(secret not in sha for sha in row["shas"])
+    (f,) = release_findings(diff, [_fd(path)], scrub=scrub)
+    blob = f.title + f.explanation \
+        + "".join(ev.summary for ev in f.evidence)
+    assert secret not in blob
+    assert "[REDACTED]" in blob
+
+
+# -------------------------------------------------- runner + wiring seams
+
+def test_runner_noop_and_warning_only_paths(tmp_path):
+    assert run_release_context(repo_root=str(tmp_path),
+                               files=[_fd("a.py")]) == NOOP
+    # garbage config: warnings alone, no findings, no section
+    _write(tmp_path, "{oops")
+    out = run_release_context(repo_root=str(tmp_path), files=[_fd("a.py")])
+    assert out.findings == () and out.releases is None
+    assert len(out.warnings) == 1 and "not valid JSON" in out.warnings[0]
+    # configured, but nothing selectable (draft only): zero surface
+    _write(tmp_path, {"releases": [_rel("wip", draft=True)]})
+    assert run_release_context(repo_root=str(tmp_path),
+                               files=[_fd("a.py")]) == NOOP
+
+
+def test_runner_without_changed_files_has_no_surface(tmp_path):
+    _write(tmp_path, {"releases": [_rel("v1", published_at=ISO_0,
+                                        commit_sha="a" * 40)]})
+    out = run_release_context(repo_root=str(tmp_path), files=[],
+                              history=_history_after_release())
+    assert out == NOOP
+
+
+def test_runner_without_history_reports_a_labeled_section(tmp_path):
+    _write(tmp_path, {"releases": [_rel("v9", published_at=ISO_0)]})
+    out = run_release_context(repo_root=str(tmp_path), files=[_fd("a.py")],
+                              history=None)
+    assert out.findings == ()
+    assert out.releases["last_release"] == "v9"
+    assert out.releases["basis"] == "not_assessable"
+    assert out.releases["files"] == []
+    assert "history index unavailable" in out.releases["reasons"]
+
+
+def test_runner_end_to_end_is_deterministic(tmp_path):
+    _write(tmp_path, {"releases": [_rel("v9.9.9", published_at=ISO_0,
+                                        commit_sha="a" * 40)]})
+    files = [_fd("a.py"), _fd("c.py"), _fd("b.py")]
+    first = run_release_context(repo_root=str(tmp_path), files=files,
+                                history=_history_after_release())
+    assert [f.rule_id for f in first.findings] == [RELEASE_RULE_ID] * 2
+    assert [f.file for f in first.findings] == ["a.py", "b.py"]
+    assert {f.confidence for f in first.findings} == {"high"}  # sha anchor
+    assert first.releases["basis"] == "commit_sha"
+    assert first.releases["files_total"] == 2
+    assert first == run_release_context(repo_root=str(tmp_path),
+                                        files=files,
+                                        history=_history_after_release())
+
+
+def test_runner_never_raises(tmp_path, monkeypatch):
+    _write(tmp_path, {"releases": [_rel("v1", published_at=ISO_0)]})
+
+    import ai_pr_reviewer.release_intel as module
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(module, "shipped_changes", boom)
+    out = run_release_context(repo_root=str(tmp_path), files=[_fd("a.py")],
+                              history=_history_after_release())
+    assert out.findings == () and out.releases is None
+    assert out.warnings == ("release intelligence failed (RuntimeError); "
+                            "skipped",)
+
+
+def test_runner_never_calls_builtin_open(tmp_path, monkeypatch):
+    import builtins
+
+    _write(tmp_path, {"releases": [_rel("v1", published_at=ISO_0)]})
+    real_open = builtins.open
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("release_intel must not call builtin open()")
+
+    monkeypatch.setattr(builtins, "open", forbidden)
+    try:
+        out = run_release_context(repo_root=str(tmp_path),
+                                  files=[_fd("a.py")], history=_index(()))
+    finally:
+        monkeypatch.setattr(builtins, "open", real_open)
+    assert out.releases is not None          # ran entirely on Path reads
+    assert out.releases["basis"] == "published_at"
+
+
+def test_release_outcome_is_frozen():
+    with pytest.raises(FrozenInstanceError):
+        NOOP.warnings = ()                    # type: ignore[misc]
+
+
+# ------------------------------------------------------------- config flag
+
+def test_release_intel_flag_is_plain_env_default_off(monkeypatch):
+    monkeypatch.delenv("RELEASE_INTEL", raising=False)
+    assert load_config(parse_args([])).release_intel is False
+
+    monkeypatch.setenv("RELEASE_INTEL", "true")
+    assert load_config(parse_args([])).release_intel is True
+
+    # Deliberately NOT an action input: INPUT_* must not enable it.
+    monkeypatch.delenv("RELEASE_INTEL", raising=False)
+    monkeypatch.setenv("INPUT_RELEASE_INTEL", "1")
+    assert load_config(parse_args([])).release_intel is False
+
+    # And no CLI flag exists.
+    with pytest.raises(SystemExit):
+        parse_args(["--release-intel"])
+
+
+# ------------------------------------------------------- orchestrator hook
+
+def _shape(result):
+    def keyed(findings):
+        return [(f.file, f.line, f.title, f.severity, f.rule_id)
+                for f in findings]
+    return (keyed(result.findings), keyed(result.below_threshold),
+            list(result.warnings), result.health_score, result.posted_inline)
+
+
+def test_hook_is_off_by_default_and_never_runs_the_check(monkeypatch):
+    from test_orchestrator import Wired
+
+    def bomb(**kwargs):
+        raise AssertionError(
+            "release intelligence must not run when the flag is off")
+
+    import ai_pr_reviewer.release_intel as module
+    monkeypatch.setattr(module, "run_release_context", bomb)
+    w = Wired(monkeypatch)
+    result = w.run()
+    assert not [x for x in result.warnings if "release" in x.lower()]
+    assert not hasattr(result, "releases")
+
+
+def test_hook_joins_canned_findings_warnings_and_section(monkeypatch):
+    from test_orchestrator import Wired, _finding
+
+    canned_finding = _finding(file="a.py", line=2, title="Release canned",
+                              severity="low")
+    canned = ReleaseOutcome(
+        findings=(canned_finding,), warnings=("canned release warning",),
+        releases={"last_release": "v1.0.0", "basis": "commit_sha",
+                  "files": [], "files_total": 0})
+
+    import ai_pr_reviewer.release_intel as module
+    monkeypatch.setattr(module, "run_release_context", lambda **kw: canned)
+    w = Wired(monkeypatch)
+    w.cfg.release_intel = True
+    result = w.run()
+    assert "Release canned" in [f.title for f in
+                               result.findings + result.below_threshold]
+    assert "canned release warning" in result.warnings
+    assert result.releases["last_release"] == "v1.0.0"
+    assert reporter.finalize_report(result)["releases"] == canned.releases
+
+
+def test_absent_config_with_flag_on_is_zero_surface(tmp_path, monkeypatch):
+    """Flag ON but no configured releases file: the hook RINS (spied) and
+    the review output is identical to the flag-OFF run -- including the
+    report, where the releases key stays ABSENT."""
+    from test_orchestrator import Wired
+
+    w_off = Wired(monkeypatch)
+    w_off.cfg.repo_root = str(tmp_path)
+    reference = w_off.run()
+
+    calls = []
+    import ai_pr_reviewer.release_intel as module
+    real = module.run_release_context
+
+    def spy(**kwargs):
+        calls.append(kwargs)
+        return real(**kwargs)
+
+    monkeypatch.setattr(module, "run_release_context", spy)
+    w_on = Wired(monkeypatch)
+    w_on.cfg.release_intel = True
+    w_on.cfg.repo_root = str(tmp_path)
+    result = w_on.run()
+
+    assert len(calls) == 1                       # the hook ran...
+    assert not [f for f in result.findings + result.below_threshold
+                if f.rule_id == RELEASE_RULE_ID]   # ...and surfaced nothing
+    assert _shape(result) == _shape(reference)
+    assert "releases" not in reporter.finalize_report(result)
+
+
+def test_hook_end_to_end_surfaces_findings_and_the_report_key(
+        tmp_path, monkeypatch):
+    from test_orchestrator import Wired
+
+    import ai_pr_reviewer.orchestrator as orch
+
+    _write(tmp_path, {"releases": [_rel("v9.9.9", published_at=ISO_0,
+                                        commit_sha="a" * 40)]})
+    w = Wired(monkeypatch)                       # FULL_DIFF: a.py, b.py
+    w.cfg.release_intel = True
+    w.cfg.repo_root = str(tmp_path)
+    history = _history_after_release()           # ships a.py and b.py
+    real_build = w._build_context
+
+    def build_with_history(pr, files, cfg, storage=None, gh=None):
+        ctx = real_build(pr, files, cfg, storage, gh=gh)
+        ctx.history = history
+        return ctx
+
+    monkeypatch.setattr(orch, "build_context", build_with_history)
+    result = w.run()
+    surfaced = [f for f in result.findings + result.below_threshold
+                if f.rule_id == RELEASE_RULE_ID]
+    assert {f.file for f in surfaced} == {"a.py", "b.py"}
+    assert all(f.severity == "info" for f in surfaced)  # below "low" threshold
+    report = reporter.finalize_report(result)
+    assert report["releases"]["last_release"] == "v9.9.9"
+    assert report["releases"]["basis"] == "commit_sha"
+    assert report["releases"]["files_total"] == 2
+    assert json.loads(json.dumps(report)) == report
+
+    # flag OFF, same repo: the key disappears entirely (additive contract)
+    w2 = Wired(monkeypatch)
+    w2.cfg.repo_root = str(tmp_path)
+    result2 = w2.run()
+    assert "releases" not in reporter.finalize_report(result2)
+    assert not [f for f in result2.findings + result2.below_threshold
+                if f.rule_id == RELEASE_RULE_ID]
+
+
+# --------------------------------------------------------- reporter seam
+
+def _bare_result() -> ReviewResult:
+    pr = PRContext(repo="acme/api", pr_number=7, head_sha="h" * 40)
+    return ReviewResult(pr=pr, mode="static", model="static-rules-v1",
+                        findings=[])
+
+
+def test_report_key_is_conditional_and_additive():
+    result = _bare_result()
+    assert "releases" not in reporter.finalize_report(result)
+
+    section = {"last_release": "v1.0.0", "basis": "commit_sha",
+               "files": [], "files_total": 0}
+    result.releases = section
+    report = reporter.finalize_report(result)
+    assert report["releases"] == section
+    assert json.loads(json.dumps(report)) == report
+
+    # None / empty dict are treated as absent -- no empty-noise block
+    result.releases = None
+    assert "releases" not in reporter.finalize_report(result)
+    result.releases = {}
+    assert "releases" not in reporter.finalize_report(result)

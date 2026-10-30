@@ -171,6 +171,14 @@ def finalize_report(result: ReviewResult, report_id: str | None = None) -> dict:
     _correlations = getattr(result, "correlations", None)
     if isinstance(_correlations, dict) and _correlations:
         data["correlations"] = _correlations
+    # V4.6-E03-T03: release intelligence section. Attached by the
+    # orchestrator only when the feature ran and a last release was
+    # selected -- the key is ABSENT otherwise (additive-only: consumers
+    # must not require it; plan migration rule: features absent =>
+    # unchanged behavior).
+    _releases = getattr(result, "releases", None)
+    if isinstance(_releases, dict) and _releases:
+        data["releases"] = _releases
 
     _carry_finding_fields(result, data)
     return data

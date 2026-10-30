@@ -220,6 +220,14 @@ class Config:
     # is a true NOOP even when ON.
     ci_correlation: bool = False
 
+    # V4.6-E03-T03: release intelligence surfacing (the report's
+    # `releases` section + shipped-change findings). Default OFF; plain
+    # env var (RELEASE_INTEL), deliberately not an INPUT_* action input
+    # -- enabling it makes release/history context surface in review
+    # output, which needs human sign-off (plan §F). Absent configured
+    # release records is a true NOOP even when ON.
+    release_intel: bool = False
+
 
 def load_config(args) -> Config:
     _warn_unknown_inputs()
@@ -290,6 +298,8 @@ def load_config(args) -> Config:
     cfg.event_bus = _bool_field(None, "EVENT_BUS", default=False)
     # V4.6-E02-T04: no CLI flag and no INPUT_* on purpose (see the field).
     cfg.ci_correlation = _bool_field(None, "CI_CORRELATION", default=False)
+    # V4.6-E03-T03: no CLI flag and no INPUT_* on purpose (see the field).
+    cfg.release_intel = _bool_field(None, "RELEASE_INTEL", default=False)
     return cfg
 
 
