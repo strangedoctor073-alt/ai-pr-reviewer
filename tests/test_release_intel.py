@@ -1031,3 +1031,139 @@ def test_report_key_is_conditional_and_additive():
     assert "releases" not in reporter.finalize_report(result)
     result.releases = {}
     assert "releases" not in reporter.finalize_report(result)
+
+
+# ============================================================ V4.6-E03-T04
+# Draft release notes (human-triggered only, no publishing): a pure
+# bounded markdown draft that labels itself, passes every line through
+# the redaction chokepoint, and is AST-pinned so that NO production
+# module -- not even release_intel itself -- references the function:
+# the pipeline has no path to it (plan §C.4 non-goal: no changelog
+# auto-publishing).
+
+import re                                                   # noqa: E402
+
+from ai_pr_reviewer.release_intel import (MAX_NOTE_BULLETS,  # noqa: E402
+                                          MAX_NOTE_CHARS,
+                                          TRUNCATION_MARK,
+                                          draft_release_note)
+
+
+def _draft(**kw):
+    release = kw.pop("release", None) or _release(tag="v9.9.9",
+                                                  sha="a" * 40)
+    diff = kw.pop("diff", None) or shipped_changes(
+        release, _history_after_release())
+    files = kw.pop("files", None) or [_fd("a.py"), _fd("c.py")]
+    return draft_release_note(release, diff, files, **kw)
+
+
+def test_draft_is_pure_deterministic_markdown_that_labels_itself():
+    draft = _draft()
+    assert draft.startswith("# v9.9.9\n")
+    assert "nothing is published automatically" in draft
+    assert "anchor commit_sha" in draft
+    assert "2 commit(s), 2 path(s) shipped since v9.9.9" in draft
+    # shipped commits quoted with short-form shas + their subjects
+    assert "- ccccccc do thing" in draft
+    # the review's files that already shipped (c.py never shipped)
+    assert "## Files in this review already shipped since v9.9.9 (1)" in draft
+    assert "- a.py — 2 shipped commit(s): ccccccc, bbbbbbb" in draft
+    assert "- c.py" not in draft
+    # deterministic, and the redaction chokepoint stays intact: no
+    # 40-64 hex token can appear anywhere in the draft
+    assert draft == _draft()
+    assert re.search(r"\b[0-9a-f]{40,64}\b", draft) is None
+
+
+def test_draft_release_note_is_never_referenced_by_the_pipeline():
+    """Human-triggered only: no production module -- not even
+    release_intel itself -- may reference the draft function."""
+    referenced: list[str] = []
+    for path in sorted((ROOT / "ai_pr_reviewer").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Name) \
+                    and node.id == "draft_release_note":
+                referenced.append(str(path.relative_to(ROOT)))
+            elif isinstance(node, ast.Attribute) \
+                    and node.attr == "draft_release_note":
+                referenced.append(str(path.relative_to(ROOT)))
+    assert referenced == []
+    # self-check: the scan catches a reference when one exists
+    probe = ast.parse("def f(x):\n    return draft_release_note(x)\n")
+    assert any(isinstance(n, ast.Name) and n.id == "draft_release_note"
+               for n in ast.walk(probe))
+
+
+def test_draft_caps_bullets_and_total_size_with_honest_markers():
+    history = _index(tuple(
+        _commit(f"{i:040x}", EPOCH_0 + 1 + i, f"f{i:02d}.py")
+        for i in reversed(range(40))), window_start=EPOCH_0 - 10)
+    release = _release(ts=ISO_0)
+    diff = shipped_changes(release, history)
+    draft = draft_release_note(release, diff, [_fd("f00.py")])
+    commit_lines = [ln for ln in draft.splitlines()
+                    if re.match(r"- [0-9a-f]{7} ", ln)]
+    assert len(commit_lines) == MAX_NOTE_BULLETS    # listed bullets capped
+    assert "10 further commit(s) not listed" in draft
+    assert "40 commit(s)" in draft                  # full total stated
+    assert "- f00.py — 1 shipped commit(s): " in draft
+
+    # total size: a hostile draft truncates at a LINE boundary, so no
+    # sha is ever cut in half, and the marker says it is incomplete
+    big_history = _index(tuple(
+        _commit(f"{i:040x}", EPOCH_0 + 1 + i, subject="y" * 300)
+        for i in reversed(range(40))), window_start=EPOCH_0 - 10)
+    big = draft_release_note(release,
+                             shipped_changes(release, big_history),
+                             [_fd("f00.py")])
+    assert len(big) <= MAX_NOTE_CHARS
+    assert big.endswith(TRUNCATION_MARK)
+    sha_lines = [ln for ln in big.splitlines()
+                 if re.match(r"- [0-9a-f]{7} ", ln)]
+    assert sha_lines and all(
+        len(ln.split()[1]) == CITED_SHA_CHARS for ln in sha_lines)
+
+
+def test_draft_lines_pass_the_redaction_chokepoint():
+    path = f"src/{FAKE_TOKEN}.py"
+    history = _index((_commit("b" * 40, EPOCH_0 + 1, path,
+                              subject=f"update {FAKE_TOKEN} for "
+                                      f"hunter2hunter2"),),
+                     window_start=EPOCH_0 - 10)
+    release = _release(ts=ISO_0)
+    diff = shipped_changes(release, history)
+    scrub = lambda t: t.replace("hunter2hunter2", "[REDACTED]")  # noqa: E731
+    draft = draft_release_note(release, diff, [_fd(path)], scrub=scrub)
+    assert FAKE_TOKEN not in draft
+    assert "ghp_" not in draft
+    assert "hunter2hunter2" not in draft
+    assert "[REDACTED]" in draft           # both layers fired
+
+
+def test_draft_of_an_unassessable_diff_says_so():
+    release = _release(tag="v9.9.9", ts="", sha="")
+    diff = shipped_changes(release,
+                           _index((_commit("c" * 40, EPOCH_0, "a.py"),)))
+    draft = draft_release_note(release, diff, [_fd("a.py")])
+    assert "shipped changes since v9.9.9 are unknown" in draft
+    assert "## Shipped commits" not in draft
+    assert "## Caveats" in draft            # the labeled reasons carry it
+    assert "neither a sha" in draft
+
+
+def test_draft_release_note_never_touches_io(monkeypatch):
+    import builtins
+
+    real_open = builtins.open
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("draft_release_note must not call builtin open()")
+
+    monkeypatch.setattr(builtins, "open", forbidden)
+    try:
+        draft = _draft()
+    finally:
+        monkeypatch.setattr(builtins, "open", real_open)
+    assert draft.startswith("# v9.9.9")

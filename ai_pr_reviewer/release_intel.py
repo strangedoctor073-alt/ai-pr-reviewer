@@ -669,3 +669,108 @@ def run_release_context(*, repo_root: str, files, history=None,
         log.warning("release intelligence failed: %s", type(exc).__name__)
         return ReleaseOutcome(warnings=(
             f"release intelligence failed ({type(exc).__name__}); skipped",))
+
+
+# ------------------------------------------------------ V4.6-E03-T04
+# Draft release notes: a pure, bounded markdown DRAFT for a human to
+# review and publish themselves. HUMAN-TRIGGERED ONLY -- plan §C.4
+# non-goal: no changelog auto-publishing. The pipeline has no path to
+# this function (the test suite AST-pins that no production module
+# references the symbol at all), the function performs no I/O, and the
+# artifact labels itself a draft. Commit subjects are quoted as shipped
+# history (sanitized at history ingest, re-redacted here per line);
+# sha citations use the short form past the redaction chokepoint.
+
+MAX_NOTE_BULLETS = 30            # bullets per section of the draft
+MAX_NOTE_CHARS = 4_000           # total draft size (free text: truncates)
+MAX_NOTE_LINE_CHARS = 400        # one line, one subject, bounded
+TRUNCATION_MARK = "… (truncated)"
+
+
+def draft_release_note(release: ReleaseRecord, diff: ReleaseDiff, files, *,
+                       scrub: Callable[[str], str] | None = None) -> str:
+    """Markdown DRAFT release notes for a human to review and publish.
+
+    Pure and bounded: no I/O, deterministic output, every line through
+    the redaction chokepoint, sha citations in short form
+    (``CITED_SHA_CHARS``). Nothing is interpreted and nothing here is a
+    claim about any pending change -- the draft states what shipped.
+
+    The review pipeline never calls this function; a human triggers it
+    directly::
+
+        records, _ = ingest_releases(repo_root)
+        release = select_last_release(records)
+        diff = shipped_changes(release, history_index)
+        print(draft_release_note(release, diff, changed_files))
+    """
+
+    def line(text: str) -> str:
+        out = redact_secrets(str(text))
+        if scrub is not None:
+            out = scrub(out)
+        return " ".join(out.translate(_CONTROL).split())[:MAX_NOTE_LINE_CHARS]
+
+    heading = f"# {release.tag}"
+    if release.name and release.name != release.tag:
+        heading += f" ({release.name})"
+    lines = [
+        line(heading),
+        line("_Draft for human review — nothing is published "
+             "automatically._"),
+    ]
+    if diff.basis == BASIS_NOT_ASSESSABLE:
+        lines.append(line(f"Anchor {diff.basis}: shipped changes since "
+                          f"{release.tag} are unknown."))
+    else:
+        lines.append(line(
+            f"Published {release.published_at or 'unknown'} · anchor "
+            f"{diff.basis} · {diff.commits_total} commit(s), "
+            f"{diff.paths_total} path(s) shipped since {release.tag}."))
+        if diff.commits:
+            lines.append("")
+            lines.append(f"## Shipped commits since {release.tag}")
+            shown = diff.commits[:MAX_NOTE_BULLETS]
+            for sha, subject in shown:
+                lines.append(line(f"- {sha[:CITED_SHA_CHARS]} {subject}"))
+            if diff.commits_total > len(shown):
+                lines.append(f"- … {diff.commits_total - len(shown)} "
+                             f"further commit(s) not listed")
+        matched = [raw for raw in _changed_paths(files)
+                   if diff.path_shas.get(_norm(raw))]
+        if matched:
+            lines.append("")
+            lines.append(f"## Files in this review already shipped since "
+                         f"{release.tag} ({len(matched)})")
+            for raw in matched[:MAX_NOTE_BULLETS]:
+                shas = diff.path_shas[_norm(raw)]
+                cited = ", ".join(sha[:CITED_SHA_CHARS]
+                                  for sha in shas[:MAX_CITED_COMMITS])
+                lines.append(line(
+                    f"- {raw} — {len(shas)} shipped commit(s): {cited}"))
+            if len(matched) > MAX_NOTE_BULLETS:
+                lines.append(f"- … {len(matched) - MAX_NOTE_BULLETS} "
+                             f"more file(s) not listed")
+    caveats = list(diff.reasons)
+    if diff.truncated:
+        caveats.append("the commit and path listings are capped; the "
+                       "totals above are complete")
+    if caveats:
+        lines.append("")
+        lines.append("## Caveats")
+        for caveat in caveats:
+            lines.append(line(f"- {caveat}"))
+    text = "\n".join(lines)
+    if len(text) > MAX_NOTE_CHARS:
+        # free text truncates at a LINE boundary so no sha or path is
+        # ever cut in half; the marker says the draft is incomplete
+        kept: list[str] = []
+        size = 0
+        for entry in lines:
+            if size + len(entry) + 1 > MAX_NOTE_CHARS - len(TRUNCATION_MARK) - 1:
+                break
+            kept.append(entry)
+            size += len(entry) + 1
+        kept.append(TRUNCATION_MARK)
+        text = "\n".join(kept)
+    return text
