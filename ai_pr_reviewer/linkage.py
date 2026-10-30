@@ -604,8 +604,12 @@ def run_linkage_context(*, repo_root: str, files, exclusions=(),
         if not paths:
             return LinkageOutcome(warnings=warnings)
         linked, unlinked = score_linkages(records, paths)
+        # V4.4-E04-T03: link signals first, then the uniform gap
+        # signals for unlinked requirements (separate rule ids, so
+        # dedup keeps both when they share the first-file anchor).
         return LinkageOutcome(
-            findings=link_findings(linked, scrub=scrub),
+            findings=link_findings(linked, scrub=scrub)
+                     + gap_findings(unlinked, paths, scrub=scrub),
             warnings=warnings,
             linked_issues=linkage_section(
                 records, linked, unlinked, files_total=len(paths),
@@ -614,3 +618,96 @@ def run_linkage_context(*, repo_root: str, files, exclusions=(),
         log.warning("issue linkage failed: %s", type(exc).__name__)
         return LinkageOutcome(warnings=(
             f"issue linkage failed ({type(exc).__name__}); skipped",))
+
+
+# ------------------------------------------------------ V4.4-E04-T03
+# Gap signals: unlinked REQUIREMENT records as info-level, hedged,
+# uniform-anchor findings. Plan §C.3 non-goal: no requirement-compliance
+# certification — this is evidence-backed SIGNAL only, and the wording
+# is pinned by tests (never "compliant"/"non-compliant", never "not
+# implemented", never "failed"; ``suggestion`` is always None). Only
+# records that affirmatively declare ``kind: requirement`` produce a
+# signal — an unlinked plain issue is context (the section lists it),
+# not a gap. The flag, hook and report section came with T02; the
+# runner below is the only wiring this ticket adds.
+
+GAP_RULE_ID = "ISSUE_GAP"
+GAP_CONTRACT = (
+    "uniform gap signal for requirement records that matched no file "
+    "in this review: absence of linkage evidence in the configured "
+    "issue export only; never a statement about satisfaction, "
+    "coverage, certification or status")
+MAX_GAP_FINDINGS = 5
+
+
+def gap_findings(records: tuple[IssueRecord, ...], paths: tuple[str, ...], *,
+                 scrub: Callable[[str], str] | None = None
+                 ) -> tuple[Finding, ...]:
+    """Unlinked requirements as uniform gap signals.
+
+    A record that matched no file has no natural anchor, and issue text
+    can never yield one (T02's privacy core) — so every gap signal
+    anchors on the review's FIRST changed file and says so: the anchor
+    is a reporting requirement and carries no file relationship.
+    Separate ``rule_id`` from the linkage findings so dedup can never
+    collapse a link signal and a gap signal that share that anchor.
+    Evidence-or-dropped, capped at ``MAX_GAP_FINDINGS``, record order.
+    """
+    if not paths:
+        return ()
+    anchor = paths[0]
+    gaps = [record for record in records if record.kind == KIND_REQUIREMENT]
+    out: list[Finding] = []
+    for record in gaps[:MAX_GAP_FINDINGS]:
+        try:
+            file_ev = EvidenceRecord.create(
+                kind="file_excerpt", locator=anchor,
+                summary=_clean(
+                    f"uniform reporting anchor {anchor}; requirement "
+                    f"{record.key} matched none of the {len(paths)} "
+                    f"changed file(s)", MAX_EVIDENCE_SUMMARY_CHARS, scrub),
+                check_type=EVIDENCE_CHECK_TYPE, scrub=scrub)
+            issue_ev = EvidenceRecord.create(
+                kind="history_event", locator=f"issue:{record.key}",
+                summary=_clean(
+                    f"configured requirement {record.key} (state "
+                    f"{record.state}): no ladder match against this "
+                    f"review's {len(paths)} changed file(s)",
+                    MAX_EVIDENCE_SUMMARY_CHARS, scrub),
+                check_type=EVIDENCE_CHECK_TYPE, scrub=scrub)
+            ref_ev = EvidenceRecord.create(
+                kind="rule_ref", locator=f"rule:{GAP_RULE_ID}",
+                summary=_clean(GAP_CONTRACT,
+                               MAX_EVIDENCE_SUMMARY_CHARS, scrub),
+                check_type=EVIDENCE_CHECK_TYPE, scrub=scrub)
+        except ValueError:
+            continue                        # evidence-or-dropped
+        finding = Finding(
+            file=anchor, line=None, severity="info",
+            category="maintainability",
+            title=_clean(f"No linkage signal for requirement {record.key}",
+                         MAX_FINDING_TITLE_CHARS, scrub),
+            explanation=_clean(
+                f"Requirement {record.key} (state {record.state}) "
+                f"matched none of the {len(paths)} file(s) in this "
+                f"review under the linkage ladder (exact path mention "
+                f"or parent-directory mention). The configured issue "
+                f"export offers no linkage evidence for this change "
+                f"here: a signal only — this run makes no statement "
+                f"about whether the requirement is satisfied, covered "
+                f"or unmet. Reporting anchor: {anchor} is the review's "
+                f"first changed file; it is a reporting requirement "
+                f"and carries no file relationship.",
+                MAX_EXPLANATION_CHARS, scrub),
+            suggestion=None, confidence="low",
+            rule_id=GAP_RULE_ID, evidence=(file_ev, issue_ev, ref_ev),
+        )
+        source = ProvenanceSource(engine=STATIC_ENGINE_ID,
+                                  model="issue-linkage-v1", origin="rule")
+        finding.provenance_engine = source.engine
+        finding.provenance_model = source.model
+        finding.provenance_agent = None
+        finding.provenance_origin = source.origin
+        finding.provenance_sources = (source,)
+        out.append(finding)
+    return tuple(out)

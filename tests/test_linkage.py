@@ -687,7 +687,9 @@ def test_runner_end_to_end_is_deterministic(tmp_path):
         _iss("REQ-1", kind="requirement", body="nothing here")]})
     files = [_fd("a.py"), _fd("b.py")]
     first = run_linkage_context(repo_root=str(tmp_path), files=files)
-    assert [f.rule_id for f in first.findings] == [LINK_RULE_ID]
+    # linked PAY-1 (T02) + the uniform gap signal for unlinked REQ-1
+    # (T03) -- one finding per record, in record order
+    assert [f.rule_id for f in first.findings] == [LINK_RULE_ID, "ISSUE_GAP"]
     assert first.linked_issues["issues_total"] == 2
     assert first.linked_issues["linked_total"] == 1
     assert first == run_linkage_context(repo_root=str(tmp_path),
@@ -895,3 +897,124 @@ def test_report_key_is_conditional_and_additive():
     assert "linked_issues" not in reporter.finalize_report(result)
     result.linked_issues = {}
     assert "linked_issues" not in reporter.finalize_report(result)
+
+
+# ============================================================ V4.4-E04-T03
+# Gap signals: unlinked requirements as info-level, hedged, uniform-
+# anchor findings — the anchor's non-relational role is disclosed in
+# the wording, forbidden compliance vocabulary is pinned by tests,
+# suggestion is always None, the cap holds, and a separate rule id
+# keeps dedup from collapsing a link signal and a gap signal that
+# share the first-file anchor.
+
+from ai_pr_reviewer.linkage import (GAP_CONTRACT, GAP_RULE_ID,   # noqa: E402
+                                    MAX_GAP_FINDINGS, gap_findings)
+
+
+def _gappy():
+    """Linked requirement + unlinked requirement + unlinked issue."""
+    records = (
+        IssueRecord(key="REQ-1", kind="requirement", state="open",
+                    body="about a.py"),
+        IssueRecord(key="REQ-2", kind="requirement", state="closed",
+                    body="no path at all"),
+        IssueRecord(key="PAY-9", body="docs typo, no path"),
+    )
+    linked, unlinked = score_linkages(records, ("a.py", "b.py"))
+    return linked, unlinked
+
+
+def test_gap_signals_target_unlinked_requirements_only():
+    linked, unlinked = _gappy()
+    assert [l.record.key for l in linked] == ["REQ-1"]   # no gap for it
+    (f,) = gap_findings(unlinked, ("a.py", "b.py"))
+    # REQ-2 (unlinked requirement) signals; the unlinked plain issue
+    # PAY-9 is context (the section lists it), not a gap
+    assert f.rule_id == GAP_RULE_ID
+    assert "REQ-2" in f.title and "PAY-9" not in f.title
+
+
+def test_gap_wording_never_asserts_compliance():
+    _, unlinked = _gappy()
+    (f,) = gap_findings(unlinked, ("a.py", "b.py"))
+    text = (f.title + " " + f.explanation + " "
+            + "".join(ev.summary for ev in f.evidence)).lower()
+    for forbidden in ("compliant", "non-compliant", "not implemented",
+                      "failed", "certified"):
+        assert forbidden not in text
+    assert f.suggestion is None
+    assert f.severity == "info" and f.confidence == "low"
+    assert "signal only" in f.explanation
+    assert "makes no statement" in f.explanation
+
+
+def test_gap_anchor_is_first_changed_file_and_says_so():
+    _, unlinked = _gappy()
+    (f,) = gap_findings(unlinked, ("b.py", "a.py"))    # first file wins
+    assert f.file == "b.py"
+    assert "Reporting anchor: b.py" in f.explanation
+    assert "carries no file relationship" in f.explanation
+    # the record's own text never anchors or appears: it matched nothing
+    assert "no path at all" not in f.explanation
+
+
+def test_gap_requires_changed_files():
+    _, unlinked = _gappy()
+    assert gap_findings(unlinked, ()) == ()
+
+
+def test_gap_evidence_and_provenance():
+    _, unlinked = _gappy()
+    (f,) = gap_findings(unlinked, ("a.py",))
+    assert [ev.kind for ev in f.evidence] == \
+        ["file_excerpt", "history_event", "rule_ref"]
+    assert f.evidence[0].locator == "a.py"
+    assert f.evidence[1].locator == "issue:REQ-2"
+    assert f.evidence[2].locator == f"rule:{GAP_RULE_ID}"
+    assert all(ev.check_type == "issue_linkage" for ev in f.evidence)
+    assert GAP_CONTRACT in f.evidence[2].summary
+    assert f.provenance_origin == "rule"
+    assert f.provenance_model == "issue-linkage-v1"
+
+
+def test_gap_signals_are_capped_in_record_order():
+    records = tuple(IssueRecord(key=f"REQ-{i}", kind="requirement",
+                                body="nothing") for i in range(8))
+    out = gap_findings(records, ("a.py",))
+    assert len(out) == MAX_GAP_FINDINGS
+    assert [f.title for f in out] == [
+        f"No linkage signal for requirement REQ-{i}" for i in range(5)]
+
+
+def test_gap_evidence_or_dropped(monkeypatch):
+    _, unlinked = _gappy()
+
+    def raiser(**kwargs):
+        raise ValueError("no evidence today")
+
+    monkeypatch.setattr(li.EvidenceRecord, "create", raiser)
+    assert gap_findings(unlinked, ("a.py",)) == ()
+
+
+def test_runner_emits_link_and_gap_signals_without_colliding(
+        tmp_path, monkeypatch):
+    """Dedup keeps both signals when they share the uniform anchor:
+    PAY-1 links a.py and the unlinked REQ-1 gaps onto a.py (first
+    file) — distinct rule ids mean neither swallows the other."""
+    from test_orchestrator import Wired
+
+    _write(tmp_path, {"issues": [
+        _iss("PAY-1", body="expiry logic in a.py"),
+        _iss("REQ-1", kind="requirement", title="Must expire refunds",
+             state="open", body="no path mentioned here")]})
+    w = Wired(monkeypatch)
+    w.cfg.issue_linkage = True
+    w.cfg.repo_root = str(tmp_path)
+    result = w.run()
+    surfaced = [f for f in result.findings + result.below_threshold
+                if f.rule_id in (LINK_RULE_ID, GAP_RULE_ID)]
+    assert [(f.rule_id, f.file) for f in surfaced] == [
+        (LINK_RULE_ID, "a.py"), (GAP_RULE_ID, "a.py")]
+    report = reporter.finalize_report(result)
+    assert report["linked_issues"]["matched"][0]["key"] == "PAY-1"
+    assert report["linked_issues"]["unmatched"][0]["key"] == "REQ-1"
