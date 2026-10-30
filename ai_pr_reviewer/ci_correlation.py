@@ -47,6 +47,7 @@ Within a run, ``(run_id, test_id)`` duplicates keep the first.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from dataclasses import dataclass
@@ -55,7 +56,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Iterable
 
 from .index.limits import is_contained
+from .models import (STATIC_ENGINE_ID, EvidenceRecord, Finding,
+                     ProvenanceSource)
 from .security import redact_secrets
+from .test_intel import TestEvidence
 
 if TYPE_CHECKING:
     from .test_intel import TestTaxonomy
@@ -563,13 +567,9 @@ def correlate(comparison: WindowComparison, *,
     reports ``available`` — an absent index caps confidence at medium
     (convention still holds, edge claims do not).
     """
-    edges: dict[str, set[str]] = {}
-    if taxonomy is not None and taxonomy.available:
-        for link in taxonomy.links:
-            edges.setdefault(link.test, set()).add(link.module)
-    changed = frozenset(
-        p.replace("\\", "/").removeprefix("./")
-        for p in changed_paths if isinstance(p, str))
+    edges = _build_edges(taxonomy)
+    changed = frozenset(_norm(p) for p in changed_paths
+                        if isinstance(p, str))
     changed_stems = frozenset(
         stem for stem in (_path_stem(p) for p in changed) if len(stem) >= 2)
 
@@ -587,3 +587,375 @@ def correlate(comparison: WindowComparison, *,
                                          confidence=confidence,
                                          ground=ground))
     return tuple(out)
+
+
+# ------------------------------------------------------ V4.6-E02-T04
+# Surfacing (ADR-020 decisions 4+5): evidence findings plus the report
+# section, wired behind the CI_CORRELATION flag (default OFF, config.py;
+# orchestrator hook joins them before dedup). Wording is test-pinned to
+# observed window relations only -- a resolved signature is the absence
+# of failures, never proof this change fixed anything; the only grounds
+# allowed to name changed code are the two whose intersections the tests
+# pin (index edge / path convention), everything else states that no
+# changed file is implicated ("no unrelated claims").
+#
+# Finding.confidence is the frozen low|medium|high set (models.py): the
+# four-value ladder folds DOWN onto it (unknown -> low). The true label
+# survives verbatim in the finding's explanation text and the report
+# rows -- the finding field must not lose the information, only round
+# it off.
+
+CORRELATION_RULE_ID = "CI_CORRELATION"
+MAX_CORRELATION_FINDINGS = 9
+MAX_REPORT_ROWS_PER_RELATION = 20
+MAX_TITLE_CHARS = 200
+MAX_EXPLANATION_CHARS = 900
+MAX_EVIDENCE_SUMMARY_CHARS = 400        # mirrors models.MAX_EVIDENCE_SUMMARY_CHARS
+CORRELATION_CONTRACT = (
+    "deterministic comparison of configured CI failure signatures "
+    "(test_id, suite, error_class) across configuration-declared "
+    "pre/post change windows; confidence (high/medium/low/unknown) "
+    "labels evidence strength on a closed ladder that missing data can "
+    "only lower -- relations are observed co-occurrence, never a causal "
+    "claim about this change")
+
+log = logging.getLogger(__name__)
+
+_FINDING_CONFIDENCE = {
+    CONFIDENCE_HIGH: "high",
+    CONFIDENCE_MEDIUM: "medium",
+    CONFIDENCE_LOW: "low",
+    CONFIDENCE_UNKNOWN: "low",           # folds DOWN; label kept in evidence
+}
+
+
+def _norm(path: str) -> str:
+    """Shared diff-path normalization (windows separators, ``./``)."""
+    return path.replace("\\", "/").removeprefix("./")
+
+
+def _build_edges(taxonomy) -> dict[str, set[str]]:
+    """test file -> modules the index maps it to; empty when unavailable."""
+    edges: dict[str, set[str]] = {}
+    if taxonomy is not None and taxonomy.available:
+        for link in taxonomy.links:
+            edges.setdefault(link.test, set()).add(link.module)
+    return edges
+
+
+def _changed_view(files) -> tuple[tuple[str, ...], frozenset[str],
+                                   dict[str, str]]:
+    """Diff paths in review order: (originals, normalized set, norm->orig).
+
+    The norm->orig map keeps anchors and report spelling in the
+    reviewer's own form of each path while all matching runs on the
+    normalized form.
+    """
+    ordered: list[str] = []
+    related: dict[str, str] = {}
+    for fd in files or ():
+        raw = str(getattr(fd, "path", "") or "")
+        if not raw:
+            continue
+        ordered.append(raw)
+        related.setdefault(_norm(raw), raw)
+    return tuple(ordered), frozenset(related), related
+
+
+_RELATION_TEXT = {
+    RELATION_NEW: (
+        "The failure signature is new in the post-change window: it "
+        "appears in post-change CI runs and in no pre-change run on file."),
+    RELATION_RESOLVED: (
+        "The failure signature is absent from the post-change window. "
+        "That is the absence of failures, not proof this change fixed "
+        "it: the test may be flaky, renamed, skipped or deleted."),
+    RELATION_PERSISTENT: (
+        "The failure signature is present in both windows: it is "
+        "pre-existing and predates this change."),
+}
+_UNKNOWN_CAP = (
+    "The failure's error class could not be classified, which caps "
+    "confidence one step below what the evidence otherwise supports.")
+# The only texts for grounds that must NOT name a changed file. The two
+# code-citing grounds double as a bug-guard fallback: should the
+# intersection that earned such a ground be gone at render time, the
+# finding degrades to window-only wording instead of naming a file it can
+# no longer prove.
+_NO_GROUND_TEXT = {
+    GROUND_WINDOW_ONLY: (
+        "Nothing in the test-to-source index or the path conventions "
+        "ties this test to the changed files: the relation is timing "
+        "(the declared windows) only, and no changed file is implicated."),
+    GROUND_NOT_ASSESSABLE: (
+        "The test id names no file the index or path conventions can "
+        "resolve against this diff, so no changed file can be related "
+        "to this failure at all."),
+}
+
+
+def _title_for(item: CorrelatedFailure) -> str:
+    test_id = item.signature.test_id
+    if item.relation == RELATION_NEW:
+        return f"CI failure new in post-change window: {test_id}"
+    if item.relation == RELATION_RESOLVED:
+        return f"CI failure absent from post-change window: {test_id}"
+    return f"CI failure present in both windows: {test_id}"
+
+
+def _code_ground(item: CorrelatedFailure, *, edges: dict[str, set[str]],
+                 changed: frozenset[str], related: dict[str, str]
+                 ) -> tuple[str, str | None]:
+    """Ground text plus the matched normalized path, for the two grounds
+    allowed to name changed code; ``("", None)`` for the two that must not.
+
+    Both grounds recompute their intersection (sorted, first wins) with
+    the same set algebra ``_assess`` used -- the finding vocabulary stays
+    the closed four fields (T03 schema pin), so the recomputation is the
+    only thing that can carry the match into wording.
+    """
+    test_file = _test_file_of(item.signature.test_id)
+    if not test_file:
+        return "", None
+    if item.ground == GROUND_INDEX_EDGE:
+        matched = sorted(edges.get(test_file, set()) & changed)
+        if matched:
+            named = related.get(matched[0], matched[0])
+            return (f"the test-to-source index maps {test_file} to "
+                    f"{named}, which this change modifies"), matched[0]
+    if item.ground == GROUND_PATH_CONVENTION:
+        if test_file in changed:
+            return (f"the failing test file {test_file} is itself "
+                    f"modified by this change"), test_file
+        stem = _path_stem(test_file)
+        if len(stem) >= 2:
+            matched = sorted(p for p in changed if _path_stem(p) == stem)
+            if matched:
+                named = related.get(matched[0], matched[0])
+                return (f"{test_file} follows the naming convention of "
+                        f"changed file {named}"), matched[0]
+    return "", None
+
+
+def _explanation(item: CorrelatedFailure, code_text: str) -> str:
+    ground = code_text or _NO_GROUND_TEXT.get(item.ground) \
+        or _NO_GROUND_TEXT[GROUND_WINDOW_ONLY]
+    parts = [_RELATION_TEXT[item.relation], f"Ground: {ground}",
+             f"Confidence {item.confidence}."]
+    if item.signature.error_class == UNKNOWN_ERROR_CLASS:
+        parts.append(_UNKNOWN_CAP)
+    parts.append("Observed CI evidence from the configured sources -- "
+                 "co-occurrence, never a causal claim about this change.")
+    return " ".join(parts)
+
+
+def _tev1_record(item: CorrelatedFailure, *, test_file: str | None,
+                 selector: str, edges: dict[str, set[str]],
+                 run_ref: str | None,
+                 scrub: Callable[[str], str] | None) -> EvidenceRecord | None:
+    """tev1 ``test_result`` record (T2's observed-evidence seam), or None.
+
+    ``covers`` comes ONLY from index edges (never stem guesses), capped at
+    the tev1 maximum. Anything tev1's strict bounds or redaction round-trip
+    refuse (over-long path/name, redaction-altered summary) falls back to
+    a plain ``test_result`` record; a too-long run id yields NO run_ref
+    rather than a truncated one -- a cut reference would name the wrong
+    run.
+    """
+    if test_file:
+        targets = sorted(edges.get(test_file, set()))
+        covers = tuple(c for c in targets if len(c) <= 80)[:3]
+        ref = run_ref if run_ref and len(run_ref) <= 40 else None
+        try:
+            return TestEvidence(
+                test_path=test_file, outcome="failed", origin="ci_ingest",
+                test_name=selector or None, covers=covers,
+                # tev1 drops covers_n from the summary when it equals
+                # len(covers), so passing it there makes the round-trip
+                # check fail -- it is only information when the total
+                # EXCEEDS the capped covers.
+                covers_total=len(targets) if len(targets) > len(covers)
+                else None,
+                run_ref=ref,
+            ).to_record(scrub)
+        except ValueError:
+            pass
+    try:
+        return EvidenceRecord.create(
+            kind="test_result", locator=item.signature.test_id,
+            summary=_clean(
+                f"ci-failure test={item.signature.test_id} "
+                f"outcome=failed origin=ci_ingest "
+                f"confidence={item.confidence} relation={item.relation} "
+                f"class={item.signature.error_class}",
+                MAX_EVIDENCE_SUMMARY_CHARS, scrub),
+            check_type="ci_failure.v1", scrub=scrub)
+    except ValueError:
+        return None
+
+
+def correlation_findings(correlated: Iterable[CorrelatedFailure], *,
+                         records: Iterable[FailureRecord], files,
+                         taxonomy: "TestTaxonomy | None" = None,
+                         scrub: Callable[[str], str] | None = None
+                         ) -> tuple[Finding, ...]:
+    """Render correlated failures as info-severity evidence findings.
+
+    Evidence-or-dropped (mirrors incident linkage): a finding whose
+    evidence cannot be built under the evidence contract is dropped
+    whole, never emitted half-stamped. Deterministic: the correlated
+    order (relations in fixed sequence, signatures sorted within).
+    """
+    edges = _build_edges(taxonomy)
+    ordered, changed, related = _changed_view(files)
+    first_run: dict[FailureSignature, str] = {}
+    for rec in records:
+        first_run.setdefault(rec.signature, rec.run_id)
+
+    out: list[Finding] = []
+    for item in correlated:
+        if len(out) >= MAX_CORRELATION_FINDINGS:
+            break
+        test_id = item.signature.test_id
+        test_file = _test_file_of(test_id)
+        selector = test_id.split("::", 1)[1] if "::" in test_id else ""
+        code_text, matched = _code_ground(item, edges=edges, changed=changed,
+                                          related=related)
+        # Anchor: the ground's own matched file, else the first changed
+        # file. The latter is PLACEMENT ONLY -- an info row must live
+        # somewhere; the wording never claims the fallback anchor is
+        # implicated (tests pin that separation).
+        anchor = related.get(matched, matched) if matched else (
+            ordered[0] if ordered else None)
+        if not anchor:
+            continue
+        try:
+            evidence: list[EvidenceRecord] = []
+            if matched is not None:
+                evidence.append(EvidenceRecord.create(
+                    kind="file_excerpt", locator=related.get(matched, matched),
+                    summary=_clean(
+                        f"correlation ground: {code_text} "
+                        f"(confidence: {item.confidence})",
+                        MAX_EVIDENCE_SUMMARY_CHARS, scrub),
+                    check_type="ci_correlation", scrub=scrub))
+            if test_file is not None:
+                tev = _tev1_record(
+                    item, test_file=test_file, selector=selector, edges=edges,
+                    run_ref=first_run.get(item.signature), scrub=scrub)
+                if tev is not None:
+                    evidence.append(tev)
+            evidence.append(EvidenceRecord.create(
+                kind="rule_ref", locator=f"rule:{CORRELATION_RULE_ID}",
+                summary=_clean(CORRELATION_CONTRACT,
+                               MAX_EVIDENCE_SUMMARY_CHARS, scrub),
+                check_type="ci_correlation", scrub=scrub))
+        except ValueError:
+            continue                        # evidence-or-dropped
+        finding = Finding(
+            file=anchor, line=None, severity="info",
+            category="maintainability",
+            title=_clean(_title_for(item), MAX_TITLE_CHARS, scrub),
+            explanation=_clean(_explanation(item, code_text),
+                               MAX_EXPLANATION_CHARS, scrub),
+            suggestion=None,
+            confidence=_FINDING_CONFIDENCE.get(item.confidence, "low"),
+            rule_id=CORRELATION_RULE_ID, evidence=tuple(evidence),
+        )
+        source = ProvenanceSource(engine=STATIC_ENGINE_ID,
+                                  model="ci-correlation-v1", origin="rule")
+        finding.provenance_engine = source.engine
+        finding.provenance_model = source.model
+        finding.provenance_agent = None
+        finding.provenance_origin = source.origin
+        finding.provenance_sources = (source,)
+        out.append(finding)
+    return tuple(out)
+
+
+def _relation_block(row_list: list[dict]) -> dict:
+    # ``total`` always states the full count; ``rows`` is capped -- a cap
+    # that hid volume would be dishonest.
+    return {"total": len(row_list),
+            "rows": row_list[:MAX_REPORT_ROWS_PER_RELATION]}
+
+
+def correlations_section(comparison: WindowComparison,
+                         correlated: Iterable[CorrelatedFailure],
+                         scrub: Callable[[str], str] | None = None) -> dict:
+    """The additive report block (``correlations``): window counts plus
+    bounded, deterministically ordered rows per relation.
+
+    Rows are re-scrubbed here (redact-at-store chokepoint: everything a
+    finding or report can surface is scrubbed as well). The ``unknown``
+    label survives verbatim -- only Finding.confidence folds it to low.
+    """
+    rows: dict[str, list[dict]] = {RELATION_NEW: [], RELATION_RESOLVED: [],
+                                   RELATION_PERSISTENT: []}
+    for item in correlated:
+        rows[item.relation].append({
+            "test_id": _clean(item.signature.test_id, MAX_IDENTITY_CHARS,
+                              scrub),
+            "suite": _clean(item.signature.suite, MAX_IDENTITY_CHARS, scrub),
+            "error_class": item.signature.error_class,
+            "confidence": item.confidence,
+            "ground": item.ground,
+        })
+    return {"pre_count": comparison.pre_count,
+            "post_count": comparison.post_count,
+            RELATION_NEW: _relation_block(rows[RELATION_NEW]),
+            RELATION_RESOLVED: _relation_block(rows[RELATION_RESOLVED]),
+            RELATION_PERSISTENT: _relation_block(rows[RELATION_PERSISTENT])}
+
+
+@dataclass(frozen=True)
+class CorrelationOutcome:
+    """Runner result: findings + warnings + the report section.
+
+    ``correlations is None`` means "no comparison happened" (no records,
+    garbage config, or no changed files): the orchestrator then leaves
+    the report key off entirely -- features absent => unchanged behavior.
+    """
+
+    findings: tuple[Finding, ...] = ()
+    warnings: tuple[str, ...] = ()
+    correlations: dict | None = None
+
+
+NOOP = CorrelationOutcome()
+
+
+def run_failure_correlation(*, repo_root: str, files,
+                            taxonomy: "TestTaxonomy | None" = None,
+                            scrub: Callable[[str], str] | None = None
+                            ) -> CorrelationOutcome:
+    """V4.6-E02 entry point (orchestrator hook; CI_CORRELATION default OFF).
+
+    * no records and no warnings -> ``NOOP`` (byte-identical review);
+    * garbage config -> its warnings alone, no section, no findings;
+    * no changed files -> nothing to relate to: no findings, no section;
+    * any crash -> one labeled warning -- the feature never fails a
+      review (mirrors the incident and infra runners).
+    """
+    try:
+        records, warnings = ingest_failures(repo_root, scrub=scrub)
+        if not records:
+            return NOOP if not warnings else CorrelationOutcome(
+                warnings=warnings)
+        ordered, _, _ = _changed_view(files)
+        if not ordered:
+            return CorrelationOutcome(warnings=warnings)
+        comparison = compare_windows(records)
+        correlated = correlate(comparison, taxonomy=taxonomy,
+                               changed_paths=ordered)
+        return CorrelationOutcome(
+            findings=correlation_findings(
+                correlated, records=records, files=files, taxonomy=taxonomy,
+                scrub=scrub),
+            warnings=warnings,
+            correlations=correlations_section(comparison, correlated,
+                                              scrub=scrub))
+    except Exception as exc:  # noqa: BLE001 -- opt-in feature never fails a review
+        log.warning("failure correlation failed: %s", type(exc).__name__)
+        return CorrelationOutcome(warnings=(
+            f"failure correlation failed ({type(exc).__name__}); skipped",))

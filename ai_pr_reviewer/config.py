@@ -212,6 +212,14 @@ class Config:
     # dispatched (bus-disabled equivalence).
     event_bus: bool = False
 
+    # V4.6-E02-T04: CI failure correlation surfacing (ADR-020 evidence
+    # findings + the report's `correlations` section). Default OFF; plain
+    # env var (CI_CORRELATION), deliberately not an INPUT_* action input
+    # -- enabling it makes CI failure patterns surface in review output,
+    # which needs human sign-off (plan §F). Absent configured CI records
+    # is a true NOOP even when ON.
+    ci_correlation: bool = False
+
 
 def load_config(args) -> Config:
     _warn_unknown_inputs()
@@ -280,6 +288,8 @@ def load_config(args) -> Config:
     cfg.incident_intel = _bool_field(None, "INCIDENT_INTEL", default=False)
     # V4.6-E07-T05: no CLI flag and no INPUT_* on purpose (see the field).
     cfg.event_bus = _bool_field(None, "EVENT_BUS", default=False)
+    # V4.6-E02-T04: no CLI flag and no INPUT_* on purpose (see the field).
+    cfg.ci_correlation = _bool_field(None, "CI_CORRELATION", default=False)
     return cfg
 
 

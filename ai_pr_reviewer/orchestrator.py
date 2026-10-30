@@ -365,6 +365,24 @@ class ReviewOrchestrator:
                 scrub=lambda t: _scrub(t, cfg))
             outcome.findings.extend(_inc.findings)
             warnings.extend(_inc.warnings)
+        # V4.6-E02-T04: CI failure correlation surfacing (opt-in, default
+        # OFF via CI_CORRELATION; ADR-020 evidence, never causation).
+        # Smallest possible hook: findings arrive fully stamped and
+        # redacted like the hooks above, so they join before dedup; the
+        # runner never raises and degrades to warnings. The report section
+        # is attached further down (feature absent => key absent).
+        ci_outcome = None
+        if getattr(cfg, "ci_correlation", False):
+            from .ci_correlation import run_failure_correlation
+            from .test_intel import build_taxonomy
+            _tax = build_taxonomy(getattr(context, "repo_index", None),
+                                  exclusions=policy.exclude)
+            ci_outcome = run_failure_correlation(
+                repo_root=getattr(cfg, "repo_root", None) or ".",
+                files=files, taxonomy=_tax,
+                scrub=lambda t: _scrub(t, cfg))
+            outcome.findings.extend(ci_outcome.findings)
+            warnings.extend(ci_outcome.warnings)
         findings = deduplicate(outcome.findings)
         # D4: ``max_comments`` is a *posting* limit only. ``reported`` is
         # every anchored finding this review found — the report, the health
@@ -468,6 +486,12 @@ class ReviewOrchestrator:
         result.previous_findings_count = len(previous)
         result.state_transition_count = transitions  # (C8: skip duplicate posts)
         result.verification = verification_counts(lifecycle_findings)  # (C4)
+        # V4.6-E02-T04: the correlation report section, only when the
+        # feature ran AND the configured data produced a comparison (the
+        # runner returns ``correlations=None`` on NOOP) -- absent data
+        # leaves the key off the report entirely.
+        if ci_outcome is not None and ci_outcome.correlations is not None:
+            result.correlations = ci_outcome.correlations
         # V3-E02-T02: run telemetry, serialized exactly once through the
         # allowlist+redaction chokepoint. Backends without a telemetry
         # block (test doubles) report null — additive, never invented.

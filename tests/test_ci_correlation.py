@@ -47,7 +47,9 @@ from ai_pr_reviewer.ci_correlation import (DEFAULT_SOURCES_FILE,  # noqa: E402
                                            correlate, extract_test_id,
                                            ingest_failures,
                                            normalize_error_class)
-from ai_pr_reviewer.test_intel import TestLink, TestTaxonomy   # noqa: E402
+from ai_pr_reviewer.test_intel import (TestEvidence, TestLink,  # noqa: E402
+                                       TestTaxonomy,
+                                       observed_test_evidence)
 
 MODULE_PATH = ROOT / "ai_pr_reviewer" / "ci_correlation.py"
 
@@ -794,3 +796,544 @@ def test_correlated_failure_is_frozen():
                     changed_paths=["src/x.py"])
     with pytest.raises(FrozenInstanceError):
         out[0].confidence = "high"            # type: ignore[misc]
+
+
+# ============================================================ V4.6-E02-T04
+# Surfacing: wording pinned to observed relations only (no unrelated
+# claims, no causal claims), evidence-or-dropped + the tev1/T2 seam, the
+# report section's shape/caps/re-scrub, and the opt-in wiring (plain-env
+# flag default OFF, orchestrator hook, reporter key absent when the
+# feature did not run).
+
+from ai_pr_reviewer import reporter                          # noqa: E402
+from ai_pr_reviewer.cli import parse_args                    # noqa: E402
+from ai_pr_reviewer.config import load_config                # noqa: E402
+from ai_pr_reviewer.diff_parser import FileDiff              # noqa: E402
+from ai_pr_reviewer.models import PRContext, ReviewResult     # noqa: E402
+from ai_pr_reviewer.verification import (                    # noqa: E402
+    observed_test_evidence_confirms)
+from ai_pr_reviewer.ci_correlation import (CORRELATION_RULE_ID,  # noqa: E402
+                                           MAX_CORRELATION_FINDINGS,
+                                           MAX_REPORT_ROWS_PER_RELATION,
+                                           NOOP, CorrelationOutcome,
+                                           correlation_findings,
+                                           correlations_section,
+                                           run_failure_correlation)
+
+
+def _fd(path: str) -> FileDiff:
+    return FileDiff(old_path=path, new_path=path)
+
+
+def _item(sig: FailureSignature, relation=RELATION_NEW,
+          confidence=CONFIDENCE_LOW,
+          ground=GROUND_WINDOW_ONLY) -> CorrelatedFailure:
+    return CorrelatedFailure(relation=relation, signature=sig,
+                             confidence=confidence, ground=ground)
+
+
+def _render(correlated, *, records=(), files=(), taxonomy=None, scrub=None):
+    return correlation_findings(correlated, records=records, files=files,
+                                taxonomy=taxonomy, scrub=scrub)
+
+
+def _blob(findings) -> str:
+    """Every human-readable surface a reviewer would see, concatenated."""
+    return "|".join(
+        f.title + f.explanation
+        + "".join(ev.summary for ev in f.evidence)
+        for f in findings)
+
+
+# ------------------------------------------- wording: no unrelated claims
+
+def test_unrelated_wording_never_names_a_changed_file():
+    """Window-only and not-assessable findings must not contain ANY
+    changed path: the placement anchor is never dressed as a claim."""
+    unrelated = _sig("tests/test_orders.py::test_total")
+    dotted = _sig("tests.test_auth.AuthTests.test_login")
+    comparison = WindowComparison(new_in_post=(unrelated, dotted))
+    correlated = correlate(comparison, changed_paths=["src/inventory.py"])
+    out = _render(correlated,
+                  records=(_rec(unrelated, "post", "r1"),
+                           _rec(dotted, "post", "r1")),
+                  files=[_fd("src/inventory.py")])
+    assert len(out) == 2
+    blob = _blob(out)
+    assert "src/inventory.py" not in blob
+    assert "inventory" not in blob
+    assert "no changed file is implicated" in blob       # window_only
+    assert "no changed file can be related" in blob      # not_assessable
+    assert "never a causal claim" in blob
+    # anchors exist (an info row must live somewhere) but are placement
+    # only -- the wording above is what the reviewer can claim
+    assert {f.file for f in out} == {"src/inventory.py"}
+
+
+def test_code_citing_wording_names_only_the_proven_match():
+    sig = _sig("tests/test_payments.py::test_refund")
+    taxonomy = _tax(("tests/test_payments.py", "src/payments.py"))
+    # index edge: names the module the INDEX tied to this test
+    correlated = correlate(_new(sig), taxonomy=taxonomy,
+                           changed_paths=["src/payments.py"])
+    (edge_f,) = _render(correlated, records=(_rec(sig, "post", "r1"),),
+                        files=[_fd("src/payments.py")], taxonomy=taxonomy)
+    assert "the test-to-source index maps tests/test_payments.py" \
+        in edge_f.explanation
+    assert "which this change modifies" in edge_f.explanation
+    assert edge_f.file == "src/payments.py"     # anchor = the proven match
+    # path convention (no index at all): names the conventionally matched
+    # changed file, never a third file
+    (conv_f,) = _render(
+        correlate(_new(sig), changed_paths=["src/payments.py", "src/zzz.py"]),
+        records=(_rec(sig, "post", "r1"),),
+        files=[_fd("src/payments.py"), _fd("src/zzz.py")])
+    assert "follows the naming convention of changed file src/payments.py" \
+        in conv_f.explanation
+    assert "src/zzz.py" not in _blob((conv_f,))
+    # the failing test file itself being changed
+    (self_f,) = _render(
+        correlate(_new(sig), changed_paths=["tests/test_payments.py"]),
+        records=(_rec(sig, "post", "r1"),),
+        files=[_fd("tests/test_payments.py")])
+    assert "is itself modified by this change" in self_f.explanation
+
+
+def test_resolved_and_persistent_wording_never_claims_causation():
+    old = _sig("tests/test_orders.py::test_old")
+    gone = _sig("tests/test_orders.py::test_gone")
+    comparison = WindowComparison(resolved=(gone,), persistent=(old,))
+    correlated = correlate(comparison, changed_paths=["src/inventory.py"])
+    records = (_rec(gone, "pre", "r1"), _rec(old, "pre", "r1"),
+               _rec(old, "post", "r2"))
+    resolved_f, persistent_f = _render(
+        correlated, records=records, files=[_fd("src/inventory.py")])
+    r_text = (resolved_f.title + resolved_f.explanation).lower()
+    assert "absent from post-change window" in resolved_f.title.lower()
+    assert "not proof this change fixed it" in r_text
+    assert "flaky" in r_text                    # honest alternative causes
+    for forbidden in ("caused by", "because of", "this change broke",
+                      "regression caused", "fixed by this change",
+                      "proves this change"):
+        assert forbidden not in r_text
+    p_text = persistent_f.title + persistent_f.explanation
+    assert "present in both windows" in persistent_f.title
+    assert "predates this change" in p_text
+    # grounds still never name a changed file for either relation
+    assert "inventory" not in r_text and "inventory" not in p_text.lower()
+
+
+# ------------------------------------------- confidence folding + evidence
+
+@pytest.mark.parametrize(("conf", "expected"), [
+    pytest.param(CONFIDENCE_HIGH, "high", id="high"),
+    pytest.param(CONFIDENCE_MEDIUM, "medium", id="medium"),
+    pytest.param(CONFIDENCE_LOW, "low", id="low"),
+    pytest.param(CONFIDENCE_UNKNOWN, "low", id="unknown-folds-down"),
+])
+def test_confidence_folds_into_the_closed_finding_set(conf, expected):
+    unknown = conf == CONFIDENCE_UNKNOWN
+    sig = _sig("tests/test_orders.py::test_x",
+               error=UNKNOWN_ERROR_CLASS if unknown else "OSError")
+    (f,) = _render((_item(sig, confidence=conf),), files=[_fd("src/x.py")])
+    assert f.confidence == expected
+    assert f.confidence in ("low", "medium", "high")
+    # the true label survives in the explanation, and only missing data
+    # earns the cap sentence
+    assert f"Confidence {conf}." in f.explanation
+    assert ("caps confidence" in f.explanation) is unknown
+
+
+def test_finding_is_info_severity_stamped_and_never_suggests():
+    sig = _sig("tests/test_payments.py::test_refund")
+    taxonomy = _tax(("tests/test_payments.py", "src/payments.py"))
+    correlated = correlate(_new(sig), taxonomy=taxonomy,
+                           changed_paths=["src/payments.py"])
+    (f,) = _render(correlated, records=(_rec(sig, "post", "ci-4711"),),
+                   files=[_fd("src/payments.py")], taxonomy=taxonomy)
+    assert f.severity == "info"
+    assert f.line is None and f.suggestion is None
+    assert f.rule_id == CORRELATION_RULE_ID
+    assert f.category == "maintainability"
+    assert f.provenance_engine == "static"
+    assert f.provenance_model == "ci-correlation-v1"
+    assert f.provenance_origin == "rule"
+    kinds = [ev.kind for ev in f.evidence]
+    assert kinds == ["file_excerpt", "test_result", "rule_ref"]
+    assert f.evidence[-1].locator == f"rule:{CORRELATION_RULE_ID}"
+
+
+def test_test_result_evidence_is_tev1_and_never_confirms():
+    """The T2 seam: a correlation's FAILED evidence parses as observed
+    tev1, and observed failure evidence never confirms a finding."""
+    sig = _sig("tests/test_payments.py::test_refund")
+    taxonomy = _tax(("tests/test_payments.py", "src/payments.py"))
+    correlated = correlate(_new(sig), taxonomy=taxonomy,
+                           changed_paths=["src/payments.py"])
+    (f,) = _render(correlated, records=(_rec(sig, "post", "ci-4711"),),
+                   files=[_fd("src/payments.py")], taxonomy=taxonomy)
+    (rec,) = [ev for ev in f.evidence if ev.kind == "test_result"]
+    ev = TestEvidence.from_record(rec)
+    assert ev is not None                    # canonical tev1 round-trip
+    assert ev.outcome == "failed" and ev.origin == "ci_ingest"
+    assert ev.test_path == "tests/test_payments.py"
+    assert ev.test_name == "test_refund"
+    assert ev.run_ref == "ci-4711"
+    assert ev.covers == ("src/payments.py",)  # index edges only
+    assert [e.test_path for e in observed_test_evidence(f.evidence)] == \
+        ["tests/test_payments.py"]
+    assert observed_test_evidence_confirms(f) is False
+
+
+def test_covers_never_come_from_stem_guesses():
+    sig = _sig("tests/test_payments.py::test_refund")
+    # path-convention ground (stem match), NO index: covers must stay empty
+    (f,) = _render(correlate(_new(sig), changed_paths=["src/payments.py"]),
+                   records=(_rec(sig, "post", "r1"),),
+                   files=[_fd("src/payments.py")])
+    (rec,) = [ev for ev in f.evidence if ev.kind == "test_result"]
+    ev = TestEvidence.from_record(rec)
+    assert ev is not None and ev.covers == ()
+    assert "covers=" not in rec.summary
+
+
+def test_over_long_identities_fall_back_to_a_plain_record():
+    long_file = "tests/" + "t" * 130 + ".py"      # > tev1's path bound
+    sig = _sig(f"{long_file}::test_x")
+    (f,) = _render((_item(sig),), files=[_fd("src/x.py")])
+    (rec,) = [ev for ev in f.evidence if ev.kind == "test_result"]
+    assert TestEvidence.from_record(rec) is None  # not tev1...
+    assert rec.check_type == "ci_failure.v1"      # ...honest plain fallback
+    assert rec.kind == "test_result"
+
+
+def test_too_long_a_run_id_yields_no_run_ref_never_a_truncated_one():
+    sig = _sig("tests/test_orders.py::test_a")
+    long_run = "r" * 60                           # > tev1's run_ref bound
+    (f,) = _render((_item(sig),), records=(_rec(sig, "post", long_run),),
+                   files=[_fd("src/x.py")])
+    (rec,) = [ev for ev in f.evidence if ev.kind == "test_result"]
+    ev = TestEvidence.from_record(rec)
+    assert ev is not None and ev.run_ref is None
+
+
+def test_evidence_or_dropped_never_half_stamped(monkeypatch):
+    sig = _sig("tests/test_payments.py::test_refund")
+    taxonomy = _tax(("tests/test_payments.py", "src/payments.py"))
+    correlated = correlate(_new(sig), taxonomy=taxonomy,
+                           changed_paths=["src/payments.py"])
+
+    def raiser(**kwargs):
+        raise ValueError("no evidence today")
+
+    monkeypatch.setattr(cc.EvidenceRecord, "create", raiser)
+    out = _render(correlated, records=(_rec(sig, "post", "r1"),),
+                  files=[_fd("src/payments.py")], taxonomy=taxonomy)
+    assert out == ()
+
+
+def test_findings_are_capped_in_deterministic_order():
+    sigs = tuple(_sig(f"tests/t.py::test_{i:02d}") for i in range(12))
+    correlated = correlate(WindowComparison(new_in_post=sigs, post_count=12),
+                           changed_paths=["src/x.py"])
+    records = tuple(_rec(s, "post", "r") for s in sigs)
+    out = _render(correlated, records=records, files=[_fd("src/x.py")])
+    assert len(out) == MAX_CORRELATION_FINDINGS
+    assert [f.title for f in out] == [
+        f"CI failure new in post-change window: tests/t.py::test_{i:02d}"
+        for i in range(9)]
+
+
+# -------------------------------------------------------- report section
+
+def _section(correlated, comparison, scrub=None):
+    return correlations_section(comparison, correlated, scrub=scrub)
+
+
+def test_report_section_shape_determinism_and_json_roundtrip():
+    a, b, c = (_sig("tests/t.py::test_a"), _sig("tests/t.py::test_b"),
+               _sig("tests/t.py::test_c"))
+    comparison = WindowComparison(new_in_post=(a, b), resolved=(c,),
+                                  pre_count=2, post_count=3)
+    correlated = correlate(comparison, changed_paths=["src/x.py"])
+    section = _section(correlated, comparison)
+    assert section["pre_count"] == 2 and section["post_count"] == 3
+    assert section["new_in_post"]["total"] == 2
+    assert [r["test_id"] for r in section["new_in_post"]["rows"]] == [
+        "tests/t.py::test_a", "tests/t.py::test_b"]     # sorted, deterministic
+    assert section["resolved"]["total"] == 1
+    assert section["persistent"] == {"total": 0, "rows": []}
+    row = section["new_in_post"]["rows"][0]
+    assert set(row) == {"test_id", "suite", "error_class", "confidence",
+                        "ground"}
+    assert json.loads(json.dumps(section)) == section
+    assert _section(correlated, comparison) == section
+
+
+def test_report_rows_keep_the_true_label_and_state_the_full_total():
+    sigs = tuple(_sig(f"tests/t.py::test_{i:02d}") for i in range(25))
+    comparison = WindowComparison(new_in_post=sigs, post_count=25)
+    correlated = correlate(comparison, changed_paths=["src/x.py"])
+    section = _section(correlated, comparison)
+    assert section["new_in_post"]["total"] == 25      # totals stay full
+    assert len(section["new_in_post"]["rows"]) == MAX_REPORT_ROWS_PER_RELATION
+    # unknown survives verbatim here even though Finding folds it to low
+    item = _item(_sig("tests/t.py::test_u"), confidence=CONFIDENCE_UNKNOWN,
+                 ground=GROUND_NOT_ASSESSABLE)
+    section = _section((item,), WindowComparison(new_in_post=(item.signature,),
+                                                 post_count=1))
+    assert section["new_in_post"]["rows"][0]["confidence"] == "unknown"
+    assert section["new_in_post"]["rows"][0]["ground"] == GROUND_NOT_ASSESSABLE
+
+
+def test_report_rows_are_re_scrubbed_at_the_store_chokepoint():
+    secret = "hunter2hunter2"          # matches no redact_secrets pattern
+    sig = _sig(f"tests/t.py::test_{secret}")
+    item = _item(sig)
+    scrub = lambda t: t.replace(secret, "[REDACTED]")  # noqa: E731
+    section = _section((item,),
+                       WindowComparison(new_in_post=(sig,), post_count=1),
+                       scrub=scrub)
+    row = section["new_in_post"]["rows"][0]
+    assert secret not in row["test_id"]
+    assert row["test_id"] == "tests/t.py::test_[REDACTED]"
+
+
+# -------------------------------------------------- runner + wiring seams
+
+def test_runner_noop_and_warning_only_paths(tmp_path):
+    assert run_failure_correlation(repo_root=str(tmp_path),
+                                   files=[_fd("a.py")]) == NOOP
+    # garbage config: warnings alone, no findings, no section
+    _write(tmp_path, "{oops")
+    out = run_failure_correlation(repo_root=str(tmp_path), files=[_fd("a.py")])
+    assert out.findings == () and out.correlations is None
+    assert len(out.warnings) == 1 and "not valid JSON" in out.warnings[0]
+
+
+def test_runner_without_changed_files_has_no_surface(tmp_path):
+    _write(tmp_path, {"runs": [_run("r1", window="post", failures=[
+        {"test_id": "tests/t.py::test_a"}])]})
+    out = run_failure_correlation(repo_root=str(tmp_path), files=[])
+    assert out.findings == () and out.correlations is None
+    assert out.warnings == ()
+
+
+def test_runner_end_to_end_is_deterministic(tmp_path):
+    _write(tmp_path, {"runs": [
+        _run("r1", window="pre", failures=[
+            {"test_id": "tests/test_payments.py::test_old",
+             "error_class": "OSError"}]),
+        _run("r2", window="post", failures=[
+            {"test_id": "tests/test_payments.py::test_new",
+             "error_class": "ValueError"},
+            {"test_id": "tests/test_payments.py::test_old",
+             "error_class": "OSError"}])]})
+    files = [_fd("src/payments.py")]
+    first = run_failure_correlation(repo_root=str(tmp_path), files=files)
+    assert [f.rule_id for f in first.findings] == [CORRELATION_RULE_ID] * 2
+    # classified error classes keep the convention ground at medium
+    assert {f.confidence for f in first.findings} == {"medium"}
+    assert first.correlations["new_in_post"]["total"] == 1
+    assert first.correlations["persistent"]["total"] == 1
+    assert first == run_failure_correlation(repo_root=str(tmp_path),
+                                            files=files)
+
+
+def test_runner_never_raises(tmp_path, monkeypatch):
+    _write(tmp_path, {"runs": [_run("r1", window="post", failures=[
+        {"test_id": "tests/t.py::test_a"}])]})
+
+    import ai_pr_reviewer.ci_correlation as module
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(module, "compare_windows", boom)
+    out = run_failure_correlation(repo_root=str(tmp_path),
+                                  files=[_fd("src/x.py")])
+    assert out.findings == () and out.correlations is None
+    assert out.warnings == ("failure correlation failed (RuntimeError); "
+                            "skipped",)
+
+
+def test_runner_never_calls_builtin_open(tmp_path, monkeypatch):
+    import builtins
+
+    _write(tmp_path, {"runs": [_run("r1", window="post", failures=[
+        {"test_id": "tests/t.py::test_a"}])]})
+    real_open = builtins.open
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("ci_correlation must not call builtin open()")
+
+    monkeypatch.setattr(builtins, "open", forbidden)
+    try:
+        out = run_failure_correlation(repo_root=str(tmp_path),
+                                      files=[_fd("src/x.py")])
+    finally:
+        monkeypatch.setattr(builtins, "open", real_open)
+    assert [f.rule_id for f in out.findings] == [CORRELATION_RULE_ID]
+
+
+def test_correlation_outcome_is_frozen():
+    with pytest.raises(FrozenInstanceError):
+        NOOP.warnings = ()                     # type: ignore[misc]
+
+
+# ------------------------------------------------------------- config flag
+
+def test_ci_correlation_flag_is_plain_env_default_off(monkeypatch):
+    monkeypatch.delenv("CI_CORRELATION", raising=False)
+    assert load_config(parse_args([])).ci_correlation is False
+
+    monkeypatch.setenv("CI_CORRELATION", "true")
+    assert load_config(parse_args([])).ci_correlation is True
+
+    # Deliberately NOT an action input: INPUT_* must not enable it.
+    monkeypatch.delenv("CI_CORRELATION", raising=False)
+    monkeypatch.setenv("INPUT_CI_CORRELATION", "1")
+    assert load_config(parse_args([])).ci_correlation is False
+
+    # And no CLI flag exists.
+    with pytest.raises(SystemExit):
+        parse_args(["--ci-correlation"])
+
+
+# ------------------------------------------------------- orchestrator hook
+
+def _shape(result):
+    def keyed(findings):
+        return [(f.file, f.line, f.title, f.severity, f.rule_id)
+                for f in findings]
+    return (keyed(result.findings), keyed(result.below_threshold),
+            list(result.warnings), result.health_score, result.posted_inline)
+
+
+def test_hook_is_off_by_default_and_never_runs_the_check(monkeypatch):
+    from test_orchestrator import Wired
+
+    def bomb(**kwargs):
+        raise AssertionError(
+            "failure correlation must not run when the flag is off")
+
+    import ai_pr_reviewer.ci_correlation as module
+    monkeypatch.setattr(module, "run_failure_correlation", bomb)
+    w = Wired(monkeypatch)
+    result = w.run()
+    assert not [x for x in result.warnings if "correlation" in x]
+    assert not hasattr(result, "correlations")
+
+
+def test_hook_joins_canned_findings_warnings_and_section(monkeypatch):
+    from test_orchestrator import Wired, _finding
+
+    canned_finding = _finding(file="a.py", line=2, title="CI canned",
+                              severity="low")     # at Wired's threshold
+    canned = CorrelationOutcome(
+        findings=(canned_finding,), warnings=("canned ci warning",),
+        correlations={"pre_count": 1, "post_count": 2,
+                      "new_in_post": {"total": 0, "rows": []},
+                      "resolved": {"total": 0, "rows": []},
+                      "persistent": {"total": 0, "rows": []}})
+
+    import ai_pr_reviewer.ci_correlation as module
+    monkeypatch.setattr(module, "run_failure_correlation", lambda **kw: canned)
+    w = Wired(monkeypatch)
+    w.cfg.ci_correlation = True
+    result = w.run()
+    assert "CI canned" in [f.title for f in
+                           result.findings + result.below_threshold]
+    assert "canned ci warning" in result.warnings
+    assert result.correlations["post_count"] == 2
+    assert reporter.finalize_report(result)["correlations"] == \
+        canned.correlations
+
+
+def test_absent_config_with_flag_on_is_zero_surface(tmp_path, monkeypatch):
+    """Flag ON but no configured CI file: the hook RINS (spied) and the
+    review output is identical to the flag-OFF run -- including the
+    report, where the correlations key stays ABSENT."""
+    from test_orchestrator import Wired
+
+    w_off = Wired(monkeypatch)
+    w_off.cfg.repo_root = str(tmp_path)
+    reference = w_off.run()
+
+    calls = []
+    import ai_pr_reviewer.ci_correlation as module
+    real = module.run_failure_correlation
+
+    def spy(**kwargs):
+        calls.append(kwargs)
+        return real(**kwargs)
+
+    monkeypatch.setattr(module, "run_failure_correlation", spy)
+    w_on = Wired(monkeypatch)
+    w_on.cfg.ci_correlation = True
+    w_on.cfg.repo_root = str(tmp_path)
+    result = w_on.run()
+
+    assert len(calls) == 1                       # the hook ran...
+    assert not [f for f in result.findings + result.below_threshold
+                if f.rule_id == CORRELATION_RULE_ID]   # ...and surfaced nothing
+    assert _shape(result) == _shape(reference)
+    assert "correlations" not in reporter.finalize_report(result)
+
+
+def test_hook_end_to_end_surfaces_findings_and_the_report_key(
+        tmp_path, monkeypatch):
+    from test_orchestrator import Wired
+
+    _write(tmp_path, {"runs": [_run("r1", window="post", failures=[
+        {"test_id": "a.py::test_z"}])]})
+    w = Wired(monkeypatch)                       # FULL_DIFF: a.py, b.py
+    w.cfg.ci_correlation = True
+    w.cfg.repo_root = str(tmp_path)
+    result = w.run()
+    surfaced = [f for f in result.findings + result.below_threshold
+                if f.rule_id == CORRELATION_RULE_ID]
+    assert len(surfaced) == 1
+    f = surfaced[0]
+    assert f.file == "a.py"        # the test file itself is in the diff
+    assert f.severity == "info"    # info sits below Wired's "low" threshold
+    report = reporter.finalize_report(result)
+    assert report["correlations"]["post_count"] == 1
+    assert report["correlations"]["new_in_post"]["total"] == 1
+    assert json.loads(json.dumps(report)) == report
+
+    # flag OFF, same repo: the key disappears entirely (additive contract)
+    w2 = Wired(monkeypatch)
+    w2.cfg.repo_root = str(tmp_path)
+    result2 = w2.run()
+    assert "correlations" not in reporter.finalize_report(result2)
+    assert not [f for f in result2.findings + result2.below_threshold
+                if f.rule_id == CORRELATION_RULE_ID]
+
+
+# --------------------------------------------------------- reporter seam
+
+def _bare_result() -> ReviewResult:
+    pr = PRContext(repo="acme/api", pr_number=7, head_sha="h" * 40)
+    return ReviewResult(pr=pr, mode="static", model="static-rules-v1",
+                        findings=[])
+
+
+def test_report_key_is_conditional_and_additive():
+    result = _bare_result()
+    assert "correlations" not in reporter.finalize_report(result)
+
+    section = {"pre_count": 1, "post_count": 2,
+               "new_in_post": {"total": 0, "rows": []},
+               "resolved": {"total": 0, "rows": []},
+               "persistent": {"total": 0, "rows": []}}
+    result.correlations = section
+    report = reporter.finalize_report(result)
+    assert report["correlations"] == section
+    assert json.loads(json.dumps(report)) == report
+
+    # None / empty dict are treated as absent -- no empty-noise block
+    result.correlations = None
+    assert "correlations" not in reporter.finalize_report(result)
+    result.correlations = {}
+    assert "correlations" not in reporter.finalize_report(result)

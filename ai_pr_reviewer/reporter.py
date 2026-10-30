@@ -164,6 +164,13 @@ def finalize_report(result: ReviewResult, report_id: str | None = None) -> dict:
     data["below_threshold_count"] = len(data.get("below_threshold") or [])
     # A reopened finding is by definition still open, so it counts as active.
     data["active_findings_count"] = by_state.get("active", 0) + by_state.get("reopened", 0)
+    # V4.6-E02-T04: CI failure correlation section (ADR-020). Attached by
+    # the orchestrator only when the feature ran and data existed -- the
+    # key is ABSENT otherwise (additive-only: consumers must not require
+    # it; plan migration rule: features absent => unchanged behavior).
+    _correlations = getattr(result, "correlations", None)
+    if isinstance(_correlations, dict) and _correlations:
+        data["correlations"] = _correlations
 
     _carry_finding_fields(result, data)
     return data
