@@ -584,24 +584,36 @@ class TestModuleInvariants:
 
     def test_not_imported_by_existing_engine_modules(self):
         """``test_intel`` stays an opt-in leaf: no engine module may
-        reference it — with one sanctioned exception, added by the epic
-        that owns the reader contract. V4.2-E05-T03 (verification tier T2)
-        imports exactly ``observed_test_evidence`` (E03-T04's own docstring
-        names that reader); every other module still may not even mention
-        the module, and the reader may not pull anything else from it."""
-        allowed = {"verification.py"}
+        reference it — only seam-owners that add an exact-name sanctioned
+        entry here (AST-enforced) may, and each entry is owned by the
+        epic that needed it:
+
+        * ``verification.py`` imports exactly ``observed_test_evidence``
+          — the T2 reader (V4.2-E05-T03; E03-T04's own docstring names
+          that reader) — and may not pull anything else from the module;
+        * ``orchestrator.py`` imports exactly ``build_taxonomy`` — the
+          taxonomy construction CI correlation needs at runtime
+          (V4.6-E02-T04, lazy inside the default-OFF ``CI_CORRELATION``
+          branch; authorized as that epic's seam) — and nothing else.
+
+        Every other module still may not even mention the module, and a
+        sanctioned module may not grow a second import form (``import``
+        statements are rejected outright)."""
+        allowed = {"verification.py": frozenset({"observed_test_evidence"}),
+                   "orchestrator.py": frozenset({"build_taxonomy"})}
         for py in (ROOT / "ai_pr_reviewer").rglob("*.py"):
             if py.name == "test_intel.py":
                 continue
             text = py.read_text("utf-8")
             if py.name in allowed:
+                sanctioned = allowed[py.name]
                 tree = ast.parse(text)
                 for n in ast.walk(tree):
                     if isinstance(n, ast.ImportFrom) \
                             and "test_intel" in (n.module or ""):
-                        assert {a.name for a in n.names} == \
-                            {"observed_test_evidence"}, (py, "imports more "
-                            "than the sanctioned T2 reader")
+                        assert {a.name for a in n.names} == sanctioned, (
+                            py, "may import exactly the sanctioned names",
+                            sorted(sanctioned))
                     if isinstance(n, ast.Import):
                         assert not any("test_intel" in a.name for a in n.names), \
                             (py, "must use the sanctioned relative import")
