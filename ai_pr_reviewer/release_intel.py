@@ -51,14 +51,15 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Iterable
+from typing import Callable, Iterable
 
 from .index.limits import is_contained
 from .models import STATIC_ENGINE_ID, EvidenceRecord, Finding, ProvenanceSource
 from .security import redact_secrets
 
-if TYPE_CHECKING:
-    from .history.builder import HistoryIndex
+# No history-package import here, not even for typing: the history index
+# enters a review through context.py only (test_history_index pins that
+# single wiring point). Every ``index`` parameter is duck-typed instead.
 
 DEFAULT_SOURCES_FILE = ".ai-pr-reviewer-releases.json"
 
