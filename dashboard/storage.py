@@ -171,6 +171,115 @@ def _telemetry_summary(rows: list[dict]) -> dict:
                                cost_low, cost_high)
 
 
+# ------------------------------------------- V4.0-E07-T04 cost views
+#: Bound on the per-run series: a dashboard must not stream every run it
+#: has ever recorded to the browser. Both backends cut to this same bound
+#: (the SQL side in ``ORDER BY`` + ``LIMIT``), so the two stay identical.
+MAX_COST_RUNS = 100
+
+
+def _cost_run_row(row: dict) -> dict:
+    """One run's spend — counts and identifiers only, never content.
+
+    Absence stays absence: token fields are ``None`` unless the run
+    *reported* usage (``state == "ok"``), and dollar bounds are ``None``
+    unless the row carried an estimated cost block. A missing measurement
+    is never rendered as a measured 0 (V3-E02-T01).
+    """
+    usage_state = str(row.get("usage_state") or "n/a")
+    reported = usage_state == "ok"
+    in_tok, out_tok = row.get("input_tokens"), row.get("output_tokens")
+    cost = row.get("cost") if isinstance(row.get("cost"), dict) else {}
+    estimated = cost.get("state") == "estimated"
+    low, high = cost.get("low"), cost.get("high")
+    try:
+        pr_number = int(row.get("pr_number") or 0)
+    except (TypeError, ValueError):        # crafted rows: unparsable -> 0
+        pr_number = 0
+    return {
+        "id": str(row.get("id") or ""),
+        "repo": str(row.get("repo") or ""),
+        "pr_number": pr_number,
+        "provider": str(row.get("provider") or ""),
+        "model": str(row.get("model") or ""),
+        "usage_state": usage_state,
+        # Defense in depth: save_telemetry already nulls both of these
+        # (DB column write + _sanitize_usage), but rows read back from
+        # disk are untrusted — a hand-edited telemetry.json or a legacy
+        # row must never be able to claim a measurement its usage state
+        # says was never reported.
+        "input_tokens": in_tok if (reported and type(in_tok) is int) else None,
+        "output_tokens": out_tok if (reported and type(out_tok) is int) else None,
+        "cost_low": float(low) if estimated and type(low) in (int, float)
+                    else None,
+        "cost_high": float(high) if estimated and type(high) in (int, float)
+                     else None,
+    }
+
+
+def _cost_bucket() -> dict:
+    """An aggregate whose measured fields start ``None``, not ``0`` — a
+    bucket nothing reported into says so instead of claiming a total."""
+    return {"runs": 0, "reported_runs": 0, "priced_runs": 0,
+            "input_tokens": None, "output_tokens": None,
+            "cost_low": None, "cost_high": None}
+
+
+def _cost_accumulate(bucket: dict, view: dict) -> None:
+    bucket["runs"] += 1
+    if view["input_tokens"] is not None or view["output_tokens"] is not None:
+        bucket["reported_runs"] += 1
+        # per-field sums: a half-reported row (possible only in crafted
+        # or legacy data — the sanitizer always reports both or neither)
+        # must not fabricate a measured 0 for its missing side
+        if view["input_tokens"] is not None:
+            bucket["input_tokens"] = (bucket["input_tokens"] or 0) \
+                + view["input_tokens"]
+        if view["output_tokens"] is not None:
+            bucket["output_tokens"] = (bucket["output_tokens"] or 0) \
+                + view["output_tokens"]
+    if view["cost_low"] is not None:
+        bucket["priced_runs"] += 1
+        bucket["cost_low"] = round((bucket["cost_low"] or 0.0)
+                                   + view["cost_low"], 6)
+        if view["cost_high"] is not None:
+            bucket["cost_high"] = round((bucket["cost_high"] or 0.0)
+                                        + view["cost_high"], 6)
+
+
+def _cost_views(rows: list[dict], limit: int = MAX_COST_RUNS) -> dict:
+    """Spend per run and spend per backend — the single owner of this
+    shape *and* of the window rule, shared by both storage backends so
+    the SQL and JSON paths cannot drift (the rule ``_telemetry_assemble``
+    follows for ``/api/metrics``).
+
+    Newest first, bounded by ``limit``; ordering is a total order
+    (``updated_at`` then ``id``, both descending), and the cut happens
+    BEFORE aggregation, so every aggregate covers exactly the window
+    ``spend_per_run`` shows. ``DbStorage.cost_views`` pre-cuts in SQL as
+    an optimization only — re-sorting and re-cutting those rows here is
+    a no-op.
+
+    Dollars are ADR-014 *display-only* estimates derived from stored
+    usage: nothing here prices anything at runtime, and nothing here
+    influences routing.
+    """
+    ordered = sorted(rows,
+                     key=lambda r: (str(r.get("updated_at") or ""),
+                                    str(r.get("id") or "")),
+                     reverse=True)[:max(0, int(limit))]
+    views = [_cost_run_row(r) for r in ordered]
+
+    by_backend: dict[str, dict] = {}
+    totals = _cost_bucket()
+    for view in views:
+        bucket = by_backend.setdefault(view["provider"], _cost_bucket())
+        _cost_accumulate(bucket, view)
+        _cost_accumulate(totals, view)
+    return {"spend_per_run": views, "spend_by_backend": by_backend,
+            "totals": totals}
+
+
 def _top_counter(pairs, n: int | None = None) -> dict:
     """Deterministic stand-in for ``Counter.most_common`` (V3-E04-T05).
 
@@ -1081,6 +1190,52 @@ class DbStorage(DbFeedbackMixin):
             if row is None or not row.payload:
                 return None
             return dict(row.payload)
+
+    # ------------------------------------------- V4.0-E07-T04 cost views
+    def cost_views(self, limit: int = MAX_COST_RUNS) -> dict:
+        """Spend per run and per backend over the stored telemetry rows.
+
+        Additive read on a ``CAP_TELEMETRY`` backend: nothing is written,
+        updated or deleted. Newest-first and cut in SQL to ``limit`` over
+        the same total order ``_cost_views`` sorts by, so this backend and
+        the JSON one return the identical dict. ``payload`` is read only
+        to reach the display-only cost block — usage and tokens come from
+        the scalar columns, which is what keeps "unreported" a NULL
+        instead of a 0.
+        """
+        from sqlalchemy import func, select
+
+        from .models_db import TelemetryRow
+
+        limit = max(0, int(limit))
+        with self.Session() as session:
+            rows = session.execute(
+                select(TelemetryRow.id, TelemetryRow.repo,
+                       TelemetryRow.pr_number, TelemetryRow.provider,
+                       TelemetryRow.model, TelemetryRow.usage_state,
+                       TelemetryRow.input_tokens, TelemetryRow.output_tokens,
+                       TelemetryRow.updated_at, TelemetryRow.payload)
+                # coalesce so the SQL order matches Python's ``or ""``
+                # fallback exactly (Postgres would otherwise sort NULLs
+                # first on DESC and hand this backend different rows).
+                .order_by(func.coalesce(TelemetryRow.updated_at, "").desc(),
+                          TelemetryRow.id.desc())
+                .limit(limit)).all()
+
+        normalized: list[dict] = []
+        for row in rows:
+            payload = row.payload if isinstance(row.payload, dict) else {}
+            cost = payload.get("cost")
+            normalized.append({
+                "id": row.id, "repo": row.repo, "pr_number": row.pr_number,
+                "provider": row.provider, "model": row.model,
+                "usage_state": row.usage_state,
+                "input_tokens": row.input_tokens,
+                "output_tokens": row.output_tokens,
+                "updated_at": row.updated_at,
+                "cost": cost if isinstance(cost, dict) else None,
+            })
+        return _cost_views(normalized, limit)
 
     def get_repo_memory(self, repo: str, paths: list[str]) -> list[str]:
         from sqlalchemy import select
@@ -2010,6 +2165,40 @@ class JsonStorage(JsonFeedbackMixin):
             if item.get("id") == review_id:
                 return dict(item)
         return None
+
+    # ------------------------------------------- V4.0-E07-T04 cost views
+    def cost_views(self, limit: int = MAX_COST_RUNS) -> dict:
+        """Spend per run and per backend over the stored telemetry rows.
+
+        The JSON twin of ``DbStorage.cost_views``: the blob stores usage
+        nested under ``usage`` where the DB has scalar columns, so rows
+        are normalized to that column shape first and handed to the
+        shared ``_cost_views``, which owns both the output shape and the
+        newest-``limit`` window rule — one shape, one window, no drift
+        between backends. Read-only.
+        """
+        limit = max(0, int(limit))
+        with self._lock:
+            items = self._read_memory_rows(self._telemetry_file()) or []
+
+        normalized: list[dict] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            usage = item.get("usage") if isinstance(item.get("usage"),
+                                                     dict) else {}
+            cost = item.get("cost")
+            normalized.append({
+                "id": item.get("id"), "repo": item.get("repo"),
+                "pr_number": item.get("pr_number"),
+                "provider": item.get("provider"), "model": item.get("model"),
+                "usage_state": str(usage.get("state", "n/a")),
+                "input_tokens": usage.get("input_tokens"),
+                "output_tokens": usage.get("output_tokens"),
+                "updated_at": item.get("updated_at"),
+                "cost": cost if isinstance(cost, dict) else None,
+            })
+        return _cost_views(normalized, limit)
 
     def _write_memory_rows(self, p: Path, items: list) -> None:
         tmp = p.with_suffix(".tmp")

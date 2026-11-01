@@ -586,6 +586,14 @@ async function renderMetrics() {
   try { m = await api("/api/metrics"); }
   catch (e) { app.innerHTML = emptyState("Couldn't load metrics", e.message); return; }
 
+  /* V4.0-E07-T04: additive cost views — an older server (404) or a
+     backend without the telemetry capability (501) degrades to an empty
+     object, so this page renders exactly as it did before the endpoint
+     existed. Never fails the metrics view. */
+  let costViews = {};
+  try { costViews = await api("/api/cost/views"); }
+  catch (e) { costViews = {}; }
+
   const healthCls = m.avg_health_score >= 90 ? "grade-a-plus" : m.avg_health_score >= 70 ? "grade-b" : "grade-d";
 
   /* V3-E02-T05: additive telemetry block — guarded so a dashboard
@@ -601,6 +609,50 @@ async function renderMetrics() {
   Object.entries(tel.by_repo || {}).forEach(([repo, v]) => {
     repoTotals[repo] = (v.input_tokens || 0) + (v.output_tokens || 0);
   });
+
+  /* V4.0-E07-T04: only well-formed cost-view shapes reach the DOM.
+     ``null`` tokens/dollars mean "never reported/priced" — they are kept
+     as absence and labelled, never turned into a measured 0. */
+  const cv = (costViews && typeof costViews === "object") ? costViews : {};
+  const byBackend = (cv.spend_by_backend && typeof cv.spend_by_backend === "object")
+    ? cv.spend_by_backend : {};
+  const perRun = Array.isArray(cv.spend_per_run) ? cv.spend_per_run : [];
+  const fmtTok = (v) => Number(v) >= 1000
+    ? `${(Number(v) / 1000).toFixed(Number(v) >= 10000 ? 0 : 1)}k`
+    : String(Number(v));
+  const backendTotals = {};
+  const backendMissing = [];
+  Object.entries(byBackend).forEach(([name, b]) => {
+    if (b && (b.input_tokens != null || b.output_tokens != null)) {
+      backendTotals[name] = (Number(b.input_tokens) || 0) + (Number(b.output_tokens) || 0);
+    } else {
+      backendMissing.push(name);
+    }
+  });
+  const maxRunTokens = Math.max(1, ...perRun.map((r) => (
+    r && (r.input_tokens != null || r.output_tokens != null)
+      ? (Number(r.input_tokens) || 0) + (Number(r.output_tokens) || 0) : 0)));
+  const perRunRows = perRun.map((r) => {
+    const row = (r && typeof r === "object") ? r : {};
+    const reported = row.input_tokens != null || row.output_tokens != null;
+    const tokens = reported
+      ? (Number(row.input_tokens) || 0) + (Number(row.output_tokens) || 0) : 0;
+    const priced = row.cost_low != null;
+    const money = priced
+      ? `$${Number(row.cost_low).toFixed(4)}–$${Number(
+          row.cost_high != null ? row.cost_high : row.cost_low).toFixed(4)}`
+      : "";
+    const value = reported
+      ? `${tokens.toLocaleString()} tok${money ? ` · ${money}` : ""}`
+      : (money ? `${money} · not reported` : "not reported");
+    const where = `${row.repo || "?"}#${Number(row.pr_number) || 0}`;
+    return `
+    <div class="bar-row">
+      <span class="bar-label" style="width:auto;flex:1 1 auto;min-width:90px" title="${esc(String(row.id || ""))}">${esc(where)} · ${esc(row.provider || "unknown")}</span>
+      <span class="bar-track" style="flex:0 0 70px">${reported ? `<span class="bar-fill" style="width:${(tokens / maxRunTokens) * 100}%;background:var(--accent)"></span>` : ""}</span>
+      <span class="bar-value" style="width:auto;flex:0 0 auto;white-space:nowrap">${esc(value)}</span>
+    </div>`;
+  }).join("");
 
   app.innerHTML = `
     <div class="stat-grid">
@@ -638,16 +690,34 @@ async function renderMetrics() {
         <div class="stat-tile"><div class="num">${Object.values(costStates).reduce((a, b) => a + (Number(b) || 0), 0)}</div><div class="label">Runs with cost block</div></div>
       </div>
       ${barRows(costStates, { estimated: "var(--sev-low)", unpriced: "var(--sev-medium)", unavailable: "var(--sev-info)", "n/a": "var(--sev-info)" })}
-    </div>`;
+    </div>
+    ${Object.keys(byBackend).length ? `
+    <div class="bar-block">
+      <h4>Spend by backend (input + output tokens)</h4>
+      ${barRows(backendTotals, { claude: "var(--accent)", openai: "var(--sev-low)", gemini: "#4CAF50", static: "var(--sev-info)" }, fmtTok)}
+      ${backendMissing.map((name) => `
+    <div class="bar-row">
+      <span class="bar-label">${esc(name)}</span>
+      <span class="bar-track"></span>
+      <span class="bar-value" style="width:auto;flex:0 0 auto">not reported</span>
+    </div>`).join("")}
+    </div>` : ""}
+    ${perRun.length ? `
+    <div class="bar-block">
+      <h4>Spend per run (most recent ${perRun.length})</h4>
+      ${perRunRows}
+    </div>` : ""}`;
 }
 
-function barRows(dist, colors) {
+/* Optional 3rd arg (V4.0-E07-T04): value formatter. Omitted => the exact
+   output every pre-existing call site already gets. */
+function barRows(dist, colors, fmt) {
   const max = Math.max(1, ...Object.values(dist));
   return Object.entries(dist).map(([k, v]) => `
     <div class="bar-row">
       <span class="bar-label">${esc(k)}</span>
       <span class="bar-track"><span class="bar-fill" style="width:${(v / max) * 100}%;background:${colors[k] || "var(--muted)"}"></span></span>
-      <span class="bar-value">${v}</span>
+      <span class="bar-value">${fmt ? fmt(v) : v}</span>
     </div>`).join("");
 }
 

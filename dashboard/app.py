@@ -805,6 +805,29 @@ async def get_metrics(request: Request):
     return JSONResponse(get_storage().metrics())
 
 
+# --------------------------------------- V4.0-E07-T04 · cost views (additive)
+# Deliberately a SEPARATE endpoint: extending /api/metrics would change a
+# golden-tested public payload (tests/test_dashboard_storage.py pins that
+# dict exactly). Same read auth as every other GET under /api, same local
+# posture — no network, no new surface, no writes.
+@app.get("/api/cost/views")
+async def get_cost_views(request: Request):
+    """Spend per run / per backend over stored telemetry (read-only).
+
+    Token counts are ``null`` when a run never reported usage and dollar
+    bounds are ``null`` when it carried no estimated cost — absence stays
+    absence rather than a measured 0. Dollars are ADR-014 display-only.
+    """
+    _check_reads(request)
+    from ai_pr_reviewer.storage import has_capability
+
+    storage = get_storage()
+    if not has_capability(storage, _schema().CAP_TELEMETRY):
+        raise HTTPException(501,
+                            "storage backend has no telemetry capability")
+    return JSONResponse(storage.cost_views())
+
+
 # --------------------------------------- V4.4-E05 · team/repo analytics
 # Trend/hotspot views over the aggregation-at-write projections (T01).
 # Same read auth posture as every other GET under /api — no new surface.
