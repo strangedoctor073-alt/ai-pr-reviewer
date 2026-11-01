@@ -202,7 +202,8 @@ at any time):
   `category`, `title`, `explanation`, `suggestion`, `confidence`,
   `rule_id`, `fingerprint`, `state`, `first_seen_sha`, `last_seen_sha`,
   `resolved_at`, `github_comment_id`, `verification_status`,
-  `verification_reason`, `verified_at`, `provenance_engine`,
+  `verification_reason`, `verified_at`, `verification_tier`,
+  `provenance_engine`,
   `provenance_model`, `provenance_agent`, `provenance_origin`,
   `evidence`, `provenance_sources`, `merged_fingerprints`.
   `evidence` records *why the engine believes this* (rule reference and
@@ -212,6 +213,10 @@ at any time):
   deduplication. All three are additive V4 fields: `null`/empty on
   findings produced by older state, and stripped from provider prompts by
   the lifecycle-field allowlist (the model never sees them).
+  `verification_tier` (additive, V4.2-E05) names the evidence tier that
+  decided the finding's verification status — `t0` diff coverage, `t1`
+  static re-check, `t2` observed test evidence — and is `null` for
+  findings whose verification predates the tier model.
 
 ### Configuration layering
 
