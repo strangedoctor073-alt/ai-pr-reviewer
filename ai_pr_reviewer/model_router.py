@@ -58,12 +58,25 @@ _SENSITIVE_PATH_HINTS = (
     "credential", "token",
 )
 _LARGE_PR_FILE_THRESHOLD = 30
-_REVIEW_MODE_MAX_TOKENS = {
+# V4.0-E07-T03 — the documented ``response_budget`` mapping: the Action's
+# ``review_mode`` keyword (economy | balanced | maximum | automatic) -> the
+# response token ceiling that keyword buys. ONE source of truth: the same
+# number bounds what ``build_provider`` lets a provider spend per response
+# and what a budget-ledger run reserves for the analysis task, so admission
+# can never be computed against a ceiling different from the one the call
+# actually uses. Values are FROZEN — the keyword set and its meaning are
+# pre-existing input semantics and must not change — and are pinned by
+# ``tests/test_provider_registry.py`` and ``tests/test_budget_ledger.py``.
+# ``automatic`` defers to the repository policy's mode when it names one
+# (see ``_review_mode``), else uses its own default below.
+RESPONSE_BUDGET_TOKENS = {
     "economy": 2_048,
     "balanced": 4_096,
     "maximum": 8_192,
     "automatic": 4_096,
 }
+# Pre-E07 spelling, kept as an alias so no call site or test changes.
+_REVIEW_MODE_MAX_TOKENS = RESPONSE_BUDGET_TOKENS
 
 # The backends a provider_order may name come from the provider registry
 # (``provider_registry``): ``AI_BACKENDS`` is resolved on access so it always
@@ -135,9 +148,21 @@ def _review_mode(cfg: Config, context: ReviewContext) -> str:
     mode = getattr(cfg, "review_mode", "automatic")
     policy = getattr(context, "project_rules", None)
     policy_mode = getattr(policy, "mode", "automatic")
-    if mode == "automatic" and policy_mode in _REVIEW_MODE_MAX_TOKENS:
+    if mode == "automatic" and policy_mode in RESPONSE_BUDGET_TOKENS:
         mode = policy_mode
-    return mode if mode in _REVIEW_MODE_MAX_TOKENS else "automatic"
+    return mode if mode in RESPONSE_BUDGET_TOKENS else "automatic"
+
+
+def response_budget_ceiling(cfg: Config, context: ReviewContext) -> int:
+    """V4.0-E07-T03 — the response token ceiling this run's
+    ``response_budget`` keyword buys (the documented mapping lives on
+    :data:`RESPONSE_BUDGET_TOKENS`).
+
+    Resolves ``automatic`` against the repository policy exactly the way
+    ``build_provider`` does, so the ceiling the ledger reserves and the
+    ceiling the provider is allowed to spend are the same number.
+    """
+    return RESPONSE_BUDGET_TOKENS[_review_mode(cfg, context)]
 
 
 def select_backend(cfg: Config) -> str:
@@ -310,7 +335,7 @@ def build_provider(cfg: Config, context: ReviewContext, backend: str) -> AIProvi
         "api_key": (getattr(cfg, spec.credential_field, "") if spec.credential_field
                     else "") or spec.placeholder_key,
         "model": model or spec.default_model or "",
-        "max_tokens": _REVIEW_MODE_MAX_TOKENS[review_mode],
+        "max_tokens": RESPONSE_BUDGET_TOKENS[review_mode],
         "batch_chars": getattr(cfg, "batch_chars", 80_000),
         "focus_areas": getattr(cfg, "focus_areas", None),
         "retry": RetryPolicy(),

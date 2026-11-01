@@ -271,11 +271,8 @@ def _budget_admit(cfg: Config, context, provider, *, run_id: str):
     configured. The ``budget_ledger`` flag gates the caller, not this
     function.
     """
-    # Private names on purpose: T03 documents ``_REVIEW_MODE_MAX_TOKENS``
-    # as the public ``response_budget`` mapping; the values are frozen.
     from .budget_ledger import BudgetLedger
-    from .model_router import (StaticProvider, _REVIEW_MODE_MAX_TOKENS,
-                               _review_mode)
+    from .model_router import StaticProvider, response_budget_ceiling
 
     budget = getattr(context, "context_budget", None)
     ceiling = getattr(budget, "ceiling_tokens", None)
@@ -284,8 +281,11 @@ def _budget_admit(cfg: Config, context, provider, *, run_id: str):
     ledger = BudgetLedger.for_run(run_id)
     ledger.reserve(tokens=int(ceiling),
                    reason="configured context-token ceiling")
+    # The ask is what this task will consume: context already committed
+    # plus the documented ``response_budget`` ceiling for the resolved
+    # review mode — the same number the provider is capped at.
     ask = (int(getattr(budget, "used_tokens", 0) or 0)
-           + int(_REVIEW_MODE_MAX_TOKENS[_review_mode(cfg, context)]))
+           + int(response_budget_ceiling(cfg, context)))
     if ledger.allocate("analysis", tokens=ask).granted:
         return provider, ledger, False, ()
     if isinstance(provider, StaticProvider):

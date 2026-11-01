@@ -603,3 +603,83 @@ def test_report_key_is_absent_unless_the_ledger_actually_ran(monkeypatch):
 
     unbounded = _wired(monkeypatch, ceiling=None, used=1_000, flag=True)
     assert "per_task_usage" not in reporter.finalize_report(unbounded.run())
+
+
+# ======================================================= T03 · response_budget
+from ai_pr_reviewer import model_router as router                       # noqa: E402
+from ai_pr_reviewer.config import Config                                # noqa: E402
+from ai_pr_reviewer.model_router import (build_provider,                # noqa: E402
+                                         response_budget_ceiling)
+
+#: The documented, frozen mapping. Editing this dict is a breaking change
+#: to the ``review_mode`` input's meaning — that is the point of pinning it.
+FROZEN_MAPPING = {"economy": 2_048, "balanced": 4_096,
+                  "maximum": 8_192, "automatic": 4_096}
+
+_CTX = SimpleNamespace(files=[], focus_areas=[], project_rules=None)
+
+
+def test_response_budget_mapping_is_frozen_and_complete():
+    assert router.RESPONSE_BUDGET_TOKENS == FROZEN_MAPPING
+    assert set(router.RESPONSE_BUDGET_TOKENS) == set(FROZEN_MAPPING)
+    # the pre-E07 spelling still resolves to the very same object, so no
+    # call site or test can observe a second, drifting copy
+    assert router._REVIEW_MODE_MAX_TOKENS is router.RESPONSE_BUDGET_TOKENS
+    # no input change: the default keyword set is untouched
+    assert load_config(parse_args([])).review_mode == "automatic"
+
+
+@pytest.mark.parametrize("mode,tokens", sorted(FROZEN_MAPPING.items()))
+def test_response_budget_ceiling_matches_the_documented_mapping(mode,
+                                                                tokens):
+    cfg = Config(anthropic_api_key="k", review_mode=mode)
+    assert response_budget_ceiling(cfg, _CTX) == tokens
+
+
+def test_automatic_defers_to_repository_policy_and_an_explicit_input_wins():
+    cfg = Config(anthropic_api_key="k", review_mode="automatic")
+    ctx = SimpleNamespace(project_rules=SimpleNamespace(mode="maximum"))
+    assert response_budget_ceiling(cfg, ctx) == 8_192
+
+    cfg.review_mode = "economy"                 # explicit input beats policy
+    assert response_budget_ceiling(cfg, ctx) == 2_048
+
+
+@pytest.mark.parametrize("mode", sorted(FROZEN_MAPPING))
+def test_provider_spend_cap_and_ledger_admission_share_one_mapping(mode):
+    """The ceiling a run is admitted against is the same number the
+    provider is capped at — one mapping, two consumers, no drift."""
+    cfg = Config(anthropic_api_key="k", review_mode=mode)
+    provider = build_provider(cfg, _CTX, "claude")
+    assert provider.max_tokens == response_budget_ceiling(cfg, _CTX)
+
+
+def test_admission_honours_the_documented_mode_ceiling(monkeypatch):
+    """Same run budget, same context — only the keyword differs, and the
+    admission outcome flips exactly at the documented number."""
+    cheap = _wired(monkeypatch, ceiling=8_000, used=5_000)
+    cheap.cfg.review_mode = "economy"            # ask 7_048 <= 8_000
+    granted = cheap.run()
+    assert _ptu(granted)["allocations"][0]["tokens"] == 5_000 + 2_048
+    assert granted.fallback_used is False
+    assert not any(x.startswith("budget:") for x in granted.warnings)
+
+    rich = _wired(monkeypatch, ceiling=8_000, used=5_000)
+    rich.cfg.review_mode = "maximum"             # ask 13_192 > 8_000
+    refused = rich.run()
+    assert _ptu(refused)["allocations"][0]["refused"] is True
+    assert any(x.startswith("budget: task analysis skipped")
+               for x in refused.warnings)
+    assert refused.analysis_degraded is True
+
+
+def test_readme_documents_the_mapping():
+    """Epic exit criterion: ``response_budget`` maps to *documented*
+    ceilings — a user can read the number without reading the source."""
+    flat = " ".join((ROOT / "README.md").read_text(encoding="utf-8").split())
+    assert "`response_budget`" in flat
+    assert "`RESPONSE_BUDGET_TOKENS`" in flat
+    assert "`economy` → 2048" in flat
+    assert "`balanced` → 4096" in flat
+    assert "`maximum` → 8192" in flat
+    assert "`automatic` → 4096" in flat

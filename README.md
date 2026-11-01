@@ -166,6 +166,15 @@ and a clear message. Claude defaults to `claude-sonnet-4-6`.
 | `provider_order` | — | Comma-separated AI failover order (`claude,openai`); the static engine stays the last fallback |
 | `repo_context_chars` | `12000` | Character budget for the extra repository context described below; `0` disables it |
 
+`review_mode` — the roadmap's `response_budget` — selects a **documented
+response token ceiling**: `economy` → 2048, `balanced` → 4096, `maximum` →
+8192, `automatic` → 4096 unless repository policy names another keyword.
+One mapping (`RESPONSE_BUDGET_TOKENS`) both caps what a provider may spend
+per response and, when the budget ledger is enabled (`BUDGET_LEDGER=1`,
+default off), what a run reserves for its analysis task — so a run can never
+be admitted against a ceiling different from the one it actually spends
+under.
+
 **Outputs:** `findings_count`, `critical_count`, `report_path`, `health_score`,
 `health_grade`. A markdown digest is also written to the job's **Step Summary**;
 the example workflow uploads `review-report.json` as an artifact.
