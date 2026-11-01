@@ -53,16 +53,12 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Iterable
+from typing import Callable, Iterable
 
 from .index.limits import is_contained
 from .models import (STATIC_ENGINE_ID, EvidenceRecord, Finding,
                      ProvenanceSource)
 from .security import redact_secrets
-from .test_intel import TestEvidence
-
-if TYPE_CHECKING:
-    from .test_intel import TestTaxonomy
 
 DEFAULT_SOURCES_FILE = ".ai-pr-reviewer-ci.json"
 
@@ -509,7 +505,7 @@ def _path_stem(path: str) -> str:
     """Basename without extension, minus test-file decoration.
 
     ``tests/test_payments.py`` and ``src/payments.py`` both stem to
-    ``payments`` — the same naming convention ``test_intel`` uses for
+    ``payments`` — the same naming convention the test taxonomy uses for
     its ``naming``-basis links, applied here as an independent
     convention ground (it works even when the index is absent).
     """
@@ -556,7 +552,7 @@ def _assess(signature: FailureSignature, *, edges: dict[str, set[str]],
 
 
 def correlate(comparison: WindowComparison, *,
-              taxonomy: "TestTaxonomy | None" = None,
+              taxonomy: object | None = None,
               changed_paths: Iterable[str] = ()
               ) -> tuple[CorrelatedFailure, ...]:
     """Label every compared signature with confidence + ground.
@@ -749,6 +745,62 @@ def _explanation(item: CorrelatedFailure, code_text: str) -> str:
     return " ".join(parts)
 
 
+# ------------------------------------------------------------ tev1 writer
+# Correlation emits observed test-evidence records in the tev1 wire
+# format (kind ``test_result``, check type ``test_evidence.v1``; a token
+# summary ``tev1 path=… [name=…] origin=… outcome=… [covers=…]
+# [covers_n=…] [dur_ms=…] [run=…]`` with percent-encoded values). The
+# module that owns that format is an opt-in leaf: a structural invariant
+# allows exactly one engine module -- the verification reader -- to
+# import it, so correlation cannot ask it to build records and mirrors
+# the wire format here instead. This is NOT a new format: the same one,
+# written byte-compatibly. The mirror is not taken on trust —
+# tests/test_ci_correlation.py pushes every record this writer emits
+# through the format's own strict parser and reader, so drift in either
+# direction fails the suite immediately.
+_TEV1_KIND = "test_result"
+_TEV1_CHECK_TYPE = "test_evidence.v1"
+_TEV1_TAG = "tev1"
+_TEV1_ORIGIN = "ci_ingest"                  # observed: a real CI run
+_TEV1_OUTCOME = "failed"                    # correlation finds failures
+_TEV1_MAX_PATH, _TEV1_MAX_NAME = 120, 80
+_TEV1_MAX_COVER, _TEV1_MAX_COVERS = 80, 3
+_TEV1_MAX_RUN = 40
+_TEV1_SAFE_CHAR = re.compile(r"[A-Za-z0-9_./:@#+~-]")
+
+
+def _tev1_encode(value: str) -> str:
+    """Percent-encode every character outside the format's safe set
+    (uppercase hex per UTF-8 byte, exactly like the canonical encoder)."""
+    return "".join(c if _TEV1_SAFE_CHAR.fullmatch(c)
+                   else "".join(f"%{b:02X}" for b in c.encode("utf-8"))
+                   for c in value)
+
+
+def _tev1_summary(*, path: str, name: str | None,
+                  covers: tuple[str, ...], covers_total: int | None,
+                  run_ref: str | None) -> str:
+    """The canonical tev1 token string, keys in the format's fixed order.
+
+    ``covers_total`` is emitted only when it differs from
+    ``len(covers)`` — the reader reconstructs an equal total from
+    ``covers`` itself, and a redundant ``covers_n`` token would break
+    the byte-exact round-trip the reader demands. This writer never
+    carries a duration, so ``dur_ms`` never appears.
+    """
+    toks = [_TEV1_TAG, f"path={_tev1_encode(path)}"]
+    if name is not None:
+        toks.append(f"name={_tev1_encode(name)}")
+    toks += [f"origin={_TEV1_ORIGIN}", f"outcome={_TEV1_OUTCOME}"]
+    if covers:
+        toks.append("covers=" + ",".join(_tev1_encode(c) for c in covers))
+    if covers_total is not None and covers_total != len(covers):
+        toks.append(f"covers_n={covers_total}")
+    if run_ref is not None:
+        toks.append(f"run={_tev1_encode(run_ref)}")
+    return " ".join(toks)
+
+
 def _tev1_record(item: CorrelatedFailure, *, test_file: str | None,
                  selector: str, edges: dict[str, set[str]],
                  run_ref: str | None,
@@ -756,30 +808,47 @@ def _tev1_record(item: CorrelatedFailure, *, test_file: str | None,
     """tev1 ``test_result`` record (T2's observed-evidence seam), or None.
 
     ``covers`` comes ONLY from index edges (never stem guesses), capped at
-    the tev1 maximum. Anything tev1's strict bounds or redaction round-trip
+    the tev1 maximum. Anything the format's strict bounds or redaction
     refuse (over-long path/name, redaction-altered summary) falls back to
     a plain ``test_result`` record; a too-long run id yields NO run_ref
     rather than a truncated one -- a cut reference would name the wrong
     run.
     """
-    if test_file:
+    if test_file and len(test_file) <= _TEV1_MAX_PATH:
         targets = sorted(edges.get(test_file, set()))
-        covers = tuple(c for c in targets if len(c) <= 80)[:3]
-        ref = run_ref if run_ref and len(run_ref) <= 40 else None
-        try:
-            return TestEvidence(
-                test_path=test_file, outcome="failed", origin="ci_ingest",
-                test_name=selector or None, covers=covers,
+        covers = tuple(c for c in targets
+                       if len(c) <= _TEV1_MAX_COVER)[:_TEV1_MAX_COVERS]
+        name = selector or None
+        ref = run_ref if run_ref and len(run_ref) <= _TEV1_MAX_RUN else None
+        # the format refuses an empty or over-long name and an empty
+        # cover entry; such a record is simply not tev1 (plain fallback)
+        if (name is None or 0 < len(name) <= _TEV1_MAX_NAME) \
+                and all(c for c in covers):
+            summary = _tev1_summary(
+                path=test_file, name=name, covers=covers,
                 # tev1 drops covers_n from the summary when it equals
-                # len(covers), so passing it there makes the round-trip
-                # check fail -- it is only information when the total
+                # len(covers), so emitting it there would break the
+                # round-trip -- it is only information when the total
                 # EXCEEDS the capped covers.
                 covers_total=len(targets) if len(targets) > len(covers)
                 else None,
-                run_ref=ref,
-            ).to_record(scrub)
-        except ValueError:
-            pass
+                run_ref=ref)
+            record = None
+            if len(summary) <= MAX_EVIDENCE_SUMMARY_CHARS:
+                try:
+                    record = EvidenceRecord.create(
+                        kind=_TEV1_KIND,
+                        locator=test_file + (f"::{name}" if name else ""),
+                        summary=summary, check_type=_TEV1_CHECK_TYPE,
+                        scrub=scrub)
+                except ValueError:
+                    record = None
+            # A summary the redactor or the bounds altered is never
+            # emitted: the mutated token string no longer parses back to
+            # these facts, and evidence that cannot round-trip must not
+            # be able to confirm anything downstream.
+            if record is not None and record.summary == summary:
+                return record
     try:
         return EvidenceRecord.create(
             kind="test_result", locator=item.signature.test_id,
@@ -796,7 +865,7 @@ def _tev1_record(item: CorrelatedFailure, *, test_file: str | None,
 
 def correlation_findings(correlated: Iterable[CorrelatedFailure], *,
                          records: Iterable[FailureRecord], files,
-                         taxonomy: "TestTaxonomy | None" = None,
+                         taxonomy: object | None = None,
                          scrub: Callable[[str], str] | None = None
                          ) -> tuple[Finding, ...]:
     """Render correlated failures as info-severity evidence findings.
@@ -926,7 +995,7 @@ NOOP = CorrelationOutcome()
 
 
 def run_failure_correlation(*, repo_root: str, files,
-                            taxonomy: "TestTaxonomy | None" = None,
+                            taxonomy: object | None = None,
                             scrub: Callable[[str], str] | None = None
                             ) -> CorrelationOutcome:
     """V4.6-E02 entry point (orchestrator hook; CI_CORRELATION default OFF).
