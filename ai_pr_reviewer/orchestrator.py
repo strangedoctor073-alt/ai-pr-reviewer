@@ -250,6 +250,79 @@ def _effective_severity_threshold(cfg: Config, policy) -> str:
     return cfg.severity_threshold
 
 
+# ------------------------------------------------- V4.0-E07-T02 budget ledger
+def _budget_admit(cfg: Config, context, provider, *, run_id: str):
+    """Reserve the run's token ceiling, then admit the analysis task (E07).
+
+    Returns ``(provider, ledger, substituted, warnings)``.
+
+    The ceiling is the *configured* one — ``context_budget.ceiling_tokens``,
+    the token-equivalent sum of every prompt allocation — so nothing here
+    invents a budget the operator never set. Admission is up-front and
+    deterministic (no mid-response truncation): the analysis task asks for
+    what it will consume (context already used + the configured response
+    ceiling for this review mode), and an ask the ceiling cannot cover is
+    REFUSED before any provider is called. The refusal is loud — the
+    deterministic engine stands in and the reason becomes a run warning —
+    never a silent skip, so *committed* spend can never exceed the ceiling.
+
+    ``ledger`` is ``None`` when no finite ceiling exists: there is nothing
+    to enforce, and fabricating one would be policy the operator never
+    configured. The ``budget_ledger`` flag gates the caller, not this
+    function.
+    """
+    # Private names on purpose: T03 documents ``_REVIEW_MODE_MAX_TOKENS``
+    # as the public ``response_budget`` mapping; the values are frozen.
+    from .budget_ledger import BudgetLedger
+    from .model_router import (StaticProvider, _REVIEW_MODE_MAX_TOKENS,
+                               _review_mode)
+
+    budget = getattr(context, "context_budget", None)
+    ceiling = getattr(budget, "ceiling_tokens", None)
+    if not ceiling or int(ceiling) <= 0:
+        return provider, None, False, ()
+    ledger = BudgetLedger.for_run(run_id)
+    ledger.reserve(tokens=int(ceiling),
+                   reason="configured context-token ceiling")
+    ask = (int(getattr(budget, "used_tokens", 0) or 0)
+           + int(_REVIEW_MODE_MAX_TOKENS[_review_mode(cfg, context)]))
+    if ledger.allocate("analysis", tokens=ask).granted:
+        return provider, ledger, False, ()
+    if isinstance(provider, StaticProvider):
+        # The deterministic engine was already the plan: record the
+        # refusal (the task was unaffordable) but do not announce a skip
+        # that never happened, and do not relabel a static-only run.
+        return provider, ledger, False, ()
+    return StaticProvider(), ledger, True, ledger.skip_warnings()
+
+
+def _budget_settle(ledger, outcome) -> tuple[str, ...]:
+    """Record actual token spend against the ceiling (E07 stage three).
+
+    Only *reported* usage settles: ``n/a`` / ``unavailable`` telemetry is
+    never coerced to zero (V3-E02-T01 — a fake zero would understate spend
+    and could hide an overage). Spend above the ceiling is recorded
+    honestly as ``over_spent`` and surfaced as a warning; it never
+    rewrites the reservation made up front. Dollars are deliberately not
+    settled: the only cost figure the engine has is ADR-014's
+    display-only estimate, and pricing must not become an enforcement
+    input.
+    """
+    from .budget_ledger import LEDGER_OVER_SPENT
+
+    usage = getattr(getattr(outcome, "telemetry", None), "usage", None)
+    if usage is None or getattr(usage, "state", "") != "ok":
+        return ()
+    tokens = (int(getattr(usage, "input_tokens", 0) or 0)
+              + int(getattr(usage, "output_tokens", 0) or 0))
+    ledger.settle(tokens=tokens, task="analysis")
+    if ledger.state != LEDGER_OVER_SPENT:
+        return ()
+    return (f"budget: spend {ledger.spent_tokens} tokens exceeded the "
+            f"{ledger.reserved_tokens}-token ceiling; recorded as "
+            f"over_spent.",)
+
+
 # ------------------------------------------------------------ orchestrator ----
 
 class ReviewOrchestrator:
@@ -303,7 +376,31 @@ class ReviewOrchestrator:
         warnings.extend(_scrub(w, cfg) for w in
                         (getattr(context, "context_warnings", None) or []))
         provider = get_provider(cfg, context)
+        # --- V4.0-E07-T02: budget-ledger admission (default OFF; the
+        # flag gates this whole block). The configured ceiling is reserved
+        # up front and the analysis task admitted against it BEFORE any
+        # provider runs: a hard ceiling is enforced by refusing admission
+        # (deterministic engine stands in, loudly), never by truncating a
+        # response mid-flight.
+        ledger = None
+        budget_substituted = False
+        if getattr(cfg, "budget_ledger", False):
+            provider, ledger, budget_substituted, budget_warnings = \
+                _budget_admit(
+                    cfg, context, provider,
+                    run_id=f"{repo}:{pr.pr_number}:"
+                           f"{getattr(pr, 'head_sha', '') or 'uncommitted'}")
+            warnings.extend(_scrub(w, cfg) for w in budget_warnings)
         outcome = self._analyze(cfg, context, provider)     # V4.0-E01-T05
+        if ledger is not None:
+            # A refused analysis means no AI backend ran, so the run is a
+            # degraded one (plan §C.1 acceptance 5: budget-exhaustion
+            # drills are correctly labelled, and the SHA does not advance).
+            if budget_substituted:
+                outcome.fallback_used = True
+            warnings.extend(_scrub(w, cfg)
+                            for w in _budget_settle(ledger, outcome))
+        # --- end V4.0-E07-T02
         warnings.extend(_scrub(w, cfg) for w in outcome.warnings)
         # V4-E08-T05: THE output redaction chokepoint. Engine text crosses
         # from the provider into the pipeline right here — before
@@ -537,6 +634,14 @@ class ReviewOrchestrator:
         # leaves the key off the report entirely.
         if link_outcome is not None and link_outcome.linked_issues is not None:
             result.linked_issues = link_outcome.linked_issues
+        # V4.0-E07-T02: the budget/per-task usage section, only when the
+        # ledger ran with a finite ceiling to enforce (flag off, or an
+        # unbounded legacy diff ceiling, leaves the key off the report
+        # entirely). Counts and bounded identifiers only -- never content --
+        # so the block is safe for the report, telemetry and the dashboard
+        # (ADR-014: local-first cost accounting, no vendor endpoint).
+        if ledger is not None:
+            result.per_task_usage = ledger.to_dict()
         # V3-E02-T02: run telemetry, serialized exactly once through the
         # allowlist+redaction chokepoint. Backends without a telemetry
         # block (test doubles) report null — additive, never invented.

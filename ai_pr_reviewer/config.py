@@ -236,6 +236,15 @@ class Config:
     # issue records is a true NOOP even when ON.
     issue_linkage: bool = False
 
+    # V4.0-E07-T02: per-run budget-ledger admission/settle (the report's
+    # `per_task_usage` section + budget skip warnings). Default OFF; plain
+    # env var (BUDGET_LEDGER), deliberately not an INPUT_* action input --
+    # ON makes the configured token ceiling refuse an unaffordable analysis
+    # task and degrade the run to the deterministic engine, so enabling it
+    # is an operator decision (plan §F: default-off features switch on only
+    # with sign-off). With no finite ceiling configured it is a true NOOP.
+    budget_ledger: bool = False
+
 
 def load_config(args) -> Config:
     _warn_unknown_inputs()
@@ -310,6 +319,8 @@ def load_config(args) -> Config:
     cfg.release_intel = _bool_field(None, "RELEASE_INTEL", default=False)
     # V4.4-E04-T02: no CLI flag and no INPUT_* on purpose (see the field).
     cfg.issue_linkage = _bool_field(None, "ISSUE_LINKAGE", default=False)
+    # V4.0-E07-T02: no CLI flag and no INPUT_* on purpose (see the field).
+    cfg.budget_ledger = _bool_field(None, "BUDGET_LEDGER", default=False)
     return cfg
 
 

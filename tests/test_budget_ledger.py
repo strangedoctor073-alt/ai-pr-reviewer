@@ -5,8 +5,13 @@ ceiling (refusal instead of overspend), honest per-skip warnings, exact
 integer micro accounting, bounded counts-only serialization, and a
 read-only module (AST-enforced).
 
-T02/T03/T04 (enforcement wiring, response_budget mapping, dashboard
-view) append below as they land.
+T02: orchestrator enforcement — the ``budget_ledger`` flag, up-front
+admission of the analysis task against the configured ceiling, refusal →
+deterministic engine + warning + degraded label, settle from reported
+telemetry, and the additive ``per_task_usage`` report section.
+
+T03/T04 (response_budget mapping, dashboard view) append below as they
+land.
 
 Fixtures are deterministic synthetic ledgers; no clock, no network, no
 content — the same operations must serialize to the same bytes.
@@ -332,3 +337,269 @@ def test_budget_ledger_is_pure_accounting_with_no_side_effects():
                     "p.write_text('x')\n", "eval('1')\n"):
         assert _violations(hostile), hostile
     assert _violations("from dataclasses import dataclass\n") == []
+
+
+# ======================================================= T02 · enforcement
+from types import SimpleNamespace                                        # noqa: E402
+
+from ai_pr_reviewer import orchestrator as orch                          # noqa: E402
+from ai_pr_reviewer import reporter                                      # noqa: E402
+from ai_pr_reviewer.cli import parse_args                                # noqa: E402
+from ai_pr_reviewer.config import load_config                            # noqa: E402
+from ai_pr_reviewer.telemetry import RunTelemetry, UsageRecord           # noqa: E402
+
+#: The frozen response ceiling for the default review mode (T03 documents
+#: this mapping; ``tests/test_provider_registry.py`` pins the values).
+AUTOMATIC_MAX_TOKENS = 4_096
+
+
+def _wired(monkeypatch, *, ceiling, used, flag=True, telemetry=None):
+    """The orchestrator double, with a real ``context_budget`` attached.
+
+    ``Wired._build_context`` returns a bare namespace (the pre-E07
+    contract), so the budget the enforcement reads has to be grafted on
+    the same way a real ``build_context`` would provide it.
+    """
+    from test_orchestrator import Wired
+
+    w = Wired(monkeypatch)
+    w.cfg.budget_ledger = flag
+    if telemetry is not None:
+        w._outcome_extra["telemetry"] = telemetry
+    real_build = w._build_context
+
+    def build(pr, files, cfg, storage=None, gh=None):
+        ctx = real_build(pr, files, cfg, storage=storage, gh=gh)
+        ctx.context_budget = SimpleNamespace(ceiling_tokens=ceiling,
+                                             used_tokens=used)
+        return ctx
+
+    monkeypatch.setattr(orch, "build_context", build)
+    return w
+
+
+def _ptu(result) -> dict:
+    data = reporter.finalize_report(result)
+    assert isinstance(data.get("per_task_usage"), dict)
+    return data["per_task_usage"]
+
+
+# ------------------------------------------------------------- config flag
+def test_budget_ledger_flag_is_plain_env_default_off(monkeypatch):
+    monkeypatch.delenv("BUDGET_LEDGER", raising=False)
+    assert load_config(parse_args([])).budget_ledger is False
+
+    monkeypatch.setenv("BUDGET_LEDGER", "true")
+    assert load_config(parse_args([])).budget_ledger is True
+
+    # Deliberately NOT an action input: INPUT_* must not enable it.
+    monkeypatch.delenv("BUDGET_LEDGER", raising=False)
+    monkeypatch.setenv("INPUT_BUDGET_LEDGER", "1")
+    assert load_config(parse_args([])).budget_ledger is False
+
+    # And no CLI flag exists.
+    with pytest.raises(SystemExit):
+        parse_args(["--budget-ledger"])
+
+
+# ------------------------------------------------------------ flag off
+def test_hook_is_off_by_default_and_never_touches_the_run(monkeypatch):
+    w = _wired(monkeypatch, ceiling=24_000, used=1_000, flag=False)
+    result = w.run()
+
+    assert not any(x.startswith("budget:") for x in result.warnings)
+    assert not hasattr(result, "per_task_usage")
+    assert "per_task_usage" not in reporter.finalize_report(result)
+    assert w.log.count("analyze") == 1          # the AI provider still ran
+    assert result.engine == "claude"
+    assert result.fallback_used is False
+
+
+def test_flag_on_with_a_generous_ceiling_changes_nothing_but_the_key(
+        monkeypatch):
+    off = _wired(monkeypatch, ceiling=24_000, used=1_000, flag=False)
+    reference = off.run()
+
+    on = _wired(monkeypatch, ceiling=24_000, used=1_000, flag=True)
+    result = on.run()
+
+    assert on.log.count("analyze") == 1         # admission granted, untouched
+    assert result.engine == reference.engine
+    assert result.fallback_used is reference.fallback_used
+    assert [f.title for f in result.findings] \
+        == [f.title for f in reference.findings]
+    assert list(result.warnings) == list(reference.warnings)
+    assert result.health_score == reference.health_score
+    # the ONLY report difference is the additive key
+    assert "per_task_usage" not in reporter.finalize_report(reference)
+    assert "per_task_usage" in reporter.finalize_report(result)
+
+
+# ------------------------------------------------------------ admission
+def test_admitted_analysis_records_a_granted_allocation(monkeypatch):
+    w = _wired(monkeypatch, ceiling=24_000, used=1_000)
+    result = w.run()
+
+    ptu = _ptu(result)
+    assert ptu["allocations"] == [
+        {"task": "analysis", "tokens": 1_000 + AUTOMATIC_MAX_TOKENS,
+         "micros": None, "refused": False, "reason": ""}]
+    assert ptu["allocated"]["tokens"] <= ptu["reserved"]["tokens"]
+    assert ptu["skips"] == []
+
+
+def test_unbounded_ceiling_enforces_nothing_and_adds_no_key(monkeypatch):
+    """``batch_chars <= 0`` is the legacy "no finite ceiling" setting: the
+    feature must not invent a budget, and it must not claim it ran."""
+    w = _wired(monkeypatch, ceiling=None, used=1_000)
+    result = w.run()
+
+    assert "per_task_usage" not in reporter.finalize_report(result)
+    assert w.log.count("analyze") == 1
+    assert not any(x.startswith("budget:") for x in result.warnings)
+
+
+def test_unaffordable_analysis_is_refused_before_the_provider_runs(
+        monkeypatch):
+    """The epic's exit criterion: an expensive provider is never called, so
+    the run provably cannot commit more than its configured ceiling."""
+    w = _wired(monkeypatch, ceiling=8_000, used=7_000)   # ask 11_096 > 8_000
+    result = w.run()
+
+    assert "analyze" not in w.log               # the provider never ran
+    skips = [x for x in result.warnings if x.startswith("budget: task ")]
+    assert len(skips) == 1
+    assert skips[0].startswith("budget: task analysis skipped: "
+                               "token ceiling: ")
+    assert "of 8000 uncommitted" in skips[0]
+
+    assert result.engine == "static"
+    assert result.fallback_used is True
+    assert result.review_state == "fallback"
+    assert result.analysis_degraded is True
+    # a degraded run stores its findings but does not advance the SHA
+    assert w.storage.set_calls == []
+    assert any("last-reviewed SHA not advanced" in x
+               for x in result.warnings)
+
+    ptu = _ptu(result)
+    assert ptu["allocations"][0]["refused"] is True
+    assert ptu["allocations"][0]["tokens"] is None
+    assert ptu["allocated"]["tokens"] <= ptu["reserved"]["tokens"]
+    assert len(ptu["skips"]) == 1
+
+
+def test_static_primary_is_recorded_but_not_relabelled(monkeypatch):
+    """The deterministic engine was already the plan: the refusal still
+    lands on the record, but no skip is announced and a static-only run is
+    not upgraded to a degraded one."""
+    from ai_pr_reviewer.model_router import StaticProvider
+
+    w = _wired(monkeypatch, ceiling=8_000, used=7_000)
+    monkeypatch.setattr(orch, "get_provider",
+                        lambda cfg, context: StaticProvider())
+    result = w.run()
+
+    assert not any(x.startswith("budget: task ") for x in result.warnings)
+    assert result.fallback_used is False
+    assert result.review_state == "completed"
+    assert result.analysis_degraded is False
+
+    ptu = _ptu(result)
+    assert ptu["allocations"][0]["refused"] is True
+    # The refusal stays on the record (the ceiling really could not fund
+    # an AI analysis here) while the run announces no skip — nothing was
+    # skipped: the deterministic engine is what ran.
+    assert len(ptu["skips"]) == 1
+    assert ptu["settlements"] == []
+
+
+# --------------------------------------------------------------- settle
+def test_reported_usage_settles_against_the_ceiling(monkeypatch):
+    tel = RunTelemetry(
+        provider="claude", model="claude-test", batch_count=1,
+        usage=UsageRecord.for_call("claude", "claude-test", 5_000, 900))
+    w = _wired(monkeypatch, ceiling=24_000, used=1_000, telemetry=tel)
+    result = w.run()
+
+    ptu = _ptu(result)
+    assert ptu["state"] == "settled"
+    assert ptu["spent"] == {"tokens": 5_900, "micros": 0}
+    assert ptu["settlements"] == [
+        {"task": "analysis", "tokens": 5_900, "micros": 0}]
+    assert ptu["remaining"]["tokens"] == \
+        24_000 - (1_000 + AUTOMATIC_MAX_TOKENS)
+
+
+@pytest.mark.parametrize("state", [pytest.param("n/a", id="static"),
+                                   pytest.param("unavailable", id="silent")])
+def test_usage_that_was_never_reported_settles_nothing(monkeypatch, state):
+    """V3-E02-T01: absence is not zero — a fake zero would understate spend
+    and could hide an overage."""
+    tel = RunTelemetry(provider="claude", model="claude-test", batch_count=1,
+                       usage=UsageRecord(provider="claude", model="m",
+                                         state=state))
+    w = _wired(monkeypatch, ceiling=24_000, used=1_000, telemetry=tel)
+    result = w.run()
+
+    ptu = _ptu(result)
+    assert ptu["settlements"] == []
+    assert ptu["state"] == LEDGER_OPEN
+
+
+def test_spend_above_the_ceiling_is_recorded_and_warned(monkeypatch):
+    tel = RunTelemetry(
+        provider="claude", model="claude-test", batch_count=1,
+        usage=UsageRecord.for_call("claude", "claude-test", 500_000, 100_000))
+    w = _wired(monkeypatch, ceiling=8_000, used=1_000, telemetry=tel)
+    result = w.run()
+
+    ptu = _ptu(result)
+    assert ptu["state"] == LEDGER_OVER_SPENT
+    assert ptu["spent"]["tokens"] == 600_000
+    assert ptu["reserved"]["tokens"] == 8_000
+    assert any("exceeded the 8000-token ceiling" in x
+               for x in result.warnings)
+    # the reservation is never rewritten after the fact
+    assert ptu["allocated"]["tokens"] == 1_000 + AUTOMATIC_MAX_TOKENS
+
+
+# ------------------------------------------------------------ report shape
+def test_report_block_is_counts_and_bounded_identifiers_only(monkeypatch):
+    w = _wired(monkeypatch, ceiling=8_000, used=7_000)   # refused path
+    ptu = _ptu(w.run())
+
+    assert json.loads(json.dumps(ptu)) == ptu
+    assert set(ptu) <= {"run_id", "state", "reserved", "allocated", "spent",
+                        "remaining", "allocations", "settlements", "skips"}
+
+    strings: list[str] = []
+    others: list[object] = []
+
+    def walk(node):
+        if isinstance(node, dict):
+            for key, value in node.items():
+                strings.append(key)
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+        elif isinstance(node, str):
+            strings.append(node)
+        else:
+            others.append(node)
+
+    walk(ptu)
+    assert all(isinstance(v, (int, bool, type(None))) for v in others)
+    assert all("\n" not in s and "\r" not in s for s in strings)
+    assert max(len(s) for s in strings) <= bl.MAX_REASON_CHARS
+
+
+def test_report_key_is_absent_unless_the_ledger_actually_ran(monkeypatch):
+    """Additive-only: an off flag or an unbounded ceiling leaves the report
+    byte-identical to pre-E07."""
+    off = _wired(monkeypatch, ceiling=24_000, used=1_000, flag=False)
+    assert "per_task_usage" not in reporter.finalize_report(off.run())
+
+    unbounded = _wired(monkeypatch, ceiling=None, used=1_000, flag=True)
+    assert "per_task_usage" not in reporter.finalize_report(unbounded.run())

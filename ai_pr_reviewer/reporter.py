@@ -187,6 +187,14 @@ def finalize_report(result: ReviewResult, report_id: str | None = None) -> dict:
     _linked = getattr(result, "linked_issues", None)
     if isinstance(_linked, dict) and _linked:
         data["linked_issues"] = _linked
+    # V4.0-E07-T02: budget/per-task usage section. Attached by the
+    # orchestrator only when the ledger ran with a finite ceiling to
+    # enforce -- the key is ABSENT otherwise (additive-only: consumers
+    # must not require it; plan migration rule: features absent =>
+    # unchanged behavior).
+    _ptu = getattr(result, "per_task_usage", None)
+    if isinstance(_ptu, dict) and _ptu:
+        data["per_task_usage"] = _ptu
 
     _carry_finding_fields(result, data)
     return data
