@@ -8,4 +8,4 @@ uvicorn>=0.29
 sqlalchemy>=2.0        # SQLite out of the box; PostgreSQL via DATABASE_URL
 
 # Dev
-pytest>=8.0
+pytest>=9.1.1
