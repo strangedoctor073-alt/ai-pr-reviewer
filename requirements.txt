@@ -4,7 +4,7 @@ PyYAML>=6.0        # .ai-pr-reviewer.yml parsing (ai_pr_reviewer/rules.py)
 
 # Dashboard
 fastapi>=0.110
-uvicorn>=0.29
+uvicorn>=0.53.0
 sqlalchemy>=2.0        # SQLite out of the box; PostgreSQL via DATABASE_URL
 
 # Dev
