@@ -1,5 +1,5 @@
 # Core engine (used by the GitHub Action image)
-httpx>=0.27
+httpx>=0.28.1
 PyYAML>=6.0        # .ai-pr-reviewer.yml parsing (ai_pr_reviewer/rules.py)
 
 # Dashboard
