@@ -346,6 +346,7 @@ from ai_pr_reviewer import orchestrator as orch                          # noqa:
 from ai_pr_reviewer import reporter                                      # noqa: E402
 from ai_pr_reviewer.cli import parse_args                                # noqa: E402
 from ai_pr_reviewer.config import load_config                            # noqa: E402
+from ai_pr_reviewer.context import BUDGET_OK, ContextBudgetReport        # noqa: E402
 from ai_pr_reviewer.telemetry import RunTelemetry, UsageRecord           # noqa: E402
 
 #: The frozen response ceiling for the default review mode (T03 documents
@@ -370,8 +371,13 @@ def _wired(monkeypatch, *, ceiling, used, flag=True, telemetry=None):
 
     def build(pr, files, cfg, storage=None, gh=None):
         ctx = real_build(pr, files, cfg, storage=storage, gh=gh)
-        ctx.context_budget = SimpleNamespace(ceiling_tokens=ceiling,
-                                             used_tokens=used)
+        # The real type: the orchestrator serializes this object into the
+        # report's additive ``context_budget`` section, so the double has to
+        # satisfy the full ``ContextBudgetReport`` contract, not just the two
+        # fields the admission check reads.
+        ctx.context_budget = ContextBudgetReport(
+            state=BUDGET_OK, ceiling_tokens=ceiling, used_tokens=used,
+            by_source=(("diff", used),))
         return ctx
 
     monkeypatch.setattr(orch, "build_context", build)

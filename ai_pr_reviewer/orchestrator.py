@@ -642,6 +642,18 @@ class ReviewOrchestrator:
         # (ADR-014: local-first cost accounting, no vendor endpoint).
         if ledger is not None:
             result.per_task_usage = ledger.to_dict()
+        # V4-E02-T05: budget usage by source category, only when the
+        # context computed a budget (build_context always does for a real
+        # run; test doubles may not) -- absent leaves the key off the
+        # report entirely. Counts-only payload by contract
+        # (ContextBudgetReport.to_dict): state, ceiling/used tokens,
+        # per-source token counts, and counts-only reasons -- never file
+        # content, so it is safe for the report, telemetry and the
+        # dashboard. `reasons` is redacted at the reporter sink like every
+        # other warning list (redaction applies per the E02-T05 contract).
+        _cb = getattr(context, "context_budget", None)
+        if _cb is not None:
+            result.context_budget = _cb.to_dict()
         # V3-E02-T02: run telemetry, serialized exactly once through the
         # allowlist+redaction chokepoint. Backends without a telemetry
         # block (test doubles) report null — additive, never invented.

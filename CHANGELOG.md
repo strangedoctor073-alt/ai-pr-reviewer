@@ -15,6 +15,11 @@ publicly as v4.5.0..v4.10.0.)
   one token-budget context ledger with a closed reason vocabulary; a
   bounded change-impact section sent to providers inside its own untrusted
   fence. Absent index => byte-identical V3 prompts.
+- **Context budget report section (E02).** The report JSON gains an
+  additive `context_budget` block — state (`ok`/`truncated`/`exhausted`),
+  ceiling/used tokens, per-source token counts and bounded reasons —
+  counts-only (never content), with `reasons` secret-redacted at the
+  run-warning chokepoint. Absent when the run computed no budget.
 - **Evidence and provenance (E04).** Findings carry `evidence[]` and
   per-source provenance; evidence is redacted at creation and
   pipeline-owned (a model cannot forge it). Rendered in the Markdown

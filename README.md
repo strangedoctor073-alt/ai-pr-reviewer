@@ -217,6 +217,15 @@ at any time):
   decided the finding's verification status — `t0` diff coverage, `t1`
   static re-check, `t2` observed test evidence — and is `null` for
   findings whose verification predates the tier model.
+- **Optional sections (additive — absent when the run did not compute
+  them; consumers must not require them)** — `context_budget`
+  (`{"state": "ok"|"truncated"|"exhausted", "ceiling_tokens",
+  "used_tokens", "by_source": {source: tokens}, "reasons": [...]}`)
+  reports how many estimated tokens each context source contributed
+  against the configured ceiling. Counts and bounded reason strings only —
+  never file content — and `reasons` is secret-redacted at the same
+  chokepoint as run warnings. The key stays off the report entirely when
+  no budget was computed.
 
 ### Configuration layering
 

@@ -195,6 +195,17 @@ def finalize_report(result: ReviewResult, report_id: str | None = None) -> dict:
     _ptu = getattr(result, "per_task_usage", None)
     if isinstance(_ptu, dict) and _ptu:
         data["per_task_usage"] = _ptu
+    # V4-E02-T05: budget usage by source category. Attached by the
+    # orchestrator only when the context computed a budget -- the key is
+    # ABSENT otherwise (additive-only: consumers must not require it).
+    # Payload is counts-only by contract; `reasons` is free text and is
+    # run through the same redaction/cap chokepoint as run warnings.
+    _cb = getattr(result, "context_budget", None)
+    if isinstance(_cb, dict) and _cb:
+        _reasons = _cb.get("reasons")
+        if isinstance(_reasons, (list, tuple)):
+            _cb = {**_cb, "reasons": sanitize_warnings(list(_reasons))}
+        data["context_budget"] = _cb
 
     _carry_finding_fields(result, data)
     return data

@@ -4,16 +4,18 @@ findings, repository memory) and the ContextBudget trim.
 """
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from ai_pr_reviewer import reporter
 from ai_pr_reviewer.config import Config
 from ai_pr_reviewer.context import ReviewContext, build_context
 from ai_pr_reviewer.diff_parser import FileDiff, Hunk, HunkLine
-from ai_pr_reviewer.models import PRContext
+from ai_pr_reviewer.models import PRContext, ReviewResult
 from ai_pr_reviewer.rules import ReviewPolicy
 
 
@@ -170,6 +172,7 @@ from ai_pr_reviewer.context import (  # noqa: E402
     CHARS_PER_TOKEN,
     MEMORY_CHARS_ALLOWANCE,
     ContextBudget,
+    ContextBudgetReport,
     _bound_memory,
     build_untrusted_impact_block,
     estimate_tokens,
@@ -443,6 +446,89 @@ def test_each_block_uses_a_fresh_nonce():
     a = build_untrusted_impact_block("one", [])
     b = build_untrusted_impact_block("one", [])
     assert a != b
+
+
+# --------------------------------------------- V4-E02-T05 · report surfacing
+
+def _budgeted_run(monkeypatch, report):
+    """A real orchestrator run whose built context carries ``report``."""
+    from test_orchestrator import Wired
+
+    from ai_pr_reviewer import orchestrator as orch
+
+    w = Wired(monkeypatch)
+    real_build = w._build_context
+
+    def build(pr, files, cfg, storage=None, gh=None):
+        ctx = real_build(pr, files, cfg, storage=storage, gh=gh)
+        ctx.context_budget = report
+        return ctx
+
+    monkeypatch.setattr(orch, "build_context", build)
+    return w
+
+
+def test_context_budget_surfaces_in_the_report_when_the_context_computed_one(
+        monkeypatch):
+    report = ContextBudgetReport(
+        state=BUDGET_TRUNCATED, ceiling_tokens=24_000, used_tokens=1_234,
+        by_source=(("diff", 800), ("repository_files", 434)),
+        reasons=("diff: hunk tail trimmed at the ceiling",))
+    data = reporter.finalize_report(_budgeted_run(monkeypatch, report).run())
+
+    cb = data["context_budget"]
+    assert cb == {
+        "state": BUDGET_TRUNCATED,
+        "ceiling_tokens": 24_000,
+        "used_tokens": 1_234,
+        "by_source": {"diff": 800, "repository_files": 434},
+        "reasons": ["diff: hunk tail trimmed at the ceiling"],
+    }
+    assert json.loads(json.dumps(data))["context_budget"] == cb
+
+
+def test_context_budget_key_is_absent_when_the_context_computed_none(
+        monkeypatch):
+    from test_orchestrator import Wired
+
+    # The bare test context has no context_budget attribute at all: the
+    # additive-only contract keeps the key off the report entirely.
+    w = Wired(monkeypatch)
+    assert "context_budget" not in reporter.finalize_report(w.run())
+
+
+def test_context_budget_report_section_carries_no_content(tmp_path, monkeypatch):
+    ctx = _ctx(tmp_path, monkeypatch)
+    result = ReviewResult(pr=_pr())
+    result.context_budget = ctx.context_budget.to_dict()
+
+    blob = json.dumps(reporter.finalize_report(result))
+    for entry in ctx.repo_context:
+        assert entry.content.strip()[:20] not in blob
+    for path in ("lib/api.py", "lib/web.py"):
+        assert path not in blob
+
+
+def test_context_budget_reasons_pass_the_redaction_chokepoint():
+    token = "ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789"
+    result = ReviewResult(pr=_pr())
+    result.context_budget = {
+        "state": BUDGET_OK, "ceiling_tokens": 100, "used_tokens": 10,
+        "by_source": {"diff": 10},
+        "reasons": [f"memory: rotate {token} after the run"],
+    }
+    cb = reporter.finalize_report(result)["context_budget"]
+    assert token not in cb["reasons"][0]
+    assert "[REDACTED]" in cb["reasons"][0]
+
+    # The native ContextBudgetReport shape carries a tuple of reasons; it
+    # must take the same redaction path and land as a JSON-safe list.
+    result.context_budget = {**result.context_budget,
+                             "reasons": (f"memory: rotate {token}",)}
+    cb = reporter.finalize_report(result)["context_budget"]
+    assert isinstance(cb["reasons"], list)
+    assert token not in cb["reasons"][0]
+    assert "[REDACTED]" in cb["reasons"][0]
 
 
 # ------------------------------------------------------------------- helpers
