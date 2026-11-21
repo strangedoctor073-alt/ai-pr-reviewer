@@ -133,6 +133,10 @@ def test_package_json_sections_scopes_and_lines():
     '{"dependencies": {"ok": 1, "bad name!": "1.0", "fine": "1.0"}}',
     "[" * 5000, '{"dependencies": {"a": "' + "x" * 100_000 + '"}}',
     "\x00\x01\x02", '{"dependencies": {"a": "1.0"}} trailing',
+], ids=[
+    "empty", "not-json", "array", "null", "open-brace", "deps-not-object",
+    "bad-name-key", "deep-nesting-5k", "value-100k", "control-bytes",
+    "trailing-junk",
 ])
 def test_package_json_hostile_input_never_raises(text):
     res = parse_manifest_text("package.json", text)
@@ -144,6 +148,11 @@ def test_package_json_hostile_input_never_raises(text):
     "", "\x00" * 100, "===\n--\n@@@\n[[[\n", "a" * 200_000,
     "pkg[unclosed>=1\n", "-\n-e\n-r\n", "x==\n==1\n", "\\\n" * 500,
     "pkg ; \n" * 50, "é==1\n", "pkg @ \n",
+], ids=[
+    "empty", "nul-bytes-100", "noise-blocks", "filler-200k",
+    "unclosed-bracket", "flag-like-lines", "empty-version",
+    "backslash-lines-500", "blank-pkg-lines-50", "non-ascii",
+    "dangling-at",
 ])
 def test_pip_fuzz_lite_never_raises_and_stays_bounded(text):
     res = parse_manifest_text("requirements.txt", text)

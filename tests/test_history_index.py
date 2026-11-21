@@ -393,7 +393,11 @@ def test_hostile_repo_config_cannot_run_a_program(tmp_path):
     prove the hardening flags are what keeps today's build inert."""
     repo = make_repo(tmp_path, CRAFTED)
     marker = tmp_path / "pwned"
-    prog = f"{sys.executable} -c \"open(r'{marker}', 'w').write('x')\""
+    # Forward slashes: git rejects config values containing backslashes with
+    # "bad config line", which would make the fixture unparseable on Windows
+    # and quietly skip the hardening this tripwire exists to exercise.
+    prog = (f"{Path(sys.executable).as_posix()} -c "
+            f"\"open(r'{marker.as_posix()}', 'w').write('x')\"")
     cfg = repo / ".git" / "config"
     cfg.write_text(cfg.read_text() + (
         f"\n[core]\n\tfsmonitor = {prog}\n\tpager = {prog}\n"
