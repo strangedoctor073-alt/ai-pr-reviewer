@@ -134,13 +134,13 @@ dependency incomplete) · 🔵 In progress · ✅ Complete.
 |------|------|--------|------------|---------------------|-------|
 | V4-C0 | contracts & planning | ✅ Complete | **5/5 tickets** | — | ADR-022 adoption checkpoint · ADR-005 reconciliation · context contract (ADR-017) · evaluation metrics · ADR-004 approval (all ratified 2026-10-07) |
 | V4-E01 | repository index | ✅ Complete | **6/6 tickets** | V3-E01…V3-E06 (✅) | Ephemeral per-run index (supersedes the persistent-storage outline; ADR-022 review recorded 2026-10-07) |
-| V4-E02 | context engine v2 | ✅ Complete | **5/5 tickets** | V4-E01 | ADR-017 approved; relevance@10 gate live |
+| V4-E02 | context engine v2 | 🟡 Partially implemented | **4/5 tickets** | V4-E01 | ADR-017 approved; relevance@10 gate live; T05 partial — additive `context_budget` report section shipped, harness median-token-delta clause deferred past 4.0.0 (human decision 2026-11-15) |
 | V4-E03 | change impact analysis | ✅ Complete | **4/4 tickets** | V4-E01 | |
 | V4-E04 | evidence engine & provenance | ✅ Complete | **5/5 tickets** | — (T02 blocker cleared — V3-E04-T02 shipped) | D10 report surfacing (`risk`/`verification` JSON) completed in the closeout batch |
-| V4-E05 | finding identity v2 | ✅ Complete (T05 optional — not activated) | **4/5 tickets** | V4-E04 | Layered identity per approved ADR-005 (no alias table/backfill/cutover — old T03/T04/T06 outlines rejected; rollback-to-v1 specified in the identity spec); T05 static floor stays deferred pending a human decision |
+| V4-E05 | finding identity v2 | ✅ Complete (T05 optional — DEFERRED by human decision 2026-11-15) | **4/5 tickets** | V4-E04 | Layered identity per approved ADR-005 (no alias table/backfill/cutover — old T03/T04/T06 outlines rejected; rollback-to-v1 specified in the identity spec); T05 static floor (P2, optional) stays out of V4.0.0 as a deliberate scope decision |
 | V4-E06 | digital twin seed | ⏸ Deferred | — (outline dormant) | V4-E01, V4-E02 | ID reserved per the scope record — do not work |
 | V4-E07 | intelligence read contracts | ⏸ Deferred | — (outline dormant) | V4-E01, V4-E04 | ID reserved per the scope record — do not work |
-| V4-E08 | intelligence security & budgets | 🟡 Partially implemented | **6/7 tickets** | V4-E01, V4-E02 | T04 pending a human decision (sink-containment deviation ratification) |
+| V4-E08 | intelligence security & budgets | ✅ Complete | **7/7 tickets** | V4-E01, V4-E02 | T04 ratified by human decision 2026-11-15 — source-primary (`type(exc).__name__`) + sink-secondary (truncation + `redact_secrets()`), both test-pinned |
 | V4-E09 | feedback & suppression rules | ✅ Complete | **7/7 tickets** | V3-E04 | Votes + human-authored rules; authoring reachable only via the dashboard/CLI admin token |
 | V4-E10 | GitHub comment lifecycle | ✅ Complete | **5/5 tickets** | V4-E04, V4-E05 | Ownership ledger, sticky summary, additive outputs |
 | V4-E11 | evaluation, telemetry & cost | ✅ Complete | **9/9 tickets** | V3-E03 | Includes the telemetry ingestion route + engine push (debt 15) and the dashboard cost surface (debt 9) |
