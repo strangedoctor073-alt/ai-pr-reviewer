@@ -37,6 +37,8 @@ NEW_FINDING_FIELDS = [
     "provenance_sources", "evidence", "merged_fingerprints",
     # V4.2-E05 (T04): tier attribution — appended, pipeline-owned.
     "verification_tier",
+    # V4.2-E01 (T02): CWE classification — appended, AI-assignable security tag.
+    "cwe_id",
 ]
 
 

@@ -225,10 +225,12 @@ def validate_spec(spec: ProviderSpec) -> None:
 
 
 # ------------------------------------------------------------ in-tree entries
-# The three AI backends run the same shared prompt/parse pipeline, so they
-# declare the same task set including council synthesis (V4.0-E06).
+# The three AI backends run the same shared prompt/parse pipeline.
+# Council synthesis (V4.0-E06) is an internal orchestrator step, not a
+# routable task type — no backend declares it, so route_task("synthesis")
+# correctly raises ProviderRoutingError (the router cannot delegate it).
 _AI_TASKS = frozenset({TASK_REVIEW, TASK_SECURITY_REVIEW, TASK_TEST_REVIEW,
-                       TASK_ARCH_REVIEW, TASK_SYNTHESIS})
+                       TASK_ARCH_REVIEW})
 # The rule engine only has rules for the review and security scopes.
 _STATIC_TASKS = frozenset({TASK_REVIEW, TASK_SECURITY_REVIEW})
 

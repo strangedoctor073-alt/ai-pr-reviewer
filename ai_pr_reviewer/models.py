@@ -102,6 +102,9 @@ LIFECYCLE_FIELDS = (
     # V4.2-E05 (T04): tier attribution is pipeline-owned like every other
     # verification field -- model output can never claim evidence it lacks.
     "verification_tier",
+    # V4.2-E01 (T02): CWE classification is pipeline-owned; a model cannot
+    # self-assign its own CWE tag and bypass the security engine classifier.
+    "cwe_id",
 )
 
 # V4-E04 (ADR-004): evidence is a *record, not prose*. The kind set is

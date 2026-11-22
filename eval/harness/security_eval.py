@@ -47,7 +47,7 @@ SECURITY_TWIN_CORPUS: list[SecurityTwinPair] = [
         vulnerable_diff="""--- a/config.py
 +++ b/config.py
 @@ -1,1 +1,1 @@
-+API_KEY = "AKIAIOSFODNN7EXAMPLEKEY"
++API_KEY = "FAKE_AWS_KEY_PLACEHOLDER_FOR_TESTING"  # noqa: S105 — not a real key
 """,
         benign_diff="""--- a/config.py
 +++ b/config.py
