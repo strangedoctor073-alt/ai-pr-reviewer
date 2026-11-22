@@ -1194,18 +1194,18 @@ The following decisions have been identified as requiring ADRs but have not yet 
 - **Consumed by:** V4.0-E01 (planner), V4.8-E04 (workers)
 - **Related:** ADR-006 (agent architecture), ADR-014 (cost accounting)
 
-### ADR-019 (planned) — Finding relations model
+### ADR-019 — Finding relations model
 
-- **Status:** Planned ADR — not yet written
-- **Decision needed:** How relations (duplicate/caused_by/fixed_by/regression_of) attach to identity. Relations attach to (fingerprint, provenance) pairs per ADR-005. Whether relations are stored as edges or derived.
+- **Status:** Approved — 2026-11-22 (lightweight additive edge records with in-process relations)
+- **Decision:** Relations (duplicate/caused_by/fixed_by/regression_of) attach to (fingerprint, provenance) pairs as lightweight additive `FindingRelation` edge records. Relations are deterministically computed in-process from the history feed; no external graph store. The `FindingRelation` schema is append-only and frozen to prevent mutation after creation.
 - **Depends on:** V4-E05 (identity v2), V4.4-E01 (history for regression detection)
 - **Consumed by:** V4.4-E03 (relations), V4.4-E06 (historical evidence)
 - **Related:** ADR-005 (finding identity), ADR-004 (evidence model)
 
-### ADR-021 (planned) — API versioning strategy
+### ADR-021 — API versioning strategy
 
-- **Status:** Planned ADR — not yet written
-- **Decision needed:** How API versions are introduced, deprecated, and retired. `/api/v1/` is the first versioned API (V4.8-E03). Deprecation policy (headers, sunset dates, major version triggers).
+- **Status:** Approved — 2026-11-22 (lightweight additive /v1 local FastAPI routes)
+- **Decision:** Versioned API uses lightweight additive `/v1/` routes implemented as local FastAPI endpoints. `VersionedApiClient` routes to `/v1` paths. Deprecation via sunset headers. No external API gateway required — in-process FastAPI with `ReviewV1Api`, `TokenScope` for authz, and OpenAPI 3.1 spec generation.
 - **Depends on:** V4.8-E03 (versioned API), V4.8-E01 (org model for authz)
 - **Consumed by:** V4.10-E04 (IDE/CLI), V4.10-E06 (command center)
 - **Related:** ADR-009 (plugin contract), ADR-010 (multi-tenant boundary)
