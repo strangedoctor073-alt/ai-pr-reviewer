@@ -36,7 +36,7 @@ from typing import Any
 from ..models import (AnalysisOutcome, Finding, derive_provenance_source,
                       describe_provenance)
 from ..provider_registry import (TASK_ARCH_REVIEW, TASK_REVIEW,
-                                 TASK_SECURITY_REVIEW, TASK_TEST_REVIEW,
+                                 TASK_SECURITY_REVIEW, TASK_SYNTHESIS, TASK_TEST_REVIEW,
                                  TASK_TYPES)
 
 # --------------------------------------------------------------- vocabularies
@@ -59,7 +59,8 @@ INPUT_VOCAB = ("diff", "focus_areas", "project_rules", "memory_notes",
 
 #: The one output shape a specialist may declare today (additive later).
 OUTPUT_SCHEMA_ANALYSIS = "analysis-outcome-v1"
-OUTPUT_SCHEMA_VOCAB = (OUTPUT_SCHEMA_ANALYSIS,)
+OUTPUT_SCHEMA_SYNTHESIS = "synthesis-outcome-v1"
+OUTPUT_SCHEMA_VOCAB = (OUTPUT_SCHEMA_ANALYSIS, OUTPUT_SCHEMA_SYNTHESIS)
 
 #: Deterministic check families a slot declares. Descriptive metadata for
 #: labels/routing — never a branch condition (the static rule engine picks
@@ -79,6 +80,7 @@ RULE_PACKS = ("security", "python", "javascript", "shell", "test")
 NON_GOAL_GITHUB_IO = "no GitHub I/O: a specialist analyzes only, the orchestrator posts"
 NON_GOAL_STORAGE = "no direct storage or dashboard writes"
 NON_GOAL_RUNTIME_PROMPT_EDIT = "no runtime prompt or rule editing"
+NON_GOAL_FINDING_MUTATION = "no finding mutation: synthesis summarizes only, findings are pipeline-owned"
 
 _REQUIRED_NON_GOALS = (NON_GOAL_GITHUB_IO,)
 
@@ -337,11 +339,19 @@ ARCHITECTURE = SpecialistContract(
     inputs=INPUT_VOCAB,
 )
 
-#: Every built-in contract, validated at import. ``synthesis`` is absent on
-#: purpose: the registry declares that capability when its consumer ships
-#: (see ``provider_registry``), and a contract without a consumer would be
-#: a promise, not a schema.
-BUILTIN_CONTRACTS = _install((GENERALIST, SECURITY, TESTS, ARCHITECTURE))
+SYNTHESIS = SpecialistContract(
+    name="synthesis",
+    task=TASK_SYNTHESIS,
+    focus="council synthesis: coherent narrative and disagreement resolution",
+    scope="merged findings, specialist opinions, and conflict records from the council",
+    non_goals=(NON_GOAL_GITHUB_IO, NON_GOAL_STORAGE, NON_GOAL_RUNTIME_PROMPT_EDIT,
+               NON_GOAL_FINDING_MUTATION),
+    inputs=INPUT_VOCAB,
+    output_schema=OUTPUT_SCHEMA_SYNTHESIS,
+)
+
+#: Every built-in contract, validated at import (V4.0-E06).
+BUILTIN_CONTRACTS = _install((GENERALIST, SECURITY, TESTS, ARCHITECTURE, SYNTHESIS))
 
 
 def contract_names() -> tuple[str, ...]:

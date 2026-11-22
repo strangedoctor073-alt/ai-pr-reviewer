@@ -226,13 +226,9 @@ def validate_spec(spec: ProviderSpec) -> None:
 
 # ------------------------------------------------------------ in-tree entries
 # The three AI backends run the same shared prompt/parse pipeline, so they
-# declare the same task set. ``synthesis`` is deliberately absent: it needs an
-# output schema that does not exist yet, and a capability is declared when the
-# consumer ships, not before. The scoped review tasks describe the existing
-# pipeline run over a narrower scope; the specialist contracts that consume
-# them confirm or narrow these claims.
+# declare the same task set including council synthesis (V4.0-E06).
 _AI_TASKS = frozenset({TASK_REVIEW, TASK_SECURITY_REVIEW, TASK_TEST_REVIEW,
-                       TASK_ARCH_REVIEW})
+                       TASK_ARCH_REVIEW, TASK_SYNTHESIS})
 # The rule engine only has rules for the review and security scopes.
 _STATIC_TASKS = frozenset({TASK_REVIEW, TASK_SECURITY_REVIEW})
 

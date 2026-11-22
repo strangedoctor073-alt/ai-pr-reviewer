@@ -200,12 +200,13 @@ at any time):
   when the orchestrator did not compute them for a run.
 - **Every finding row** — `file`, `line`, `end_line`, `severity`,
   `category`, `title`, `explanation`, `suggestion`, `confidence`,
-  `rule_id`, `fingerprint`, `state`, `first_seen_sha`, `last_seen_sha`,
+  `rule_id`, `cwe_id`, `fingerprint`, `state`, `first_seen_sha`, `last_seen_sha`,
   `resolved_at`, `github_comment_id`, `verification_status`,
   `verification_reason`, `verified_at`, `verification_tier`,
   `provenance_engine`,
   `provenance_model`, `provenance_agent`, `provenance_origin`,
   `evidence`, `provenance_sources`, `merged_fingerprints`.
+  `cwe_id` (additive, V4.2-E01) identifies the associated CWE classification for security findings.
   `evidence` records *why the engine believes this* (rule reference and
   diff hunk, secret-redacted and size-bounded); `provenance_sources` lists
   which pipeline stages contributed to the finding; `merged_fingerprints`

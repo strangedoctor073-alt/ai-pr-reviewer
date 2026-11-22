@@ -303,6 +303,21 @@ def _print_console(result: ReviewResult, report_id: str) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    args_list = sys.argv[1:] if argv is None else list(argv)
+    # V4.10-E04-T01: CLI subcommands for developer ecosystem
+    if args_list and args_list[0] in ("explain", "query", "eval"):
+        subcmd = args_list[0]
+        subargs = args_list[1:]
+        if subcmd == "explain":
+            from .cli_commands import run_explain
+            return run_explain(subargs)
+        elif subcmd == "query":
+            from .cli_commands import run_query
+            return run_query(subargs)
+        elif subcmd == "eval":
+            from .cli_commands import run_eval
+            return run_eval(subargs)
+
     args = parse_args(argv)
     cfg = load_config(args)
     merge_dashboard_rules(cfg)

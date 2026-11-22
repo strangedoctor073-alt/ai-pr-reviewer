@@ -607,6 +607,8 @@ class Finding:
     # Which evidence the verification decision rested on (t0|t1|t2;
     # None = not verified yet). Attribution only, never a fourth state.
     verification_tier: str | None = None
+    # --- V4.2-E01 T02 (additive): CWE classification ---
+    cwe_id: str | None = None
 
     def __setattr__(self, name: str, value: Any) -> None:
         """V4-E04: the scalar provenance strings are redacted, single-line
@@ -646,6 +648,8 @@ class Finding:
             # V4.2-E05-T04 (additive): tier attribution, grouped with the
             # verification fields it annotates.
             "verification_tier": self.verification_tier,
+            # V4.2-E01-T02 (additive): CWE classification
+            "cwe_id": self.cwe_id,
             # V4-E04: redacted/single-line/bounded at the report boundary
             # too (clean values pass through byte-identically): the
             # orchestrator assigns these attributes directly, so no
@@ -748,6 +752,7 @@ class Finding:
             # V4.2-E05-T04: closed vocabulary — a tampered row claiming an
             # unknown tier degrades to None instead of minting evidence.
             verification_tier=vtier if vtier in VERIFICATION_TIERS else None,
+            cwe_id=_opt_str(d.get("cwe_id")),
             provenance_engine=_safe_line(d.get("provenance_engine"),
                                          MAX_PROVENANCE_FIELD_CHARS),
             provenance_model=_safe_line(d.get("provenance_model"),
@@ -831,6 +836,8 @@ class ReviewResult:
     # already serialized by telemetry.to_telemetry_row (or None when the
     # backend produced no telemetry, e.g. pre-V3 test doubles).
     telemetry: dict | None = None
+    # V4.0-E03-T03 (append-only): conflict records from multi-specialist merge
+    conflicts: list[Any] = field(default_factory=list)
 
     def count_by_severity(self) -> dict[str, int]:
         out = {s: 0 for s in SEVERITY_ORDER}

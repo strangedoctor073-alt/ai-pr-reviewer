@@ -206,6 +206,14 @@ def finalize_report(result: ReviewResult, report_id: str | None = None) -> dict:
         if isinstance(_reasons, (list, tuple)):
             _cb = {**_cb, "reasons": sanitize_warnings(list(_reasons))}
         data["context_budget"] = _cb
+    # V4.0-E03-T03: conflict records between specialist reviewers.
+    # Attached only when specialists disagreed and conflict records exist --
+    # key is ABSENT otherwise (additive-only).
+    _conflicts = getattr(result, "conflicts", None)
+    if isinstance(_conflicts, (list, tuple)) and _conflicts:
+        data["conflicts"] = [
+            c.to_dict() if hasattr(c, "to_dict") else c for c in _conflicts
+        ]
 
     _carry_finding_fields(result, data)
     return data

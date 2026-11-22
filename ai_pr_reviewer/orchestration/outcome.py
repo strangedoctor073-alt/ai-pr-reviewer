@@ -28,6 +28,7 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from .executor import FanOutReport, TaskResult
+from .merger import merge_findings
 
 
 def _is_outcome(value: Any) -> bool:
@@ -45,10 +46,12 @@ def _unique(items) -> list:
 
 
 def _merge_completed(outcomes: list) -> Any:
-    """Combine >= 2 completed outcomes. Order = submission order."""
+    """Combine >= 2 completed outcomes using V4.0-E03 finding merger."""
     first = outcomes[0]
+    raw_findings = [f for o in outcomes for f in (o.findings or [])]
+    merge_res = merge_findings(raw_findings)
     merged = type(first)(
-        findings=[f for o in outcomes for f in (o.findings or [])],
+        findings=merge_res.findings,
         summary="\n\n".join(_unique(str(o.summary or "") for o in outcomes)),
         mode=getattr(first, "mode", ""),
         model="+".join(_unique(str(getattr(o, "model", "") or "") for o in outcomes)),
@@ -57,6 +60,8 @@ def _merge_completed(outcomes: list) -> Any:
         fallback_used=any(bool(getattr(o, "fallback_used", False)) for o in outcomes),
         batch_count=sum(int(getattr(o, "batch_count", 0) or 0) for o in outcomes),
     )
+    if merge_res.conflicts:
+        merged.conflicts = merge_res.conflicts
     telemetries = [t for t in (getattr(o, "telemetry", None) for o in outcomes) if t]
     if telemetries:
         lead = telemetries[0]

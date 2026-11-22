@@ -18,7 +18,7 @@ from ai_pr_reviewer.models import AnalysisOutcome, Finding
 from ai_pr_reviewer.model_router import StaticProvider
 from ai_pr_reviewer.orchestration.specialists import (
     ARCHITECTURE, BUILTIN_CONTRACTS, GENERALIST, INPUT_VOCAB, NON_GOAL_GITHUB_IO,
-    RULE_PACKS, SECURITY, SLOT_KINDS, TESTS, DeterministicSlot, SpecialistContract,
+    RULE_PACKS, SECURITY, SLOT_KINDS, SYNTHESIS, TESTS, DeterministicSlot, SpecialistContract,
     SpecialistContractError, contract_names, contracts_for_task, get_contract,
     validate_contract, validate_specialist_outcome)
 from ai_pr_reviewer.provider_registry import (TASK_REVIEW, TASK_SECURITY_REVIEW,
@@ -56,7 +56,7 @@ def test_builtins_cover_the_registry_tasks_the_registry_claims():
     assert contracts_for_task(TASK_SECURITY_REVIEW) == (SECURITY,)
     assert contracts_for_task("test-review") == (TESTS,)
     assert contracts_for_task("arch-review") == (ARCHITECTURE,)
-    assert contracts_for_task("synthesis") == ()     # no consumer yet
+    assert contracts_for_task("synthesis") == (SYNTHESIS,)
 
 
 def test_security_specialist_is_the_deterministic_thin_scope():
