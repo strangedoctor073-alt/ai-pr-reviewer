@@ -17,19 +17,19 @@ a re-decision. Epics referenced (`V3-E02`, `V4.0-E07`, …) live in
 |---|---|---|
 | ADR-001 | Modular monolith over microservices | Accepted (de facto) |
 | ADR-002 | Repository graph as derived deterministic index | Proposed — requires human approval before implementation |
-| ADR-003 | Memory authority model (human > evidence > AI observation) | Proposed — requires human approval before implementation |
+| ADR-003 | Memory authority model (human > evidence > AI observation) | Approved — human ratification 2026-11-22 (3-tier strict authority) |
 | ADR-004 | Evidence as first-class records with provenance | Approved — human ratification 2026-10-07 (V4-C0 staged scope) |
 | ADR-005 | Finding identity: v1 fingerprint accepted; identity v2 layered | Accepted (de facto) for v1; **Approved for v2 layered — 2026-10-07** |
 | ADR-006 | Bounded fan-out agent architecture under one orchestrator | Proposed — requires human approval before implementation |
 | ADR-007 | Provider abstraction: structural protocol as the seam | Accepted (de facto) |
-| ADR-008 | In-process pipeline first; events before queues | Accepted (de facto) / Proposed at the queue boundary |
-| ADR-009 | Plugin contract deferred to V4.8, shipped V4.10 | Proposed — requires human approval before implementation |
-| ADR-010 | Single-tenant now; multi-tenancy as a boundary, not a rewrite | Accepted (de facto) |
+| ADR-008 | In-process pipeline first; events before queues | Approved — human ratification 2026-11-22 (in-process async queue) |
+| ADR-009 | Plugin contract deferred to V4.8, shipped V4.10 | Approved — human ratification 2026-11-22 (in-process entrypoints & grants) |
+| ADR-010 | Single-tenant now; multi-tenancy as a boundary, not a rewrite | Approved — human ratification 2026-11-22 (in-process namespace org model) |
 | ADR-011 | Storage evolution behind `ReviewStorage` | Accepted (de facto) |
 | ADR-012 | Verification trust model: deterministic evidence only | Accepted (de facto) |
 | ADR-013 | Event ingestion & webhook security posture | Proposed — requires human approval before implementation |
 | ADR-014 | Local-first telemetry & cost accounting | Approved — human ratification 2026-10-06 |
-| ADR-015 | Policy evaluation placement (engine, base revision) | Accepted (de facto) / org layer Proposed |
+| ADR-015 | Policy evaluation placement (engine, base revision) | Approved — human ratification 2026-11-22 (local org policy inheritance) |
 | ADR-016 | Testing gate strategy (deterministic blocks, AI trends) | Approved — human ratification 2026-10-06 |
 | ADR-017 | Context retrieval & ranking strategy | Approved — human ratification 2026-10-07 (V4-C0) |
 | ADR-020 | CI correlation methodology | Approved — human ratification 2026-10-29 (V4.6-E02) |
